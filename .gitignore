@@ -11,6 +11,8 @@ data/*.db
 
 # Opencode managed
 .opencode/node_modules/
+.opencode/*
+.opencode/agents/
 
 # Environment / secrets
 .env
