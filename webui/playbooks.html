@@ -1,0 +1,289 @@
+<!-- Single row header with controls and filters -->
+<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
+  <h1 style="margin:0;font-size:1.3em;">Playbooks</h1>
+  <form method="get" action="/webui/playbooks" id="filter-form" style="display:flex;gap:8px;align-items:center;margin:0;">
+    <label style="font-size:0.85em;color:#666;">Type:</label>
+    <select name="file_type" id="filter-file-type" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+      <option value="">All</option>
+      <option value="core" {% if filter_type == 'core' %}selected="selected"{% endif %}>Core</option>
+      <option value="custom" {% if filter_type == 'custom' %}selected="selected"{% endif %}>Custom</option>
+    </select>
+
+    <label style="font-size:0.85em;color:#666;">Search:</label>
+    <input type="text" name="search" id="filter-search" value="{{ filter_search }}" placeholder="Filter by ID or path..." style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;width:200px;" />
+
+    <button type="button" id="apply-refresh-btn" class="btn btn-primary" style="padding:4px 10px;font-size:0.85em;">Apply &amp; Refresh</button>
+    <button type="button" id="check-all-btn" class="btn btn-success" style="padding:4px 10px;font-size:0.85em;" title="Compute SHA-256 for all listed playbooks and flag mismatches">&#9881; Check All</button>
+    {% if filter_type or filter_search %}
+    <a href="/webui/playbooks" class="btn" style="padding:4px 10px;font-size:0.85em;text-decoration:none;background:#999;color:#fff;">Clear</a>
+    {% endif %}
+  </form>
+  <div style="display:flex;gap:6px;align-items:center;margin-left:auto;">
+    <button id="reset-counters-btn" class="btn btn-danger" style="font-size:0.85em;padding:4px 10px;">Reset Counts</button>
+    <span id="reset-status" style="font-size:0.8em;color:#666;"></span>
+  </div>
+</div>
+
+<table>
+<thead><tr>
+  <th class="sortable" data-col="0">ID</th>
+  <th class="sortable" data-col="1">Playbook ID</th>
+  <th class="sortable" data-col="2">File Path</th>
+  <th class="sortable" data-col="3">Type</th>
+  <th class="sortable" data-col="4">Ver</th>
+  <th class="sortable" data-col="5">Use</th>
+  <th class="sortable" data-col="6">Err</th>
+  <th class="sortable" data-col="7">Age</th>
+  <th>DB Checksum</th>
+  <th>Status</th>
+</tr></thead>
+<tbody>
+{% for pb in playbooks %}
+<tr data-checksum="{{ pb.checksum_sha256 or '' }}" data-pb-id="{{ pb.id }}">
+  <td>{{ pb.id }}</td>
+  <td style="font-family:monospace;font-size:0.85em;">{{ pb.playbook_id or '—' }}</td>
+  <td><a class="row-link" href="/webui/playbooks/{{ pb.id }}">{{ pb.file_path }}</a></td>
+  <td><span class="badge {% if pb.file_type == 'core' %}badge-system{% else %}badge-other{% endif %}">{{ pb.file_type }}</span></td>
+  <td>{{ pb.version or '1' }}</td>
+  <td>{{ pb.usage_counter_since_update or 0 }}</td>
+  <td{% if pb.error_counter_since_update and pb.error_counter_since_update > 0 %} style="color:#f44336;font-weight:600;"{% endif %}>
+    {{ pb.error_counter_since_update or 0 }}
+  </td>
+  <td class="age-cell" data-sort="{{ pb.created_at or '' }}">{{ pb.created_at or '-' }}</td>
+  <td style="font-family:monospace;font-size:0.8em;color:#888;">{{ pb.checksum_sha256[:12] }}...</td>
+  <td class="status-cell" style="font-size:0.85em;"></td>
+</tr>
+{% else %}
+<tr><td colspan="10" style="text-align:center;color:#888;">No playbooks registered</td></tr>
+{% endfor %}
+</tbody>
+</table>
+
+<script>
+// Format ISO timestamp as relative time — uses global qrFmtRelative from base.html
+(function() {
+  document.querySelectorAll('.age-cell').forEach(function(cell) {
+    var raw = cell.getAttribute('data-sort') || cell.textContent.trim();
+    cell.textContent = qrFmtRelative(raw);
+  });
+})();
+
+// SHA-256 using crypto.subtle (browser native)
+function computeSHA256(str) {
+  if (typeof crypto !== 'undefined' && crypto.subtle && typeof crypto.subtle.digest === 'function') {
+    var bytes = new TextEncoder().encode(str);
+    return crypto.subtle.digest('SHA-256', bytes).then(function(hashBuffer) {
+      var hashArray = Array.from(new Uint8Array(hashBuffer));
+      return hashArray.map(function(b) { return b.toString(16).padStart(2, '0'); }).join('');
+    });
+  } else {
+    // Fallback: deterministic hash (not crypto-grade but consistent for comparison)
+    var hash = 0;
+    for (var i = 0; i < str.length; i++) {
+      var ch = str.charCodeAt(i);
+      hash = ((hash << 5) - hash) + ch;
+      hash = hash & hash;
+    }
+    var base = Math.abs(hash).toString(16).padStart(8, '0');
+    var h1 = '', h2 = '';
+    for (var i = 0; i < str.length; i += 3) { h1 += str.charCodeAt(i % str.length).toString(16).padStart(2, '0'); }
+    for (var i = str.length - 1; i >= 0; i -= 3) { h2 += str.charCodeAt(i % str.length).toString(16).padStart(2, '0'); }
+    return Promise.resolve((base + h1 + h2).substring(0, 64).toLowerCase());
+  }
+}
+
+// Column sorting — uses qrSettings (localStorage) for persistent state
+var ths = document.querySelectorAll('.sortable');
+
+function sortTable(col, dir) {
+  var table = document.querySelector('table');
+  if (!table) return;
+  var tbody = table.querySelector('tbody');
+  if (!tbody) return;
+  var rows = Array.from(tbody.rows);
+  rows.sort(function(a, b) {
+    var cellA = a.cells[col] ? a.cells[col].textContent.trim() : '';
+    var cellB = b.cells[col] ? b.cells[col].textContent.trim() : '';
+    // Numeric columns: ID(0), Use(5), Err(6), AGE(7)
+    if (col === 0 || col === 5 || col === 6 || col === 7) {
+      var numA = parseFloat(cellA) || 0;
+      var numB = parseFloat(cellB) || 0;
+      return dir === 'asc' ? numA - numB : numB - numA;
+    }
+    return dir === 'asc' ? cellA.localeCompare(cellB) : cellB.localeCompare(cellA);
+  });
+  rows.forEach(function(row) { tbody.appendChild(row); });
+}
+
+function applySortArrows(col, dir) {
+  ths.forEach(function(t) {
+    var c = parseInt(t.getAttribute('data-col'), 10);
+    t.textContent = t.textContent.replace(/\s*[\u2191\u2193]\s*$/, '').trim();
+    if (c === col) {
+      t.textContent = t.textContent.trim() + (dir === 'asc' ? ' \u2191' : ' \u2193');
+    }
+  });
+}
+
+// Restore saved sort state on page load
+var _sortCol = parseInt(qrSettings.get('playbooks', 'sort_col', '-1'), 10);
+var _sortDir = qrSettings.get('playbooks', 'sort_dir', '');
+if (_sortCol >= 0 && _sortDir) {
+  sortTable(_sortCol, _sortDir);
+  applySortArrows(_sortCol, _sortDir);
+}
+
+ths.forEach(function(th) {
+  th.style.cursor = 'pointer';
+  th.addEventListener('click', function() {
+    var col = parseInt(this.getAttribute('data-col'), 10);
+    var dir = qrSettings.get('playbooks', 'sort_dir', '') === 'desc' ? 'asc' : 'desc';
+    qrSettings.set('playbooks', 'sort_col', col.toString());
+    qrSettings.set('playbooks', 'sort_dir', dir);
+    sortTable(col, dir);
+    applySortArrows(col, dir);
+  });
+});
+
+// Apply & Refresh button — submits form
+var applyBtn = document.getElementById('apply-refresh-btn');
+if (applyBtn) {
+  applyBtn.addEventListener('click', function() {
+    document.getElementById('filter-form').submit();
+  });
+}
+
+// Check All button — compute SHA-256 for all listed playbooks
+var checkBtn = document.getElementById('check-all-btn');
+var cryptoOk = typeof crypto !== 'undefined' && !!crypto.subtle && typeof crypto.subtle.digest === 'function';
+if (checkBtn) {
+  if (!cryptoOk) {
+    checkBtn.disabled = true;
+    checkBtn.style.opacity = '0.5';
+    checkBtn.style.pointerEvents = 'none';
+    checkBtn.title = 'Checksum check requires crypto.subtle (HTTPS or localhost). You are on HTTP + LAN IP.';
+  }
+  checkBtn.addEventListener('click', function() {
+    var rows = document.querySelectorAll('tbody tr[data-checksum]');
+    if (rows.length === 0) { alert('No playbooks to check'); return; }
+
+    // Disable button, show progress
+    checkBtn.disabled = true;
+    checkBtn.style.pointerEvents = 'none';
+    checkBtn.textContent = 'Checking...';
+
+    var matched = 0, mismatched = 0, errors = 0;
+
+    function processRow(idx) {
+      if (idx >= rows.length) {
+        // Done — update button text with summary
+        var parts = ['Done: ' + matched + ' ok'];
+        if (mismatched > 0) parts.push(mismatched + ' mismatch');
+        if (errors > 0) parts.push(errors + ' error');
+        checkBtn.textContent = '\u2713 ' + parts.join(', ');
+        checkBtn.disabled = false;
+        checkBtn.style.pointerEvents = '';
+        // Turn button red if any mismatches found
+        if (mismatched > 0) {
+          checkBtn.style.background = '#f44336';
+        } else {
+          checkBtn.style.background = '';
+        }
+        return;
+      }
+
+      var row = rows[idx];
+      var pbId = row.getAttribute('data-pb-id');
+      var dbCk = row.getAttribute('data-checksum') || '';
+      var statusCell = row.querySelector('.status-cell');
+      if (!statusCell) { processRow(idx + 1); return; }
+
+      statusCell.textContent = 'checking...';
+      statusCell.style.color = '#999';
+
+      // Debug: log crypto availability
+      console.log('crypto.subtle available:', typeof crypto !== 'undefined' && !!crypto.subtle);
+
+      // Use fetch directly for content endpoint (needs raw Response for .text())
+       fetch(QR_API_BASE + '/playbooks/' + pbId + '/content')
+         .then(function(r) {
+           console.log('pbId=' + pbId + ' status:', r.status, 'url:', r.url);
+           return r.text();
+        })
+        .then(function(text) {
+          console.log('pbId=' + pbId + ' raw length:', text.length, 'first 100:', text.substring(0, 100));
+          try {
+            var data = JSON.parse(text);
+          } catch(e) {
+            throw new Error('JSON parse error: ' + e.message);
+          }
+          if (data && data.status === 'ok' && data.data) {
+            var content = data.data.content || '';
+            return computeSHA256(content);
+          }
+          throw new Error('API error: status=' + (data && data.status) + ' hasData=' + !!(data && data.data));
+        })
+        .then(function(computedHash) {
+          statusCell.textContent = computedHash;
+          statusCell.style.fontFamily = 'monospace';
+          statusCell.style.fontSize = '0.75em';
+
+          if (dbCk && dbCk.toLowerCase() === computedHash.toLowerCase()) {
+            statusCell.innerHTML = '<span style="color:#4caf50;">\u2713 match</span>';
+            row.style.background = '';
+            matched++;
+          } else {
+            statusCell.innerHTML = '<span style="color:#f44336;">\u26A0 mismatch</span><br><span style="font-size:0.7em;color:#f44336;">expected:' + (dbCk || 'none') + '</span>';
+            row.style.background = '#fff3cd';
+            mismatched++;
+          }
+        })
+        .catch(function(e) {
+          var errMsg = e && e.message ? e.message : String(e);
+          statusCell.innerHTML = '<span style="color:#f44336;">\u2717 ' + errMsg.substring(0, 30) + '</span>';
+          console.error('Checksum error for pbId=' + pbId + ':', errMsg);
+          errors++;
+        })
+        .then(function() {
+          processRow(idx + 1);
+        });
+    }
+
+    processRow(0);
+  });
+}
+
+// Reset counters button — clears usage and error counts for all playbooks
+var resetBtn = document.getElementById('reset-counters-btn');
+if (resetBtn) {
+  resetBtn.addEventListener('click', function() {
+    if (!confirm('Reset usage and error counts for ALL playbooks?')) return;
+    var statusEl = document.getElementById('reset-status');
+    var btn = this;
+    btn.disabled = true;
+    btn.textContent = 'Resetting...';
+    statusEl.textContent = '';
+
+    qrApi('/playbooks/reset-counters', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({})}).then(function(data) {
+if (data.status === 'ok') {
+statusEl.style.color = '#4caf50';
+statusEl.textContent = 'Counts reset for ' + (data.data.reset_count || 0) + ' playbooks.';
+setTimeout(function() { window.location.reload(); }, 1200);
+} else {
+statusEl.style.color = '#f44336';
+statusEl.textContent = 'Error: ' + (data.message || JSON.stringify(data));
+}
+btn.disabled = false;
+btn.textContent = 'Reset Counts';
+}).catch(function(e) {
+        statusEl.style.color = '#f44336';
+        statusEl.textContent = 'Request failed: ' + e;
+        btn.disabled = false;
+        btn.textContent = 'Reset Counts';
+      });
+  });
+}
+</script>

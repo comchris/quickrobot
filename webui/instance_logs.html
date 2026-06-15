@@ -1,0 +1,36 @@
+<h1>Instance Action Logs</h1>
+<a class='back-link' href='/webui/instances/{{ inst_id }}'>Back to instance</a>
+<div class="log-output" id="log-container">
+{% for entry in log_entries %}
+<div class="{% if entry.status == 'success' %}log-success{% elif entry.status == 'failed' %}log-failed{% elif entry.status == 'processing' %}log-processing{% else %}log-received{% endif %}">[{{ entry.created_at }}] {{ entry.action }} -> {{ entry.status }}: {{ entry.detail }}</div>
+{% else %}
+<div class="log-line log-processing">No logs available</div>
+{% endfor %}
+</div>
+
+<script>
+(function() {
+  var offset = {{ log_data.offset | default(0) }};
+  var limit = {{ log_data.limit | default(50) }};
+  setInterval(function() {
+    fetch('/webui/instances/{{ inst_id }}/logs?offset=' + offset + '&limit=' + limit)
+    .then(function(data) {
+    var container = document.getElementById('log-container');
+    if (!container) return;
+    var html = '';
+    (data.items || []).forEach(function(entry) {
+    var cls = '';
+    if (entry.status === 'success') cls = 'log-success';
+    else if (entry.status === 'failed') cls = 'log-failed';
+    else if (entry.status === 'processing') cls = 'log-processing';
+    else cls = 'log-received';
+    html += '<div class="log-line ' + cls + '">[' + entry.created_at + '] ' +
+    entry.action + ' -> ' + entry.status + ': ' +
+    (typeof entry.detail === 'string' ? entry.detail : JSON.stringify(entry.detail)) + '</div>';
+    });
+    container.innerHTML = html;
+    container.scrollTop = container.scrollHeight;
+    }).catch(function(e) {});
+  }, 2000);
+})();
+</script>

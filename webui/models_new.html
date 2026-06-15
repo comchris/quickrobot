@@ -1,0 +1,127 @@
+<h1 style="margin:0;font-size:1.3em;">Create Model</h1>
+<form id="model-form" style="max-width:600px;">
+  <div style="margin-bottom:12px;">
+    <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Model Name *</label>
+    <input type="text" name="name" required placeholder="e.g., llama-3.1-8b-instruct" style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+  </div>
+  <div style="margin-bottom:12px;">
+    <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Model Path (GGUF) *</label>
+    <input type="text" name="model_path" required placeholder="/mnt/llama/gguf/models/model.gguf" style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+    <small style="color:#888;">LLAMA_ARG_MODEL — the primary GGUF model file</small>
+  </div>
+  <div style="margin-bottom:12px;">
+    <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">MMPROJ Path</label>
+    <input type="text" name="mmproj_path" placeholder="/mnt/llama/gguf/models/mmproj.gguf" style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+    <small style="color:#888;">LLAMA_ARG_MMPROJ — multimodal projector (optional)</small>
+  </div>
+  <div style="margin-bottom:12px;">
+    <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Draft Model Path</label>
+    <input type="text" name="draft_model_path" placeholder="/mnt/llama/gguf/models/draft-model.gguf" style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+    <small style="color:#888;">LLAMA_ARG_SPEC_DRAFT_MODEL — Draft model for speculative decoding (optional)</small>
+  </div>
+  <div class="form-row">
+    <div class="form-group">
+      <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Quantization</label>
+      <input type="text" name="quantization" placeholder="e.g., Q4_K_M, Q8_0, F16" style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+    </div>
+    <div class="form-group">
+      <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Category</label>
+      <input type="text" name="category" list="create-category-datalist" placeholder="e.g., chat, coding, general" style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+      <datalist id="create-category-datalist">
+        {% for cat in categories or [] %}<option value="{{ cat }}">{% endfor %}
+      </datalist>
+      <small style="color:#888;">Select from existing categories or type a new one</small>
+    </div>
+  </div>
+
+  <h2 style="margin-top:20px;font-size:1em;">Model Parameters (LLAMA_ARG_*)</h2>
+  <div style="background:#f5f5f5;padding:12px;border-radius:4px;margin-bottom:12px;">
+    <p style="color:#888;font-size:0.85em;margin:0 0 8px;">JSON dict of model params. Edit in JSON view for full control.</p>
+    <button id="toggle-json-view" class="btn btn-xs" style="margin-bottom:8px;">Toggle JSON View</button>
+    <div id="form-params">
+      <div style="margin-bottom:6px;">
+        <label style="display:block;font-size:0.8em;color:#666;">LLAMA_ARG_TEMP</label>
+        <input type="text" id="param-temp" placeholder="e.g., 0.7" style="width:200px;padding:4px 8px;border:1px solid #ccc;border-radius:3px;">
+      </div>
+      <div style="margin-bottom:6px;">
+        <label style="display:block;font-size:0.8em;color:#666;">LLAMA_ARG_TOP_K</label>
+        <input type="text" id="param-topk" placeholder="e.g., 40" style="width:200px;padding:4px 8px;border:1px solid #ccc;border-radius:3px;">
+      </div>
+      <div style="margin-bottom:6px;">
+        <label style="display:block;font-size:0.8em;color:#666;">LLAMA_ARG_TOP_P</label>
+        <input type="text" id="param-topp" placeholder="e.g., 0.9" style="width:200px;padding:4px 8px;border:1px solid #ccc;border-radius:3px;">
+      </div>
+      <div style="margin-bottom:6px;">
+        <label style="display:block;font-size:0.8em;color:#666;">LLAMA_ARG_MIN_P</label>
+        <input type="text" id="param-minp" placeholder="e.g., 0.01" style="width:200px;padding:4px 8px;border:1px solid #ccc;border-radius:3px;">
+      </div>
+    </div>
+    <textarea id="json-params" rows="6" style="display:none;width:100%;font-family:monospace;font-size:0.85em;padding:8px;border:1px solid #ccc;border-radius:4px;background:#fff;">{}</textarea>
+  </div>
+
+  <button type="submit" class="btn btn-success">Create Model</button>
+  <a href="/webui/models" class="btn" style="text-decoration:none;">Cancel</a>
+</form>
+
+<script>
+(function() {
+  // Toggle form/JSON params view
+  var toggleBtn = document.getElementById('toggle-json-view');
+  var formParams = document.getElementById('form-params');
+  var jsonParams = document.getElementById('json-params');
+  if (toggleBtn) {
+    toggleBtn.addEventListener('click', function() {
+      var visible = formParams.style.display !== 'none';
+      formParams.style.display = visible ? 'none' : 'block';
+      jsonParams.style.display = visible ? 'block' : 'none';
+    });
+  }
+
+  document.querySelector('#model-form').addEventListener('submit', function(e) {
+    e.preventDefault();
+    var fd = {};
+    fd.name = this.querySelector('[name="name"]').value.trim();
+    fd.model_path = this.querySelector('[name="model_path"]').value.trim();
+    if (!fd.name || !fd.model_path) {
+      alert('Name and Model Path are required');
+      return;
+    }
+    fd.mmproj_path = this.querySelector('[name="mmproj_path"]').value.trim() || null;
+    fd.draft_model_path = this.querySelector('[name="draft_model_path"]').value.trim() || null;
+    fd.quantization = this.querySelector('[name="quantization"]').value.trim() || null;
+    fd.category = this.querySelector('[name="category"]').value.trim() || null;
+
+    // Collect model_params from form or JSON view
+    var mp = {};
+    if (formParams.style.display !== 'none') {
+      var temp = document.getElementById('param-temp').value;
+      var topk = document.getElementById('param-topk').value;
+      var topp = document.getElementById('param-topp').value;
+      var minp = document.getElementById('param-minp').value;
+      if (temp) mp["LLAMA_ARG_TEMP"] = temp;
+      if (topk) mp["LLAMA_ARG_TOP_K"] = topk;
+      if (topp) mp["LLAMA_ARG_TOP_P"] = topp;
+      if (minp) mp["LLAMA_ARG_MIN_P"] = minp;
+    } else {
+      try { mp = JSON.parse(jsonParams.value); } catch(e) { mp = {}; }
+    }
+    fd.model_params = mp;
+
+    // Default to llama_server engine_type_id=21 for global models
+    fd.engine_type_id = 21;
+
+    qrApi('/models', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(fd)
+.then(function(data) {
+if (data.status === 'ok') {
+alert('Model created');
+setTimeout(function() { window.location.href = '/webui/models'; }, 500);
+} else {
+alert('Error: ' + (data.message || 'Unknown'));
+}
+}).catch(function(e) { alert('Request failed: ' + e); });
+  });
+})();
+</script>

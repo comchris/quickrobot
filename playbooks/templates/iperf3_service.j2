@@ -1,0 +1,18 @@
+# systemd service unit for iperf3
+# QR_UUID={{ instance_uuid }}
+[Unit]
+Description=quickrobot iperf3 instance {{ instance_name }}
+After=network.target
+
+[Service]
+Type=simple
+User={{ remote_node_user | default('mepaw') }}
+WorkingDirectory=/opt/quickrobot/{{ unit_name }}
+ExecStart={{ binary_path | default('/usr/bin/iperf3') }} {{ merged_cli_opts | join(' ') | default('') }}
+Restart={{ restart_policy | default('no') }}
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,112 @@
+# @name: Update And Compile
+# @playbook_id: UPDATE_AND_COMPILE_V1
+# @version: 1
+# @timeout: 3600
+# update_and_compile.yml — Standalone git pull + cmake rebuild
+# Separated from deploy — only handles source update and compilation.
+# No service management, no env file generation.
+#
+# Usage:
+#   ansible-playbook update_and_compile.yml \
+#     --extra-vars '{"inventory_host":"host","instance_id":1,"engine_type":"llama_server"}'
+#
+# Extra vars (all used directly, no play-level defaults needed):
+#   inventory_host   (required) - target host
+#   instance_id      (required) - for logging
+#   engine_type      (optional) - llama_server or rpc
+#   skip_git_pull    (optional) - skip git pull, just rebuild
+#   skip_build       (optional) - skip cmake build
+#   node_src_dir     (required) - shared source directory path
+#   node_build_dir   (required) - shared build directory path
+#   git_pull_cmd     (optional) - custom git pull command
+#   node_build_set_cmd (optional) - cmake configure command from engine_configs
+#   node_build_run_cmd (optional) - cmake build command from engine_configs
+
+- hosts: "{{ inventory_host }}"
+  become: yes
+  gather_facts: no
+  # Only vars that DON'T self-reference: unit_name is fine since it uses
+  # instance_id and engine_type which come from extra_vars
+  vars:
+    unit_name: "qr-{{ instance_id }}-{{ engine_type }}"
+    remote_node_user: "{{ remote_node_user }}"
+
+  tasks:
+    # --- Pre-flight checks (run as root) ---
+    - name: Check if shared source is a git repo
+      stat:
+        path: "{{ node_src_dir | default('/opt/quickrobot/llama.cpp') }}/.git"
+      register: git_repo_exists
+
+    - name: Fail if not a git repository
+      fail:
+        msg: "{{ node_src_dir | default('/opt/quickrobot/llama.cpp') }} is not a git repository (no .git). Deploy first."
+      when: not git_repo_exists.stat.exists
+
+    # --- Git operations (run as remote_node_user) ---
+    - block:
+        - name: Pull latest source ({{ node_git_pull_cmd | default('git pull origin master') }})
+          shell: "{{ node_git_pull_cmd | default('git pull origin master') }}"
+          args:
+            chdir: "{{ node_src_dir | default('/opt/quickrobot/llama.cpp') }}"
+          register: git_result
+          changed_when: git_result.rc == 0
+          failed_when: false
+          when: not (skip_git_pull | default(false) | bool)
+
+        - name: Get short commit hash
+          shell: git rev-parse --short=7 HEAD
+          args:
+            chdir: "{{ node_src_dir | default('/opt/quickrobot/llama.cpp') }}"
+          register: commit_hash
+          changed_when: false
+      become_user: "{{ remote_node_user }}"
+
+    # --- CMake build phase (run as remote_node_user) ---
+    - block:
+        - name: Check no stale cmake running before build
+          shell: pgrep -x cmake || true
+          register: cmake_pgrep
+          changed_when: false
+
+        - name: Fail if cmake already running on this node
+          fail:
+            msg: "cmake is already running on this node (PID {{ cmake_pgrep.stdout }}). Wait for it to finish or kill it."
+          when: cmake_pgrep.stdout | length > 0
+
+        - name: Ensure build directory exists
+          file:
+            path: "{{ node_build_dir | default('/opt/quickrobot/llama.cpp/build') }}"
+            state: directory
+            mode: '0755'
+
+        - name: Reconfigure cmake (from node_build_set_cmd)
+          shell: "{{ node_build_set_cmd | default('cmake -B {{ node_build_dir }} -DGGML_RPC=ON -DGGML_NATIVE=ON -DGGML_CPU=ON -DLLAMA_OPENSSL=ON -DGGML_AVX2=ON -DGGML_VULKAN=ON') }}"
+          args:
+            chdir: "{{ node_src_dir | default('/opt/quickrobot/llama.cpp') }}"
+          register: cmake_configure
+          changed_when: "'-- Configuring' in cmake_configure.stdout"
+
+        - name: Build with cmake (from node_build_run_cmd)
+          shell: "{{ node_build_run_cmd | default('cmake --build {{ node_build_dir }} --config Release -j 2') }}"
+          args:
+            chdir: "{{ node_src_dir | default('/opt/quickrobot/llama.cpp') }}"
+          register: build_result
+          changed_when: false
+
+        - name: Verify new binary exists
+          stat:
+            path: "{{ node_build_dir | default('/opt/quickrobot/llama.cpp/build') }}/bin/{{ 'llama-server' if engine_type == 'llama_server' else 'rpc-server' }}"
+          register: new_binary
+
+        - name: Fail if binary not found after build
+          fail:
+            msg: "Build completed but {{ 'llama-server' if engine_type == 'llama_server' else 'rpc-server' }} not found in {{ node_build_dir | default('/opt/quickrobot/llama.cpp/build') }}/bin/"
+          when: not new_binary.stat.exists
+      become_user: "{{ remote_node_user }}"
+
+    - name: Report build result
+      debug:
+        msg: >-
+          BUILD_COMMIT={{ commit_hash.stdout }}| instance={{ instance_id }}, type={{ engine_type }},
+          git_changed={{ git_result.rc | default(0) }}

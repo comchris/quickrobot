@@ -1,0 +1,971 @@
+<h1 style="margin:0;font-size:1.3em;">Instance: {{ name }} {{ state_badge_html }}</h1>
+
+<div class="actions">
+{% for action_key, btn_label, endpoint, allowed in actions %}
+<button class="{% if allowed %}btn btn-primary{% else %}btn btn-secondary{% endif %} instance-action"
+        data-action="{{ action_key }}" data-id="{{ inst_id }}" data-enabled="{{ 1 if allowed else 0 }}"
+        {% if not allowed %}disabled style="opacity:0.4;cursor:not-allowed;"{% endif %}>
+  {{ btn_label }}
+</button>
+{% endfor %}
+<!-- Journal poll interval selector -->
+<div style="display:inline-flex;align-items:center;gap:6px;margin-left:12px;">
+  <label style="font-size:0.8em;color:#666;">Journal:</label>
+  <select id="journal-interval" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+    <option value="0">Off</option>
+    <option value="5">5s</option>
+    <option value="10">10s</option>
+    <option value="30">30s</option>
+    <option value="60">60s</option>
+  </select>
+</div>
+</div>
+
+<div class="detail-grid">
+{% for label, value in detail_items %}
+<div class="detail-card"><label>{{ label }}</label><value>{{ value }}</value></div>
+{% endfor %}
+</div>
+
+{% if presets_list %}
+<div class="detail-card" style="margin-bottom:16px;padding:16px;">
+  <label style="color:#666;font-size:0.9em;">Current Preset</label>
+  <div style="margin-bottom:12px;">
+    {% if preset_name != "No preset" %}
+      <span class="badge badge-other">{{ preset_name }} (ID {{ preset_id }})</span>
+    {% else %}
+      <span style="color:#888;">No preset assigned</span>
+    {% endif %}
+  </div>
+  <label style="color:#666;font-size:0.9em;">Change Preset</label>
+  <div style="display:flex;gap:8px;align-items:center;margin-top:4px;">
+    <select id="preset-change-select" style="width:280px;padding:7px 10px;border:1px solid #ccc;border-radius:4px;font-size:0.9em;">
+      <option value="">-- Select a different preset --</option>
+      {% for p in presets_list %}
+        <option value="{{ p.id }}" {% if p.id == preset_id %}selected{% endif %}>
+          {{ p.name }}{% if p.category and p.category != "default" %} ({{ p.category }}){% endif %}
+        </option>
+      {% endfor %}
+    </select>
+    <button id="preset-apply-btn" class="btn btn-success" disabled>Apply &amp; Restart</button>
+  </div>
+  <small style="color:#888;margin-top:8px;display:block;">
+    Applying a preset redeploys the instance with new configuration. Model loading may take up to 60 minutes.
+  </small>
+</div>
+{% endif %}
+
+{% if is_mcp %}
+<div class="detail-card" style="margin-bottom:16px;padding:16px;">
+  <label style="color:#666;font-size:0.9em;">MCP Tool Permissions</label>
+  <div style="display:flex;gap:16px;align-items:center;margin-top:8px;flex-wrap:wrap;">
+    <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+      <input type="checkbox" id="mcp-allow-reads" {% if mcp_flags.allow_reads %}checked{% endif %} onchange="mcpToggleFlag('allow_reads', this.checked)">
+      <small>Read Tools</small>
+    </label>
+    <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+      <input type="checkbox" id="mcp-allow-writes" {% if mcp_flags.allow_writes %}checked{% endif %} onchange="mcpToggleFlag('allow_writes', this.checked)">
+      <small>Write Tools</small>
+    </label>
+    <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+      <input type="checkbox" id="mcp-allow-proxy" {% if mcp_flags.allow_proxy %}checked{% endif %} onchange="mcpToggleFlag('allow_proxy', this.checked)">
+      <small>Full-API-Proxy-Mode</small>
+    </label>
+  </div>
+  <small style="color:#888;margin-top:8px;display:block;" id="mcp-flag-status"></small>
+</div>
+{% endif %}
+
+{% if is_llama %}
+<div class="detail-card" style="margin-bottom:12px;">
+  <label>Source Build</label>
+  <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">
+    <span style="color:#888;font-size:0.85em;">Build #:</span>
+    <code id="build-number" style="background:#f5f5f5;padding:2px 6px;border-radius:3px;">{{ build_number | default('N/A') }}</code>
+  </div>
+  <div style="display:flex;gap:8px;align-items:center;margin-bottom:4px;">
+    <span style="color:#888;font-size:0.85em;">Threads:</span>
+    <span style="font-size:0.85em;">{{ co_build_threads | default('2 (global default)') if co_build_threads else '2 (global default)' }}</span>
+  </div>
+</div>
+{% endif %}
+
+{# Start on boot toggle — user instances only (system-managed use engine config) #}
+{% if not is_system %}
+<div class="detail-card" style="margin-bottom:12px;">
+  <label style="color:#666;font-size:0.9em;">Start on Boot</label>
+  <div style="display:flex;gap:12px;align-items:center;margin-top:8px;">
+    <select id="sob-select" style="padding:4px 8px;border:1px solid #555;background:#2d2d2d;color:#ccc;font-size:0.85em;">
+      <option value="true">True — auto-start on API restart</option>
+      <option value="false">False — manual start required</option>
+    </select>
+    <button id="sob-save-btn" class="btn btn-xs btn-success" style="font-size:0.8em;">Save</button>
+    <span id="sob-status" style="font-size:0.8em;color:#888;display:none;"></span>
+  </div>
+</div>
+{% else %}
+<div class="detail-card" style="margin-bottom:12px;">
+  <label style="color:#666;font-size:0.9em;">Start on Boot</label>
+  <span style="color:#888;font-size:0.85em;">Managed at engine level — use the engine settings page.</span>
+</div>
+{% endif %}
+
+{% if is_llama and port and port != 'N/A' and node_name and node_name != 'unknown' %}
+<div class="detail-card" style="margin-bottom:12px;">
+  <label>LLaMA Web UI</label>
+  <value><a href="http://{{ node_name }}:{{ port }}" target="_self" class="btn btn-primary" style="text-decoration:none;padding:6px 14px;">Open LLaMA WebUI</a></value>
+</div>
+{% endif %}
+
+{% if merged_config %}
+<div class="detail-card" style="margin-bottom:16px;">
+  <label>MERGED CONFIGURATION</label>
+  <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">
+    <button id="toggle-merged-view" class="btn btn-xs" style="font-size:0.75em;">Toggle JSON / Table View</button>
+    <span style="color:#888;font-size:0.8em;" id="merge-layer-summary">loading...</span>
+  </div>
+  <div id="merged-json-view" style="margin-bottom:8px;">
+    <pre id="merged-config-json" style="background:#1e1e1e;color:#d4d4d4;padding:12px;border-radius:4px;font-family:monospace;font-size:0.8em;max-height:400px;overflow:auto;"></pre>
+  </div>
+  <div id="merged-table-view" style="display:none;">
+    <table style="font-size:0.85em;width:100%;border-collapse:collapse;">
+      <thead><tr style="border-bottom:1px solid #555;"><th style="text-align:left;padding:4px;">Key</th><th style="text-align:left;padding:4px;">Value</th><th style="text-align:left;padding:4px;">Source</th></tr></thead>
+      <tbody id="merged-config-table"></tbody>
+    </table>
+  </div>
+  <details style="margin-top:12px;">
+    <summary style="cursor:pointer;color:#aaa;font-size:0.9em;">Edit per-instance overrides</summary>
+    <div id="override-editor" style="margin-top:8px;">
+      <p style="color:#888;font-size:0.85em;margin-bottom:8px;">
+        Only keys shown here are actively overridden for this instance. Values from preset/engine defaults are NOT shown.
+      </p>
+      <div id="override-editor-body">
+        <p style="color:#666;font-size:0.85em;" id="override-empty-msg">No per-instance overrides set.</p>
+      </div>
+      <!-- Add new override form -->
+      <div id="add-override-form" style="display:flex;gap:6px;margin-top:8px;align-items:center;">
+        <select id="add-ov-key" style="width:200px;padding:3px;border:1px solid #555;background:#2d2d2d;color:#ccc;font-size:0.8em;" title="Select env/model key to override">
+          <option value="">-- Select key --</option>
+        </select>
+        <input id="add-ov-val" type="text" placeholder="Value" style="width:160px;padding:3px;border:1px solid #555;background:#2d2d2d;color:#ccc;font-size:0.8em;">
+        <button id="add-ov-btn" class="btn btn-xs" style="padding:2px 8px;font-size:0.8em;">+ Add</button>
+      </div>
+      <button id="save-overrides-btn" class="btn btn-success" style="margin-top:8px;display:none;">Save Changes</button>
+      <span id="override-save-status" style="font-size:0.8em;color:#888;margin-left:8px;display:none;"></span>
+    </div>
+  </details>
+</div>
+
+<script>
+(function() {
+  var instId = {{ inst_id }};
+  var jsonView = document.getElementById('merged-json-view');
+  var tableView = document.getElementById('merged-table-view');
+  var mergeJson = document.getElementById('merged-config-json');
+  var mergeTable = document.getElementById('merged-config-table');
+  var layerSummary = document.getElementById('merge-layer-summary');
+  var toggleBtn = document.getElementById('toggle-merged-view');
+  var overrideBody = document.getElementById('override-editor-body');
+  var saveBtn = document.getElementById('save-overrides-btn');
+  var currentData = null;
+  var clientOverrides = {};  // Track active overrides in memory for atomic updates
+  var isTable = false;
+
+  function loadMergedConfig() {
+    qrApi('/instances/' + instId + '/merged-config')
+    .then(function(d) {
+ if (d.status !== 'ok') return;
+ currentData = d.data;
+ clientOverrides = d.data && d.data.actual_overrides ? d.data.actual_overrides : {};
+ var layers = d.layer_summary && d.layer_summary.layers || [];
+ layerSummary.textContent = layers.length + ' layers merged';
+
+ // Populate add-override dropdown from merged config keys (env + model sections)
+ var addSelect = document.getElementById('add-ov-key');
+ if (addSelect) {
+   var existingOpts = addSelect.querySelectorAll('option[data-from-api="true"]');
+   existingOpts.forEach(function(o) { o.remove(); });
+   var envKeys = d.data && d.data.env ? Object.keys(d.data.env) : [];
+   var modelKeys = d.data && d.data.model ? Object.keys(d.data.model) : [];
+   // Filter out internal keys (those starting with underscore)
+   var allKeys = [].concat(envKeys, modelKeys).filter(function(k) { return k.indexOf('_') !== 0; });
+   allKeys.sort().forEach(function(k) {
+     var opt = document.createElement('option');
+     opt.value = k;
+     opt.textContent = k;
+     opt.setAttribute('data-from-api', 'true');
+     addSelect.appendChild(opt);
+   });
+ }
+
+ // JSON view
+mergeJson.textContent = JSON.stringify(d.data, null, 2);
+
+// Table view
+var rows = [];
+for (var section in d.data) {
+  if (section === '_layers') continue;
+  var items = d.data[section];
+  for (var key in items) {
+    var val = items[key];
+    if (typeof val === 'object' && val.source_layer) {
+      rows.push('<tr><td style="padding:3px;"><code>' + key + '</code></td><td style="padding:3px;"><code>' + val.value + '</code></td><td style="padding:3px;"><span class="badge badge-other" style="font-size:0.75em;">' + val.source_layer + '</span></td></tr>');
+    } else {
+      rows.push('<tr><td style="padding:3px;"><code>' + key + '</code></td><td style="padding:3px;"><code>' + val + '</code></td><td style="padding:3px;">—</td></tr>');
+    }
+  }
+}
+mergeTable.innerHTML = rows.join('');
+
+// Override editor — show ONLY active overrides (from clientOverrides)
+var ovKeys = Object.keys(clientOverrides);
+var saveStatus = document.getElementById('override-save-status');
+
+if (ovKeys.length === 0) {
+  overrideBody.innerHTML = '<p style="color:#666;font-size:0.85em;">No per-instance overrides set.</p>';
+  saveBtn.style.display = 'none';
+} else {
+  var ovRowsHtml = '';
+  for (var i = 0; i < ovKeys.length; i++) {
+    var k = ovKeys[i];
+    var v = clientOverrides[k];
+    var displayVal = typeof v === 'object' ? JSON.stringify(v) : String(v);
+    ovRowsHtml +=
+      '<div class="ov-row" style="display:flex;gap:6px;margin-bottom:4px;align-items:center;">' +
+      '<input class="ov-key" value="' + k + '" readonly style="width:170px;padding:3px;border:1px solid #555;background:#2d2d2d;color:#ccc;font-size:0.8em;" title="Key">' +
+      '<input class="ov-val" data-key="' + k + '" value="' + escapeHtml(displayVal) + '" style="flex:1;padding:3px;border:1px solid #555;background:#2d2d2d;color:#ccc;font-size:0.8em;" title="Value">' +
+      '<button class="ov-save-btn btn btn-xs" style="padding:2px 6px;font-size:0.75em;" onclick="ovSaveRow(this)" title="Save this key">OK</button>' +
+      '<button class="ov-unset-btn btn btn-xs" style="padding:2px 6px;font-size:0.75em;color:#dc3545;border-color:#dc3545;" onclick="ovUnsetRow(this)" title="Remove override">&#10005;</button>' +
+      '</div>';
+  }
+  overrideBody.innerHTML = ovRowsHtml;
+  saveBtn.style.display = 'inline-block';
+
+  // Start on boot toggle
+  var sobSel = document.getElementById('sob-select');
+  if (sobSel) {
+    var sobVal = d.data && d.data.start_on_boot;
+    if (sobVal === true || sobVal === 'true') sobSel.value = 'true';
+    else sobSel.value = 'false';
+  }
+     })
+    .catch(function(e) {
+layerSummary.textContent = 'Load error';
+console.error('Merged config load error:', e);
+  });
+  }
+
+  // Start on boot toggle handler
+  var sobSel = document.getElementById('sob-select');
+  var sobSaveBtn = document.getElementById('sob-save-btn');
+  var sobStatus = document.getElementById('sob-status');
+  if (sobSel && sobSaveBtn) {
+    sobSaveBtn.addEventListener('click', function() {
+      var val = sobSel.value;
+      sobSaveBtn.disabled = true;
+      sobSaveBtn.textContent = '...';
+      qrApi('/instances/' + instId, {
+        method: 'PUT',
+        body: JSON.stringify({ start_on_boot: val })
+      }.then(function(d) {
+        if (d.status === 'ok') {
+          sobStatus.style.display = 'inline';
+          sobStatus.textContent = 'Saved (' + val + ')';
+          sobStatus.style.color = '#28a745';
+        } else {
+          sobStatus.style.display = 'inline';
+          sobStatus.textContent = 'Error: ' + (d.message || 'unknown');
+          sobStatus.style.color = '#dc3545';
+        }
+        sobSaveBtn.disabled = false;
+        sobSaveBtn.textContent = 'Save';
+      }).catch(function(e) {
+        sobStatus.style.display = 'inline';
+        sobStatus.textContent = 'Error: ' + e.message;
+        sobStatus.style.color = '#dc3545';
+        sobSaveBtn.disabled = false;
+        sobSaveBtn.textContent = 'Save';
+      });
+    });
+  }
+
+  if (toggleBtn) {
+    toggleBtn.addEventListener('click', function() {
+ isTable = !isTable;
+ jsonView.style.display = isTable ? 'none' : 'block';
+ tableView.style.display = isTable ? 'block' : 'none';
+     });
+  }
+
+  // Escape HTML for safe attribute insertion
+  function escapeHtml(str) {
+    return String(str).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  // Add a new override key
+  var addBtn = document.getElementById('add-ov-btn');
+  if (addBtn) {
+    addBtn.addEventListener('click', function() {
+var keySel = document.getElementById('add-ov-key');
+var valInput = document.getElementById('add-ov-val');
+var key = keySel.value;
+var val = valInput.value.trim();
+if (!key) { alert('Select a key'); return; }
+if (!val) { alert('Enter a value'); return; }
+// Add to client state (will be saved on next loadMergedConfig or explicit save)
+clientOverrides[key] = val;
+var overridesToSend = JSON.stringify(clientOverrides);
+qrApi('/instances/' + instId, {
+  method: 'PUT',
+  headers: {'Content-Type': 'application/json'},
+  body: JSON.stringify({config_override: overridesToSend})
+.then(function(d) {
+  if (d.status === 'ok') {
+    loadMergedConfig();  // Refresh to show the new row
+    valInput.value = '';
+    keySel.value = '';
+  } else {
+    alert('Add failed: ' + (d.message || 'unknown'));
+  }
+})
+.catch(function(e) { console.error('Add error:', e); });
+      });
+  }
+
+  // Save a single row — update this key in clientOverrides and send single PUT
+  window.ovSaveRow = function(btn) {
+    var row = btn.closest('.ov-row');
+    var keyEl = row.querySelector('.ov-key');
+    var valEl = row.querySelector('.ov-val');
+    var key = keyEl.value;
+    var val = valEl.value;
+
+    // Update client-side state
+    clientOverrides[key] = val;
+    var overridesToSend = JSON.stringify(clientOverrides);
+
+    qrApi('/instances/' + instId, {
+method: 'PUT',
+headers: {'Content-Type': 'application/json'},
+body: JSON.stringify({config_override: overridesToSend})
+.then(function(d) {
+if (d.status === 'ok') {
+  loadMergedConfig();  // Refresh to show updated overrides
+} else {
+  alert('Save failed: ' + (d.message || 'unknown'));
+  loadMergedConfig();  // Revert on failure
+}
+    })
+    .catch(function(e) { console.error('Save error:', e); loadMergedConfig(); });
+  }
+
+  // Unset a row — remove this key from clientOverrides and send single PUT
+  window.ovUnsetRow = function(btn) {
+    var row = btn.closest('.ov-row');
+    var keyEl = row.querySelector('.ov-key');
+    var key = keyEl.value;
+
+    delete clientOverrides[key];
+    var overridesToSend = JSON.stringify(clientOverrides);
+
+    qrApi('/instances/' + instId, {
+method: 'PUT',
+headers: {'Content-Type': 'application/json'},
+body: JSON.stringify({config_override: overridesToSend})
+.then(function(d) {
+if (d.status === 'ok') {
+  loadMergedConfig();
+} else {
+  alert('Unset failed: ' + (d.message || 'unknown'));
+  loadMergedConfig();  // Revert on failure
+}
+    })
+    .catch(function(e) { console.error('Unset error:', e); loadMergedConfig(); });
+  }
+
+  // Global save-all button
+  if (saveBtn) {
+    saveBtn.addEventListener('click', function() {
+var overrides = {};
+var keyEls = overrideBody.querySelectorAll('.ov-key');
+var valEls = overrideBody.querySelectorAll('.ov-val');
+for (var i = 0; i < keyEls.length; i++) {
+  overrides[keyEls[i].value] = valEls[i].value;
+}
+qrApi('/instances/' + instId, {
+  method: 'PUT',
+  headers: {'Content-Type': 'application/json'},
+  body: JSON.stringify({config_override: JSON.stringify(overrides)})
+.then(function(d) { if (d.status === 'ok') loadMergedConfig(); })
+.catch(function(e) { console.error('Save error:', e); });
+      });
+  }
+
+  loadMergedConfig();
+})();
+</script>
+{% endif %}
+
+{% if is_universal %}
+<div class="detail-card" style="margin-bottom:16px;">
+  <label style="color:#666;font-size:0.9em;">UNIVERSAL ENGINE CONFIGURATION</label>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-top:8px;font-size:0.85em;">
+    <div><small style="color:#666;">Playbook Dir</small><br><code>{{ univ_playbook_dir | default('custom') }}</code></div>
+    <div><small style="color:#666;">Deploy Playbook</small><br><code>{{ (univ_deploy_pb | default('')) or 'skip' }}</code></div>
+    <div><small style="color:#666;">Undeploy Playbook</small><br><code>{{ (univ_undeploy_pb | default('')) or '(warn)' }}</code></div>
+    {% if univ_binary_path %}<div><small style="color:#666;">Binary Path</small><br><code style="word-break:break-all;font-size:0.85em;">{{ univ_binary_path }}</code></div>{% endif %}
+    <div><small style="color:#666;">Base Port</small><br><code>{{ univ_base_port | default(0) }}</code></div>
+    {% if univ_instant_fb %}<div><small style="color:#666;">Exec Mode</small><br><span class="badge badge-running">Sync ({{ univ_fb_timeout }}s timeout)</span></div>{% endif %}
+  </div>
+  {% if univ_start_cmd %}
+  <details style="margin-top:10px;">
+    <summary style="cursor:pointer;color:#aaa;font-size:0.9em;">Start Command</summary>
+    <pre style="background:#f5f5f5;padding:8px;border-radius:4px;margin-top:4px;font-family:monospace;font-size:0.9em;">{{ univ_start_cmd }}</pre>
+  </details>
+  {% endif %}
+  {% if univ_stop_cmd %}
+  <details style="margin-top:6px;">
+    <summary style="cursor:pointer;color:#aaa;font-size:0.9em;">Stop Command</summary>
+    <pre style="background:#f5f5f5;padding:8px;border-radius:4px;margin-top:4px;font-family:monospace;font-size:0.9em;">{{ univ_stop_cmd }}</pre>
+  </details>
+  {% endif %}
+  {% if univ_restart_cmd %}
+  <details style="margin-top:6px;">
+    <summary style="cursor:pointer;color:#aaa;font-size:0.9em;">Restart Command</summary>
+    <pre style="background:#f5f5f5;padding:8px;border-radius:4px;margin-top:4px;font-family:monospace;font-size:0.9em;">{{ univ_restart_cmd }}</pre>
+  </details>
+  {% endif %}
+  {% if univ_env_vars and univ_env_vars|length > 0 %}
+  <details style="margin-top:6px;">
+    <summary style="cursor:pointer;color:#aaa;font-size:0.9em;">ENV Vars ({{ univ_env_vars | length }})</summary>
+    <ul style="font-size:0.85em;color:#aaa;margin-top:4px;">
+      {% for k, v in univ_env_vars.items() | sort %}<li><code>{{ k }}</code> = <code>{{ v }}</code></li>{% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+  {% if univ_cli_args and univ_cli_args|length > 0 %}
+  <details style="margin-top:6px;">
+    <summary style="cursor:pointer;color:#aaa;font-size:0.9em;">CLI Args ({{ univ_cli_args | length }})</summary>
+    <ul style="font-size:0.85em;color:#aaa;margin-top:4px;">
+      {% for a in univ_cli_args %}<li>{{ a }}</li>{% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+</div>
+{% endif %}
+
+{% if is_llama %}
+<h2>Merged Config</h2>
+<div class="log-output" style="max-height:300px;">{{ config_json | default('No merged config') }}</div>
+{% endif %}
+
+{% if is_llama %}
+<div class="detail-card" style="margin-bottom:12px;max-width:400px;">
+  <label>Log Level (llama-server)</label>
+  <div style="display:flex;gap:8px;margin-top:4px;">
+    <button class="btn btn-primary log-level-btn" data-level="debug">debug</button>
+    <button class="btn btn-primary log-level-btn" data-level="info">info</button>
+    <button class="btn btn-primary log-level-btn" data-level="warn">warn</button>
+    <button class="btn btn-primary log-level-btn" data-level="error">error</button>
+  </div>
+  <script>
+  (function() {
+    var instId = {{ inst_id }};
+    document.querySelectorAll('.log-level-btn').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var level = btn.getAttribute('data-level');
+        qrApi('/instances/' + instId + '/log-level', {
+          method: 'PUT',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({level: level})
+.then(function(data) {
+if (data.status === 'ok') {
+alert('Log level set to ' + level);
+} else {
+alert('Failed: ' + (data.message || 'Unknown'));
+}
+}).catch(function(e) { alert('Error: ' + e); });
+      });
+     });
+    })();
+
+    // MCP tool permission toggles
+    function mcpToggleFlag(flag, checked) {
+      var statusEl = document.getElementById('mcp-flag-status');
+      statusEl.textContent = 'Saving...';
+      statusEl.style.color = '#666';
+      qrApi('/engines/quickrobot-mcp/settings', {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({['mcp_allow_' + flag]: checked ? 'true' : 'false'})
+      })
+    .then(function(data) {
+if (data.status === 'ok') {
+  statusEl.textContent = 'Saved ✓';
+  statusEl.style.color = '#4caf50';
+} else {
+  statusEl.textContent = 'Save failed: ' + (data.message || 'unknown error');
+  statusEl.style.color = '#f44336';
+}
+    })
+    .catch(function(err) {
+statusEl.textContent = 'Error: ' + err.message;
+statusEl.style.color = '#f44336';
+    });
+  }
+</script>
+  </div>
+{% endif %}
+
+  <!-- Systemd options for llama_server/rpc/iperf3 -->
+ {% if is_llama or engine_name == 'llama_rpc' or engine_name == 'iperf3' %}
+ <div class="detail-card" style="margin-bottom:12px;max-width:400px;">
+   <label>Systemd Options</label>
+   <div style="display:flex;flex-direction:column;gap:8px;margin-top:8px;">
+     <div style="display:flex;align-items:center;justify-content:space-between;">
+ <span style="font-size:0.9em;">Enable on boot:</span>
+ <button class="btn btn-{% if start_on_boot == True or start_on_boot == 'true' or start_on_boot == 1 %}success{% else %}secondary{% endif %}" data-id="{{ inst_id }}" data-value="{{ 'true' if (start_on_boot == True or start_on_boot == 'true' or start_on_boot == 1) else 'false' }}" style="font-size:0.75em;padding:3px 8px;">
+    {{ 'ON' if (start_on_boot == True or start_on_boot == 'true' or start_on_boot == 1) else 'OFF' }}
+  </button>
+     </div>
+     <div style="display:flex;align-items:center;justify-content:space-between;">
+ <span style="font-size:0.9em;">Restart policy:</span>
+ <select id="detail-restart-policy" data-id="{{ inst_id }}" style="padding:4px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+   {% for val in ['no','always','on-success','on-failure','on-abnormal','on-watchdog'] %}
+   <option value="{{ val }}"{% if merged_config.restart_policy == val %} selected{% endif %}>{{ val }}</option>
+   {% endfor %}
+ </select>
+     </div>
+   </div>
+   <script>
+   (function() {
+     var instId = {{ inst_id }};
+     // Restart policy dropdown save
+     var rpSelect = document.getElementById('detail-restart-policy');
+     if (rpSelect) {
+ rpSelect.addEventListener('change', function() {
+   var newVal = rpSelect.value;
+   qrApi('/instances/' + instId, {
+     method: 'PUT',
+     headers: {'Content-Type': 'application/json'},
+     body: JSON.stringify({restart_policy: newVal})
+.then(function(data) {
+  if (data.status === 'ok') {
+    rpSelect.style.borderColor = '#4caf50';
+    setTimeout(function() { rpSelect.style.borderColor = '#ccc'; }, 2000);
+  } else {
+    alert('Failed: ' + (data.message || 'Unknown'));
+  }
+}).catch(function(e) { alert('Error: ' + e); });
+       });
+     }
+   })();
+ </script>
+ </div>
+ {% endif %}
+
+ <h2>Service Logs (journalctl) <button class="btn btn-primary" id="journal-pause" style="font-size:0.8em;margin-left:12px;">Pause</button></h2>
+<div class="log-output" id="journal-log-container" style="max-height:350px;">
+  {% if journal_logs != 'No journal logs available' %}{{ journal_logs }}{% else %}No journal logs available{% endif %}
+</div>
+<script>
+(function() {
+  var instId = {{ inst_id }};
+  var journalContainer = document.getElementById('journal-log-container');
+  var pauseBtn = document.getElementById('journal-pause');
+  var paused = false;
+  var refreshInterval = null;
+
+  function fetchJournal() {
+    if (paused) return;
+    qrApi('/instances/' + instId + '/journal?lines=100')
+    .then(function(data) {
+if (!journalContainer) return;
+if (data.status === 'ok' && data.logs) {
+  var escaped = data.logs.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  journalContainer.innerHTML = '<pre style="white-space:pre-wrap;">' + escaped + '</pre>';
+  journalContainer.scrollTop = journalContainer.scrollHeight;
+}
+     }).catch(function(e) {});
+  }
+
+  function startJournalPoll(intervalSec) {
+    clearInterval(refreshInterval);
+    if (intervalSec > 0) {
+      refreshInterval = setInterval(fetchJournal, intervalSec * 1000);
+    }
+  }
+
+  // Load saved journal interval — default 10s
+  var savedInterval = parseInt(qrSettings.get('instance_detail', 'journal_interval_sec', '10'), 10);
+  startJournalPoll(savedInterval);
+
+  // Set dropdown value
+  var journalSelect = document.getElementById('journal-interval');
+  if (journalSelect) {
+    for (var i = 0; i < journalSelect.options.length; i++) {
+      if (parseInt(journalSelect.options[i].value, 10) === savedInterval) {
+        journalSelect.selectedIndex = i;
+        break;
+      }
+    }
+    journalSelect.addEventListener('change', function() {
+      var val = parseInt(this.value, 10);
+      startJournalPoll(val);
+      qrSettings.set('instance_detail', 'journal_interval_sec', val.toString());
+    });
+  }
+
+  pauseBtn.addEventListener('click', function() {
+    paused = !paused;
+    if (paused) {
+      clearInterval(refreshInterval);
+      pauseBtn.textContent = 'Resume';
+      pauseBtn.className = 'btn btn-success';
+    } else {
+      fetchJournal();
+      // Restart interval from stored setting, not hardcoded
+      var savedInterval = parseInt(qrSettings.get('instance_detail', 'journal_interval_sec', '10'), 10);
+      refreshInterval = setInterval(fetchJournal, savedInterval * 1000);
+      pauseBtn.textContent = 'Pause';
+      pauseBtn.className = 'btn btn-primary';
+    }
+  });
+
+  // Auto-stop polling when navigating away or closing tab
+  window.addEventListener('pagehide', function() {
+    if (refreshInterval) {
+      clearInterval(refreshInterval);
+      refreshInterval = null;
+    }
+    qrSettings.set('instance_detail', 'journal_paused', paused ? '1' : '0');
+  });
+
+  // Restore pause state on page load
+  var savedPause = qrSettings.get('instance_detail', 'journal_paused', '0');
+  if (savedPause === '1') {
+    paused = true;
+    clearInterval(refreshInterval);
+    refreshInterval = null;
+    pauseBtn.textContent = 'Resume';
+    pauseBtn.className = 'btn btn-success';
+  }
+
+  // Universal engine: Execute button with instant feedback modal
+  var isUniv = {{ 'true' if is_universal else 'false' }};
+  var instantFb = {{ 'true' if univ_instant_fb else 'false' }};
+  var fbTimeout = {{ univ_fb_timeout | default(30) }};
+  if (isUniv) {
+    document.querySelectorAll('.instance-action[data-action="execute"]').forEach(function(btn) {
+      btn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        var instId = this.getAttribute('data-id');
+        var modalHtml = '<div style="position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:1000;display:flex;align-items:center;justify-content:center;">' +
+          '<div style="background:#fff;border-radius:8px;padding:20px;max-width:600px;width:90%;max-height:80vh;overflow:auto;">' +
+          '<h3 style="margin-top:0;">Execute Command</h3>' +
+          '<div style="margin-bottom:10px;font-size:0.9em;color:#666;">' +
+          (instantFb ? 'Running in <strong>sync mode</strong> — will wait up to ' + fbTimeout + 's for completion.' : 'Running in <strong>async mode</strong> — execution continues in background.') +
+          '</div>' +
+          '<div id="exec-output" style="background:#f5f5f5;padding:10px;border-radius:4px;font-family:monospace;font-size:0.85em;min-height:100px;white-space:pre-wrap;"></div>' +
+          '<div style="margin-top:12px;text-align:right;">' +
+          '<button id="exec-close" class="btn btn-secondary">Close</button>' +
+          '</div></div></div>';
+
+        var modal = document.createElement('div');
+        modal.innerHTML = modalHtml;
+        document.body.appendChild(modal);
+
+        var outputEl = modal.querySelector('#exec-output');
+        outputEl.textContent = 'Executing...';
+
+        qrApi('/instances/' + instId + '/execute', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({command: '', timeout: fbTimeout})
+.then(function(data) {
+  if (data.status === 'ok') {
+    var d = data.data;
+    var lines = [];
+    if (d.success) {
+      lines.push('Exit code: ' + (d.exit_code || 0));
+      lines.push('Duration: ' + (d.duration_ms || '?') + 'ms');
+      if (d.stdout) lines.push('--- stdout ---\n' + d.stdout);
+      if (d.stderr) lines.push('--- stderr ---\n' + d.stderr);
+    } else {
+      lines.push('Error: ' + (d.error || 'Unknown error'));
+    }
+    outputEl.textContent = lines.join('\n') || 'No output';
+  } else {
+    outputEl.textContent = 'Error: ' + (data.message || JSON.stringify(data));
+  }
+}).catch(function(e) {
+            outputEl.textContent = 'Request failed: ' + e;
+          });
+
+        modal.querySelector('#exec-close').addEventListener('click', function() {
+          document.body.removeChild(modal);
+        });
+      });
+    });
+  }
+})();
+</script>
+
+<h2>Ansible Actions (Recent)</h2>
+<table>
+<thead><tr><th>Timestamp</th><th>Action</th><th>Status</th><th>Duration</th></tr></thead>
+<tbody>
+{% for entry in ansible_entries %}
+<tr class="{% if entry.status == 'failed' %}ansible-log-failed{% else %}ansible-log-{{ entry.action_type }}{% endif %}">
+  <td>{{ entry.created_at or entry.started_at }}</td>
+  <td>{{ entry.action_type }}</td>
+  <td>{{ entry.status }}</td>
+  <td>{{ '%dms'|format(entry.duration_ms) if entry.duration_ms else 'N/A' }}</td>
+</tr>
+{% else %}
+<tr><td colspan="4" style="text-align:center;color:#888;">No ansible actions for this instance</td></tr>
+{% endfor %}
+</tbody>
+</table>
+
+<h2>Action Log (Recent)</h2>
+<div class="log-output" id="detail-log">
+{% for entry in log_entries %}
+<div class="log-line {% if entry.status == 'success' %}log-success{% elif entry.status == 'failed' %}log-failed{% elif entry.status == 'processing' %}log-processing{% else %}log-received{% endif %}">[{{ entry.created_at }}] {{ entry.action }} -> {{ entry.status }}: {{ entry.detail }}</div>
+{% else %}
+<div class="log-line log-processing">No logs available</div>
+{% endfor %}
+</div>
+<script>
+(function() {
+  var offset = {{ log_data.offset | default(0) }};
+  var limit = {{ log_data.limit | default(50) }};
+  setInterval(function() {
+    fetch('/webui/instances/{{ inst_id }}/logs?offset=' + offset + '&limit=' + limit)
+    .then(function(data) {
+var container = document.getElementById('detail-log');
+if (!container) return;
+var html = '';
+(data.items || []).forEach(function(entry) {
+  var cls = '';
+  if (entry.status === 'success') cls = 'log-success';
+  else if (entry.status === 'failed') cls = 'log-failed';
+  else if (entry.status === 'processing') cls = 'log-processing';
+  else cls = 'log-received';
+  html += '<div class="log-line ' + cls + '">[' + entry.created_at + '] ' +
+          entry.action + ' -> ' + entry.status + ': ' +
+          (typeof entry.detail === 'string' ? entry.detail : JSON.stringify(entry.detail)) + '</div>';
+     });
+   container.scrollTop = container.scrollHeight;
+ }).catch(function(e) {});
+   }, {{ (polling_interval_sec | default(10)) * 1000 }});
+})();
+</script>
+
+{% if engine_name == 'iperf3' %}
+<div id="benchmark-results" style="display:none;margin-top:16px;"></div>
+<script>
+(function() {
+  var instId = {{ inst_id }};
+  var benchBtn = document.querySelector('.benchmark-btn');
+  var benchResults = document.getElementById('benchmark-results');
+
+  if (!benchBtn) return;
+
+  benchBtn.addEventListener('click', function() {
+    if (this.disabled) return;
+    this.textContent = 'Running...';
+    this.disabled = true;
+    benchBtn.className = 'btn log-processing';
+    var statusEl = document.createElement('p');
+    statusEl.className = 'log-processing';
+    statusEl.textContent = 'Deploying client, running benchmark...';
+    if (benchResults) benchResults.style.display = 'block';
+    benchResults.appendChild(statusEl);
+
+    qrApi('/instances/' + instId + '/run_client', {method: 'POST'})
+    .then(function(data) {
+if (data.status === 'ok') {
+   var d = data.data || {};
+  var throughput = d.throughput_mbits || 'N/A';
+  var duration = d.duration_seconds || 'N/A';
+  var packets = d.packets_sent || '?';
+  var loss = (d.packet_loss_pct !== undefined) ? (d.packet_loss_pct * 100).toFixed(2) : 'N/A';
+  if (benchResults) {
+    benchResults.innerHTML = '<div style="background:#f8f9fa;padding:16px;border-radius:6px;">'
+      + '<h3>Benchmark Results</h3>'
+      + '<table style="margin-top:8px;">'
+      + '<tr><td style="padding:4px 12px 4px 0;color:#666;">Duration</td><td><strong>' + duration + 's</strong></td></tr>'
+      + '<tr><td style="padding:4px 12px 4px 0;color:#666;">Throughput</td><td><strong>' + throughput + ' Mbit/s</strong></td></tr>'
+      + '<tr><td style="padding:4px 12px 4px 0;color:#666;">Packets Sent</td><td>' + packets + '</td></tr>'
+      + '<tr><td style="padding:4px 12px 4px 0;color:#666;">Packet Loss</td><td><strong>' + loss + '%</strong></td></tr>'
+      + '</table>';
+    if (d.log_excerpt) {
+      benchResults.innerHTML += '<div class="log-output" style="margin-top:12px;max-height:200px;">' + d.log_excerpt + '</div>';
+    }
+  }
+  benchBtn.textContent = 'Run Benchmark';
+  benchBtn.className = 'btn btn-success benchmark-btn';
+  setTimeout(function() { window.location.reload(); }, 3000);
+} else {
+  if (benchResults) {
+    benchResults.innerHTML = '<p style="color:#f44336;">Error: ' + (data.message || 'Unknown') + '</p>';
+  }
+  benchBtn.textContent = 'Run Benchmark';
+  benchBtn.className = 'btn btn-success benchmark-btn';
+  benchBtn.disabled = false;
+}
+    }})
+    .catch(function(e) {
+if (benchResults) {
+  benchResults.innerHTML = '<p style="color:#f44336;">Request failed: ' + e + '</p>';
+}
+benchBtn.textContent = 'Run Benchmark';
+benchBtn.className = 'btn btn-success benchmark-btn';
+benchBtn.disabled = false;
+    }});
+}})();
+</script>
+{% endif %}
+
+<script>
+(function() {
+  var isSystem = {{ 1 if is_system else 0 }};
+  document.querySelectorAll('.instance-action').forEach(function(btn) {
+      btn.addEventListener('click', function(e) {
+        var action = e.currentTarget.getAttribute('data-action');
+        var id = e.currentTarget.getAttribute('data-id');
+        if (e.currentTarget.disabled) return;
+        var actionKey = action.toLowerCase();
+        var labelMap = {
+          'undeploy': 'undeploy',
+          'start': 'start',
+          'stop': 'stop',
+          'restart': 'restart',
+          'restart-system': 'restart system',
+          'update-build': 'rebuild llama.cpp',
+          'build': 'rebuild llama.cpp'
+        };
+        var display = labelMap[actionKey] || action;
+        if (!confirm('Are you sure you want to ' + display + ' this instance?')) return;
+        var epMap = {
+          'start': 'start',
+          'stop': 'stop',
+          'undeploy': 'undeploy',
+          'restart': 'restart',
+          'restart-system': 'restart_system',
+          'update-build': 'update-build',
+          'build': 'update-build'
+        };
+        var endpoint = epMap[actionKey];
+        if (endpoint === undefined) return;
+      qrApi('/instances/' + id + '/' + endpoint, {method: 'POST'})
+        .then(function(data) {
+ if (data.status === 'ok') {
+   setTimeout(function() { window.location.reload(); }, 1000);
+ } else if (data.message && data.message.indexOf('timed out') >= 0) {
+   alert('Action ' + display + ' received, polling for completion...');
+   var attempts = 0;
+   var poll = setInterval(function() {
+     attempts++;
+     qrApi('/instances/' + id)
+.then(function(d) {
+  if (d.data && d.data.state !== 'starting' && d.data.state !== 'stopping') {
+    clearInterval(poll);
+    window.location.reload();
+  }
+  if (attempts > 60) { clearInterval(poll); alert('Action timed out'); }
+});
+   }, 3000);
+ } else {
+   alert('Action failed: ' + (data.message || 'Unknown'));
+ }
+  }).catch(function(e) { alert('Error: ' + e); });
+       });
+     });
+
+  document.querySelectorAll('.sob-toggle').forEach(function(btn) {
+     btn.addEventListener('click', function() {
+       var id = btn.getAttribute('data-id');
+       var newValue = btn.getAttribute('data-value') === 'true';
+  if (!confirm('Set start on boot to ' + (newValue ? 'ON' : 'OFF') + '?')) return;
+        qrApi('/instances/' + id, {
+          method: 'PUT',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({start_on_boot: newValue})
+        })
+     .then(function(data) {
+ if (data.status === 'ok') {
+   setTimeout(function() { window.location.reload(); }, 800);
+ } else {
+   alert('Failed: ' + (data.message || 'Unknown'));
+ }
+      }).catch(function(e) { alert('Error: ' + e); });
+      });
+    });
+
+   // Preset change handler
+   (function() {
+     var selectEl = document.getElementById('preset-change-select');
+     var applyBtn = document.getElementById('preset-apply-btn');
+     var instId = {{ inst_id }};
+     if (!selectEl || !applyBtn) return;
+     var origPresetId = {{ preset_id | default('null') }};
+
+     selectEl.addEventListener('change', function() {
+       var val = this.value ? parseInt(this.value) : null;
+       applyBtn.disabled = (val === null || val === origPresetId);
+     });
+
+     applyBtn.addEventListener('click', function() {
+       var val = selectEl.value ? parseInt(selectEl.value) : null;
+       if (!val) return;
+       if (!confirm('Apply preset and redeploy this instance?')) return;
+       var origHTML = applyBtn.innerHTML;
+       applyBtn.disabled = true;
+       applyBtn.style.pointerEvents = 'none';
+       applyBtn.style.opacity = '0.6';
+       var dots = ['...', '. .', ' . .'];
+       var dotIdx = 0;
+       var dotInterval = setInterval(function() {
+         applyBtn.textContent = dots[dotIdx % 3];
+         dotIdx++;
+       }, 400);
+       var toast = document.createElement('div');
+       toast.style.cssText = 'position:fixed;top:20px;right:20px;z-index:9999;padding:10px 16px;background:#1976d2;color:#fff;border-radius:4px;font-size:0.85em;opacity:0.95;box-shadow:0 2px 8px rgba(0,0,0,0.2);';
+       toast.textContent = 'Applying preset... please wait';
+       document.body.appendChild(toast);
+       qrApi('/instances/' + instId, {
+         method: 'PUT',
+         headers: {'Content-Type': 'application/json'},
+         body: JSON.stringify({preset_id: val})
+       })
+     .then(function(data) {
+clearInterval(dotInterval);
+toast.style.opacity = '0';
+setTimeout(function() { toast.remove(); }, 300);
+if (data.status === 'ok') {
+  applyBtn.style.pointerEvents = '';
+  applyBtn.style.opacity = '';
+  setTimeout(function() { window.location.reload(); }, 1200);
+} else {
+  applyBtn.disabled = false;
+  applyBtn.textContent = origHTML;
+  applyBtn.style.pointerEvents = '';
+  applyBtn.style.opacity = '';
+  alert('Preset change failed: ' + (data.message || JSON.stringify(data)));
+}
+     }).catch(function(e) {
+         clearInterval(dotInterval);
+         toast.style.opacity = '0';
+         setTimeout(function() { toast.remove(); }, 300);
+         applyBtn.disabled = false;
+         applyBtn.textContent = origHTML;
+         applyBtn.style.pointerEvents = '';
+         applyBtn.style.opacity = '';
+         alert('Request failed: ' + e);
+       });
+     });
+   })();
+  });
+</script>

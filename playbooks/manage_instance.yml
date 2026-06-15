@@ -1,0 +1,87 @@
+# @name: Manage Instance
+# @playbook_id: MANAGE_INSTANCE_V1
+# @version: 1
+# @timeout: 120
+# manage_instance.yml — Universal start/stop/restart for any engine type
+- hosts: "{{ inventory_host }}"
+  become: yes
+  vars:
+    instance_id: "{{ instance_id }}"
+    engine_type: "{{ engine_type }}"
+    unit_name: "qr-{{ instance_id }}-{{ engine_type }}"
+    action: "{{ action | default('start') }}"
+  tasks:
+    - name: Check if service file exists
+      stat:
+        path: "/etc/systemd/system/{{ unit_name }}.service"
+      register: svc_file
+
+    - name: Fail if service file missing
+      fail:
+        msg: "Service file {{ unit_name }}.service not found on remote host"
+      when: not svc_file.stat.exists
+
+    - name: Reload systemd (if service file changed)
+      systemd:
+        daemon_reload: yes
+      when: action == "start" or action == "restart"
+
+    - name: Start the service
+      systemd:
+        name: "{{ unit_name }}"
+        state: started
+        enabled: yes
+      when: action == "start" or action == "restart"
+
+    - name: Stop the service
+      systemd:
+        name: "{{ unit_name }}"
+        state: stopped
+      when: action == "stop" or action == "restart"
+
+    # For start/restart: wait for activation with retries
+    # RPC/llama-server init can take 10-20s (GPU drivers, Vulkan, RPC enumeration)
+    - name: Wait for service active (start/restart)
+      shell: |
+        set +e
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+          if systemctl is-active "{{ unit_name }}" > /dev/null 2>&1; then
+            echo "active"
+            exit 0
+          fi
+          sleep 3
+        done
+        systemctl is-active "{{ unit_name }}" 2>/dev/null || echo "unknown"
+      register: _svc_status_raw
+      changed_when: false
+      failed_when: false
+      when: action == 'start' or action == 'restart'
+
+    # For stop: check immediately (use separate register to avoid overwriting start/restart)
+    - name: Get service status (stop)
+      command: "systemctl is-active {{ unit_name }}"
+      register: _stop_status_raw
+      changed_when: false
+      failed_when: false
+      when: action != 'start' and action != 'restart'
+
+    # Normalize status to a simple string for downstream logic
+    - name: Set svc_status from raw output
+      set_fact:
+        svc_status: "{{ _svc_status_raw.stdout | default('unknown') | trim }}"
+
+    # Determine success/failure
+    - name: Check action success
+      set_fact:
+        action_success: >-
+          {{ (action in ['start', 'restart'] and svc_status == 'active') or
+             (action == 'stop' and (_stop_status_raw.stdout | default('inactive') | trim) != 'active') }}
+
+    - name: Report result
+      debug:
+        msg: "Action={{ action }} unit={{ unit_name }} status={{ svc_status }} success={{ action_success | default(false) }}"
+
+    - name: Fail if action did not succeed
+      fail:
+        msg: "Action '{{ action }}' failed for {{ unit_name }} (status: {{ svc_status }})"
+      when: not (action_success | default(false))

@@ -1,0 +1,27 @@
+# @name: Discover
+# @playbook_id: NODE_DISCOVER_V1
+# @version: 1
+# @timeout: 300
+# discover_node.yml — Discover capabilities and resources on a node
+- hosts: "{{ inventory_host }}"
+  gather_facts: yes
+  tasks:
+    - name: Check for GPU devices
+      command: nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+      register: gpu_info
+      changed_when: false
+      failed_when: false
+
+    - name: List available models
+      find:
+        paths: "/opt/models"
+        patterns: "*.gguf"
+        file_type: file
+      register: models
+      failed_when: false
+
+    - name: Check disk space
+      command: df -h /opt
+      register: disk_info
+      changed_when: false
+      failed_when: false

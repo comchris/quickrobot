@@ -1,0 +1,204 @@
+<style>
+  /* Timeout rows: orange background, distinct from red failed */
+  tr.ansible-log-timeout { background-color: #fff3e0 !important; }
+  tr.ansible-log-timeout td:first-child { color: #e65100; font-weight: 600; }
+</style>
+<!-- Single row header with controls and filters -->
+<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
+  <h1 style="margin:0;font-size:1.3em;">Logs</h1>
+  <form method="get" action="/webui/ansible-logs" id="filter-form" style="display:flex;gap:8px;align-items:center;margin:0;">
+    <label style="font-size:0.85em;color:#666;">Action:</label>
+    <select name="action_type" id="filter-action" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+      <option value="">Any</option>
+      {% for at in action_types %}
+      <option value="{{ at }}" {% if at == filter_action %}selected="selected"{% endif %}>{{ at }}</option>
+      {% endfor %}
+    </select>
+
+    <label style="font-size:0.85em;color:#666;">Status:</label>
+    <select name="status" id="filter-status" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+      <option value="">Any</option>
+      <option value="success" {% if filter_status == 'success' %}selected="selected"{% endif %}>Success</option>
+      <option value="failed" {% if filter_status == 'failed' %}selected="selected"{% endif %}>Failed</option>
+    </select>
+
+    <label style="font-size:0.85em;color:#666;">Limit:</label>
+    <select name="limit" id="filter-limit" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+      <option value="25" {% if filter_limit == 25 %}selected="selected"{% endif %}>25</option>
+      <option value="50" {% if filter_limit == 50 %}selected="selected"{% endif %}>50</option>
+      <option value="100" {% if filter_limit == 100 %}selected="selected"{% endif %}>100</option>
+      <option value="250" {% if filter_limit == 250 %}selected="selected"{% endif %}>250</option>
+    </select>
+
+    <button type="submit" class="btn btn-primary" style="padding:4px 10px;font-size:0.85em;">Apply &amp; Refresh</button>
+    {% if filter_action or filter_status or filter_limit != 100 %}
+    <a href="/webui/ansible-logs" class="btn" style="padding:4px 10px;font-size:0.85em;text-decoration:none;background:#999;color:#fff;">Clear</a>
+    {% endif %}
+  </form>
+  <div style="display:flex;gap:6px;align-items:center;margin-left:auto;">
+    <label style="font-size:0.8em;color:#666;">Clear logs &gt;:</label>
+    <select id="clear-days" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+      <option value="1" selected>1d</option>
+      <option value="7">7d</option>
+      <option value="14">14d</option>
+      <option value="30">30d</option>
+      <option value="60">60d</option>
+      <option value="90">90d</option>
+      <option value="0">All</option>
+    </select>
+    <button id="clear-logs-btn" class="btn btn-danger" style="font-size:0.85em;padding:4px 10px;">Clear Selected</button>
+    <span id="clear-status" style="font-size:0.8em;color:#666;"></span>
+  </div>
+</div>
+
+<table>
+<thead><tr><th class="sortable" data-col="0">ID</th><th class="sortable" data-col="1">Timestamp</th><th class="sortable" data-col="2">Action</th><th class="sortable" data-col="3">Host</th><th class="sortable" data-col="4">Instance</th><th class="sortable" data-col="5">Status</th><th>Duration</th><th>Details</th></tr></thead>
+<tbody>
+{% for entry in ansible_entries %}
+<tr class="{% if entry.status == 'failed' %}{% if 'timed out' in (entry.detail_str or '').lower() %}ansible-log-timeout{% else %}ansible-log-failed{% endif %}{% else %}ansible-log-{{ entry.action_type }}{% endif %}">
+  <td>{{ entry.id }}</td>
+  <td class="ts-cell" data-sort="{{ entry.created_at or entry.started_at or '' }}" data-ts-utc="{{ entry.created_at or entry.started_at or '' }}">{{ entry.created_at or entry.started_at }}</td>
+  <td>{{ entry.action_type }}</td>
+  <td>{% if entry.node_id %}<a class="row-link" href="/webui/hosts">{{ entry.node_name }}</a>{% else %}{{ entry.node_name }}{% endif %}</td>
+  <td>{% if entry.instance_id %}<a class="row-link" href="/webui/instances/{{ entry.instance_id }}">{{ entry.instance_name }}</a>{% else %}{{ entry.instance_name }}{% endif %}</td>
+  <td>{{ entry.status }}{% if 'timed out' in (entry.detail_str or '').lower() %} <span style="color:#ff9800;font-weight:600;">⚠ timeout</span>{% endif %}</td>
+  <td>{{ entry.dur_str }}</td>
+  <td style="color:#666;font-size:0.85em;">{{ entry.detail_str or 'N/A' }}</td>
+</tr>
+{% else %}
+<tr><td colspan="8" style="text-align:center;color:#888;">No ansible actions logged</td></tr>
+{% endfor %}
+</tbody>
+</table>
+
+<!-- Column sorting JS — sortable: 0(ID),1(Timestamp),2(Action),3(Node),4(Instance),5(Status) -->
+<script>
+// Format ISO timestamp as relative time — uses global qrFmtRelative from base.html
+
+// Compact timestamp display — no full timestamps, only compact date + relative
+// < 24h: relative only (e.g. "2h ago")
+// >= 24h and < 7d: compact date + relative (e.g. "May 28 (3d ago)")
+// >= 7d: full date + relative (e.g. "May 20, 2026 (10d ago)")
+function fmtCompact(iso) {
+    if (!iso || iso === '-') return '-';
+    var ts = new Date(iso);
+    if (isNaN(ts.getTime())) return iso;
+    var now = new Date();
+    var diff = Math.floor((now - ts) / 1000);
+    if (diff < 0) return iso;
+    var tzName = typeof window._qr_tz_name !== 'undefined' ? window._qr_tz_name : null;
+    var fmtOpts = { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false };
+    if (tzName) fmtOpts.timeZone = tzName;
+    var dateStr = ts.toLocaleString(undefined, fmtOpts);
+    return { date: dateStr, diff: diff };
+}
+
+// Apply relative time + compact timestamp formatting on load
+(function() {
+  document.querySelectorAll('.ts-cell, .age-cell').forEach(function(cell) {
+    var raw = cell.getAttribute('data-ts-utc') || cell.getAttribute('data-sort') || cell.textContent.trim();
+    var info = fmtCompact(raw);
+    var relStr = qrFmtRelative(raw);
+    if (relStr !== '-') {
+        if (info.diff !== undefined && info.diff < 86400) {
+            cell.textContent = relStr;
+        } else if (info.date) {
+            cell.innerHTML = info.date + ' <span style="color:#888;font-size:0.85em;">(' + relStr + ')</span>';
+        } else {
+            cell.textContent = relStr;
+        }
+    } else {
+        cell.textContent = relStr;
+    }
+  });
+})();
+var ths = document.querySelectorAll('.sortable');
+
+// Auto-apply saved sort state on load
+(function() {
+  var _sortCol = parseInt(qrSettings.get('ansible_logs', 'sort_col', '-1'), 10);
+  var _sortDir = qrSettings.get('ansible_logs', 'sort_dir', '');
+  if (_sortCol >= 0 && _sortDir) {
+    sortTable(_sortCol, _sortDir);
+    applyArrows(_sortCol, _sortDir);
+  }
+})();
+
+function sortTable(col, dir) {
+  var table = ths[0] ? ths[0].closest('table') : null;
+  if (table) {
+    var tbody = table.querySelector('tbody');
+    if (tbody) {
+      var rows = Array.from(tbody.rows);
+      rows.sort(function(a, b) {
+        var cellA = a.cells[col] ? (a.cells[col].getAttribute('data-sort') || a.cells[col].textContent.trim()) : '';
+        var cellB = b.cells[col] ? (b.cells[col].getAttribute('data-sort') || b.cells[col].textContent.trim()) : '';
+        // Numeric sort: ID (col 0)
+        if (col === 0) {
+          return dir === 'asc' ? (parseInt(cellA, 10) || 0) - (parseInt(cellB, 10) || 0) : (parseInt(cellB, 10) || 0) - (parseInt(cellA, 10) || 0);
+        }
+        return dir === 'asc' ? cellA.localeCompare(cellB) : cellB.localeCompare(cellA);
+      });
+      rows.forEach(function(row) { tbody.appendChild(row); });
+    }
+  }
+}
+
+function applyArrows(col, dir) {
+  ths.forEach(function(t) {
+    t.textContent = t.textContent.replace(/\s*[\u2191\u2193]\s*$/, '').trim();
+  });
+  var arrow = dir === 'asc' ? ' \u2191' : ' \u2193';
+  ths[col].textContent = ths[col].textContent.trim() + arrow;
+}
+
+ths.forEach(function(th) {
+  th.style.cursor = 'pointer';
+  th.addEventListener('click', function() {
+    var col = parseInt(this.getAttribute('data-col'), 10);
+    var dir = qrSettings.get('ansible_logs', 'sort_dir', '') === 'desc' ? 'asc' : 'desc';
+    qrSettings.set('ansible_logs', 'sort_col', col.toString());
+    qrSettings.set('ansible_logs', 'sort_dir', dir);
+
+    sortTable(col, dir);
+    applyArrows(col, dir);
+  });
+});
+
+// Clear logs button
+document.getElementById('clear-logs-btn').addEventListener('click', function() {
+  var days = parseInt(document.getElementById('clear-days').value, 10);
+  // days=0 means clear all — require confirmation
+  if (days === 0 && !confirm('Clear ALL ansible action logs? This cannot be undone.')) return;
+  var statusEl = document.getElementById('clear-status');
+  var btn = this;
+  btn.disabled = true;
+  btn.textContent = 'Clearing...';
+  statusEl.textContent = '';
+
+  qrApi('/ansible_actions/clear-old', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({days: days})
+  })
+    .then(function(data) {
+      if (data.status === 'ok') {
+        var count = data.data.deleted_count || 0;
+        var msg = data.data.clear_all ? 'Cleared all ' + count + ' entries.' : 'Cleared ' + count + ' entries older than ' + days + ' days.';
+        statusEl.style.color = '#4caf50';
+        statusEl.textContent = msg;
+        setTimeout(function() { window.location.reload(); }, 1500);
+      } else {
+        statusEl.style.color = '#f44336';
+        statusEl.textContent = 'Error: ' + (data.message || JSON.stringify(data));
+      }
+      btn.disabled = false;
+      btn.textContent = 'Clear Selected';
+    }).catch(function(e) {
+      statusEl.style.color = '#f44336';
+      statusEl.textContent = 'Request failed: ' + e;
+      btn.disabled = false;
+      btn.textContent = 'Clear Selected';
+    });
+});
+</script>

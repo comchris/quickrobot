@@ -1,0 +1,67 @@
+# @name: Undeploy Universal Service
+# @playbook_id: UNDEPLOY_UNIVERSAL_V1
+# @version: 1
+# @timeout: 300
+# undeploy_universal.yml — Undeploy universal engine instance from target node
+- hosts: "{{ inventory_host }}"
+  become: yes
+  vars:
+    instance_id: "{{ instance_id }}"
+    engine_type: "universal"
+    unit_name: "qr-{{ instance_id }}-universal"
+    install_dir: "{{ install_dir | default('/opt/quickrobot/' + instance_name) }}"
+    pkill_pattern: "{{ unit_name }}"
+    clean_source_dir: "{{ clean_source_dir | default(false) }}"
+    clean_venv: "{{ clean_venv | default(false) }}"
+
+  tasks:
+    # ------------------------------------------------------------------ Stop service
+    - name: Stop universal service
+      systemd:
+        name: "{{ unit_name }}"
+        state: stopped
+        enabled: no
+
+    - name: Remove service file
+      file:
+        path: "/etc/systemd/system/{{ unit_name }}.service"
+        state: absent
+
+    - name: Remove env file
+      file:
+        path: "/etc/quickrobot/{{ unit_name }}.env"
+        state: absent
+
+    - name: Reload systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: Reset failed unit state
+      command: "systemctl reset-failed {{ unit_name }}"
+      failed_when: false
+
+    # ------------------------------------------------------------------ Optional cleanup
+    - name: Remove instance directory (clean_source_dir)
+      file:
+        path: "{{ install_dir }}"
+        state: absent
+      when: clean_source_dir | default(false)
+
+    - name: Verify service file removed
+      stat:
+        path: "/etc/systemd/system/{{ unit_name }}.service"
+      register: verify_svc
+      changed_when: false
+
+    - name: Verify env file removed
+      stat:
+        path: "/etc/quickrobot/{{ unit_name }}.env"
+      register: verify_env
+      changed_when: false
+
+    - name: Report undeploy verification
+      debug:
+        msg: >-
+          Undeploy {{ unit_name }}: svc={{ 'absent' if not verify_svc.stat.exists else 'PRESENT' }},
+          env={{ 'absent' if not verify_env.stat.exists else 'PRESENT' }}
+      when: verify_svc.stat.exists or verify_env.stat.exists

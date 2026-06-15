@@ -1,0 +1,54 @@
+<h1 style="margin:0;font-size:1.3em;">Config -- {{ engine_type }}</h1>
+{{ config_html | safe }}
+
+<script>
+(function() {
+  var originals = ORIGINALS;
+{% if save_endpoint %}
+  var saveEndpoint = '{{ save_endpoint }}';
+{% else %}
+  var saveEndpoint = '/api/v1/engine/{{ engine_type }}/config/batch';
+{% endif %}
+  var isSystem = {{ 'true' if is_system else 'false' }};
+
+  document.querySelector('#config-form')
+    .insertAdjacentHTML('beforeend',
+      '<div class="actions"><button class="btn btn-success" id="save-all-btn">{% if is_system %}Save Settings{% else %}Save All Changes{% endif %}</button></div>');
+
+  document.getElementById('save-all-btn').addEventListener('click', function(e) {
+    var inputs = document.querySelectorAll('.config-value');
+    var changes = {};
+    inputs.forEach(function(input) {
+      var key = input.getAttribute('data-key');
+      var val = input.value;
+      if (isSystem && key === 'web_port') val = parseInt(val, 10);
+      if (isSystem) {
+        var orig = originals[key];
+        var changed = JSON.stringify(val) !== JSON.stringify(orig);
+        if (changed) changes[key] = val;
+      } else {
+        var orig = originals[key];
+        if (val !== orig) changes[key] = val;
+      }
+    });
+    if (Object.keys(changes).length === 0) { alert('No changes to save'); return; }
+
+    var fetchOpts = {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({configs: changes})
+    };
+    fetch(saveEndpoint, fetchOpts)
+     .then(function(res) { return res.json(); })
+     .then(function(data) {
+       if (data.status === 'ok') {
+         var msg = isSystem ? 'Settings saved. Restart to apply.' : 'Saved ' + (data.data.saved_keys || 0) + ' keys';
+         alert(msg);
+         setTimeout(function() { window.location.reload(); }, 800);
+       } else {
+         alert('Error: ' + (data.message || 'Unknown'));
+       }
+     }).catch(function(e) { alert('Request failed: ' + e); });
+  });
+})();
+</script>

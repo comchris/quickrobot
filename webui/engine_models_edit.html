@@ -1,0 +1,135 @@
+<a class="back-link" href="/webui/engines">Back to engines</a>
+<h1>Edit Model -- {{ engine_type }}</h1>
+<form id="model-form" style="max-width:600px;">
+  <div style="margin-bottom:12px;">
+    <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Model Name</label>
+    <input type="text" name="name" value="{{ model.name | default('') }}" required style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+  </div>
+  <div style="margin-bottom:12px;">
+    <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Model Path (GGUF) *</label>
+    <input type="text" name="model_path" value="{{ model.model_path | default('') }}" required style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+    <small style="color:#888;">LLAMA_ARG_MODEL — the primary GGUF model file</small>
+  </div>
+  <div style="margin-bottom:12px;">
+    <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">MMPROJ Path</label>
+    <input type="text" name="mmproj_path" value="{{ model.mmproj_path or '' }}" style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+    <small style="color:#888;">LLAMA_ARG_MMPROJ — multimodal projector (optional)</small>
+  </div>
+  <div style="margin-bottom:12px;">
+    <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Draft Model Path</label>
+    <input type="text" name="draft_model_path" value="{{ model.draft_model_path or '' }}" style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+    <small style="color:#888;">LLAMA_ARG_SPEC_DRAFT_MODEL — Draft model for speculative decoding (optional)</small>
+  </div>
+  <div class="form-row">
+    <div class="form-group">
+      <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Quantization</label>
+      <input type="text" name="quantization" value="{{ model.quantization or '' }}" placeholder="e.g., Q4_K_M, Q8_0, F16" style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+    </div>
+    <div class="form-group">
+      <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Main Model File Size (bytes)</label>
+      <input type="text" name="size_bytes" value="{{ model.size_bytes or '' }}" readonly style="width:100%;padding:4px 8px;border:1px solid #ccc;border-radius:3px;background:#eee;font-family:monospace;font-size:0.8em;color:#888;">
+    </div>
+  </div>
+
+  <h2 style="margin-top:20px;font-size:1em;">Model Parameters (LLAMA_ARG_*)</h2>
+  <div style="background:#f5f5f5;padding:12px;border-radius:4px;margin-bottom:12px;">
+    <p style="color:#888;font-size:0.85em;margin:0 0 8px;">JSON dict of model params. Edit in JSON view for full control.</p>
+    <button id="toggle-json-view" type="button" class="btn btn-xs" style="margin-bottom:8px;">Toggle JSON View</button>
+    <div id="form-params">
+      {% set mp = model.model_params | default('{}') %}
+      {% if mp is string %}{% set mp = mp | fromjson %}{% endif %}
+      <div style="margin-bottom:6px;">
+        <label style="display:block;font-size:0.8em;color:#666;">LLAMA_ARG_TEMP</label>
+        <input type="text" id="param-temp" value="{{ mp.get('LLAMA_ARG_TEMP', '') or mp.get('TEMP', '') }}" placeholder="e.g., 0.7" style="width:200px;padding:4px 8px;border:1px solid #ccc;border-radius:3px;">
+      </div>
+      <div style="margin-bottom:6px;">
+        <label style="display:block;font-size:0.8em;color:#666;">LLAMA_ARG_TOP_K</label>
+        <input type="text" id="param-topk" value="{{ mp.get('LLAMA_ARG_TOP_K', '') }}" placeholder="e.g., 40" style="width:200px;padding:4px 8px;border:1px solid #ccc;border-radius:3px;">
+      </div>
+      <div style="margin-bottom:6px;">
+        <label style="display:block;font-size:0.8em;color:#666;">LLAMA_ARG_TOP_P</label>
+        <input type="text" id="param-topp" value="{{ mp.get('LLAMA_ARG_TOP_P', '') }}" placeholder="e.g., 0.9" style="width:200px;padding:4px 8px;border:1px solid #ccc;border-radius:3px;">
+      </div>
+      <div style="margin-bottom:6px;">
+        <label style="display:block;font-size:0.8em;color:#666;">LLAMA_ARG_MIN_P</label>
+        <input type="text" id="param-minp" value="{{ mp.get('LLAMA_ARG_MIN_P', '') or mp.get('min_p', '') }}" placeholder="e.g., 0.01" style="width:200px;padding:4px 8px;border:1px solid #ccc;border-radius:3px;">
+      </div>
+    </div>
+    <textarea id="json-params" rows="6" style="display:none;width:100%;font-family:monospace;font-size:0.85em;padding:8px;border:1px solid #ccc;border-radius:4px;background:#fff;">{{ (model.model_params | default('{}')) | safe }}</textarea>
+  </div>
+
+  <h2 style="margin-top:16px;font-size:1em;">Checksums</h2>
+  <div style="background:#f5f5f5;padding:12px;border-radius:4px;margin-bottom:12px;">
+    {% for field_name, label in [('sha256_model', 'Model (GGUF)'), ('sha256_mmproj', 'MMPROJ'), ('sha256_draft', 'Draft')] %}
+    <div style="margin-bottom:6px;">
+      <label style="display:block;font-size:0.8em;color:#666;">{{ label }} SHA256</label>
+      <input type="text" name="{{ field_name }}" value="{{ model[field_name] or '' }}" readonly style="width:100%;padding:4px 8px;border:1px solid #ccc;border-radius:3px;background:#eee;font-family:monospace;font-size:0.8em;">
+      {% set verified_field = 'sha256_verified_at_' + field_name.replace('sha256_', '') %}
+      <small style="color:#888;">Verified: {{ model.get(verified_field) or model.get('sha256_verified_at_model', 'Never') }}</small>
+    </div>
+    {% endfor %}
+  </div>
+
+  <button type="submit" class="btn btn-success">Update Model</button>
+  <a href="/webui/engine/{{ engine_type }}/models" class="btn" style="text-decoration:none;">Cancel</a>
+</form>
+
+<script>
+(function() {
+  // Toggle form/JSON params view
+  var toggleBtn = document.getElementById('toggle-json-view');
+  var formParams = document.getElementById('form-params');
+  var jsonParams = document.getElementById('json-params');
+  if (toggleBtn) {
+    toggleBtn.addEventListener('click', function() {
+      var visible = formParams.style.display !== 'none';
+      formParams.style.display = visible ? 'none' : 'block';
+      jsonParams.style.display = visible ? 'block' : 'none';
+    });
+  }
+
+  document.querySelector('#model-form').addEventListener('submit', function(e) {
+    e.preventDefault();
+    var fd = {};
+    fd.name = this.querySelector('[name="name"]').value;
+    fd.model_path = this.querySelector('[name="model_path"]').value;
+    fd.mmproj_path = this.querySelector('[name="mmproj_path"]').value;
+    fd.draft_model_path = this.querySelector('[name="draft_model_path"]').value;
+    fd.quantization = this.querySelector('[name="quantization"]').value;
+    var sizeVal = this.querySelector('[name="size_bytes"]').value;
+    fd.size_bytes = sizeVal ? parseInt(sizeVal, 10) : null;
+    // Collect model_params from form or JSON view
+    var mp = {};
+    if (formParams.style.display !== 'none') {
+      var temp = document.getElementById('param-temp').value;
+      var topk = document.getElementById('param-topk').value;
+      var topp = document.getElementById('param-topp').value;
+      var minp = document.getElementById('param-minp').value;
+      if (temp) mp["LLAMA_ARG_TEMP"] = temp;
+      if (topk) mp["LLAMA_ARG_TOP_K"] = topk;
+      if (topp) mp["LLAMA_ARG_TOP_P"] = topp;
+      if (minp) mp["LLAMA_ARG_MIN_P"] = minp;
+    } else {
+      try { mp = JSON.parse(jsonParams.value); } catch(e) { mp = {}; }
+    }
+    fd.model_params = mp;
+    // Include sha256 fields
+    {% for f in ['sha256_model', 'sha256_mmproj', 'sha256_draft'] %}
+    fd.{{ f }} = this.querySelector('[name="{{ f }}"]').value || null;
+    {% endfor %}
+    qrApi('/engine/{{ engine_type }}/models/{{ model_id }}', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(fd)
+    })
+     .then(function(data) {
+       if (data.status === 'ok') {
+         alert('Model updated');
+         setTimeout(function() { window.location.href = '/webui/engine/{{ engine_type }}/models'; }, 500);
+       } else {
+         alert('Error: ' + (data.message || 'Unknown'));
+       }
+     }).catch(function(e) { alert('Request failed: ' + e); });
+  });
+})();
+</script>

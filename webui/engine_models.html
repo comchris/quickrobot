@@ -1,0 +1,263 @@
+<h1 style="margin:0;font-size:1.3em;">Models -- {{ engine_type }}</h1>
+<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px;">
+  <a class="btn btn-primary" href="/webui/engine/{{ engine_type }}/models/create">+ Create Model</a>
+  <form id="filter-form" method="get" action="/webui/engine/{{ engine_type }}/models" style="display:flex;gap:6px;align-items:center;margin:0;">
+    <input type="text" id="search-input" name="q" placeholder="Search..." value="{{ request.args.get('q', '') }}"
+           style="padding:4px 10px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;" />
+    <button type="submit" class="btn btn-primary" style="font-size:0.8em;padding:3px 8px;">Search</button>
+  </form>
+</div>
+
+<div style="display:flex;gap:8px;align-items:center;margin:12px 0;">
+  <select id="scan-node" style="padding:6px 10px;border:1px solid #ccc;border-radius:4px;font-size:0.9em;">
+    <option value="">All Nodes</option>
+    {% for n in nodes %}<option value="{{ n.id }}">{{ n.name }}</option>{% endfor %}
+  </select>
+  <button class="btn btn-primary" id="scan-btn">Scan for Models</button>
+</div>
+<div id='scan-result' style='margin:12px 0;padding:8px;'></div>
+
+<!-- Params edit modal -->
+<div id="params-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:1000;" onclick="if(event.target===this)this.style.display='none';">
+  <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:#fff;border-radius:6px;padding:20px;width:550px;max-height:80vh;overflow-y:auto;">
+    <h2 style="margin:0 0 12px;font-size:1.1em;">Edit Parameters</h2>
+    <input type="hidden" id="pm-id" />
+    <input type="hidden" id="pm-engine" value="{{ engine_type }}" />
+    <label style="font-size:0.85em;color:#666;display:block;margin-bottom:4px;">model_params (JSON object)</label>
+    <textarea id="pm-json" rows="10" style="width:100%;font-family:monospace;font-size:0.9em;padding:8px;border:1px solid #ccc;border-radius:3px;resize:vertical;" placeholder='{"temp":"1.0","top_p":"0.95"}'></textarea>
+    <div id="pm-status" style="margin-top:6px;font-size:0.85em;"></div>
+    <div style="display:flex;gap:8px;margin-top:10px;justify-content:flex-end;">
+      <button id="pm-cancel" class="btn" style="padding:4px 12px;font-size:0.85em;background:#999;color:#fff;">Cancel</button>
+      <button id="pm-save" class="btn btn-primary" style="padding:4px 12px;font-size:0.85em;">Save</button>
+    </div>
+  </div>
+</div>
+
+<table>
+<thead><tr>
+  <th class="sortable" data-col="0">ID</th>
+  <th class="sortable" data-col="1">Name</th>
+  <th class="sortable" data-col="2">Quant</th>
+  <th class="sortable" data-col="3">Params</th>
+  <th class="sortable" data-col="4">Use</th>
+  <th class="sortable" data-col="5">Size</th>
+  <th class="sortable" data-col="6">Model Path</th>
+  <th>MMProj</th>
+  <th class="sortable" data-col="7">Age</th>
+  <th>Actions</th>
+</tr></thead>
+<tbody>
+{% for m in models %}
+<tr data-id="{{ m.id }}">
+  <td>{{ m.id }}</td>
+  <td>{{ m.name }}</td>
+  <td><code>{{ m.quantization or '\u2014' }}</code></td>
+  <td class="params-cell" data-id="{{ m.id }}" data-engine="{{ engine_type }}" title="Click to edit" style="font-size:0.85em;cursor:pointer;color:#0066cc;">
+    {% if m.model_params %}
+      {% set mp = m.model_params %}
+      {% if mp is string %}{% set mp = mp | fromjson %}{% endif %}
+      {% set t = mp.get('temp') or mp.get('TEMP') or mp.get('LLAMA_ARG_TEMP', '') %}
+      {% set tp = mp.get('top_p') or mp.get('LLAMA_ARG_TOP_P', '') %}
+      {% set tk = mp.get('top_k') or mp.get('LLAMA_ARG_TOP_K', '') %}
+      {% set mn = mp.get('min_p') or mp.get('LLAMA_ARG_MIN_P', '') %}
+      {% if t %}{{ 'temp=' ~ t }}{% endif %}{% if tp %} {{ 'top_p=' ~ tp }}{% endif %}{% if tk %} {{ 'top_k=' ~ tk }}{% endif %}{% if mn %} {{ 'min_p=' ~ mn }}{% endif %}
+    {% else %}
+      \u2014
+    {% endif %}
+  </td>
+  <td>
+    {% if m.preset_count is defined %}
+      <span style="color:#888;">{{ m.preset_count }}</span>
+    {% else %}
+      \u2014
+    {% endif %}
+  </td>
+  <td style="color:#888;">{{ m.size_str or 'N/A' }}</td>
+  <td><code style="font-size:0.8em;word-break:break-all;">{{ m.model_path }}</code></td>
+  <td>{{ 'Yes' if m.mmproj_path else '\u2014' }}</td>
+  <td class="age-cell" data-sort="{{ m.created_at or '' }}">{{ m.created_at or '-' }}</td>
+  <td style="white-space:nowrap;">
+    <a href="/webui/models/{{ m.id }}/edit" class="btn btn-primary" style="font-size:0.75em;padding:2px 6px;margin-right:4px;text-decoration:none;">Edit</a>
+    <button class="btn btn-danger model-delete-btn" data-id="{{ m.id }}" data-engine="{{ engine_type }}" style="font-size:1.1em;padding:2px 5px;line-height:1;" title="Remove">&times;</button>
+  </td>
+</tr>
+{% else %}
+<tr><td colspan="10" style="text-align:center;color:#888;">No models defined. Click 'Create New Model' or scan nodes.</td></tr>
+{% endfor %}
+</tbody>
+</table>
+
+<script>
+(function() {
+  // Delete handlers
+  var buttons = document.querySelectorAll('.model-delete-btn');
+  buttons.forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var id = this.getAttribute('data-id');
+      var engine = this.getAttribute('data-engine');
+      if (!confirm('Remove model ' + id + '? This only removes the DB entry.')) return;
+     qrApi('/engine/' + engine + '/models/' + id, {method: 'DELETE'})
+        .then(function(data) {
+          if (data.status === 'ok') {
+            location.reload();
+          } else {
+            alert('Remove failed: ' + (data.message || 'Unknown'));
+          }
+        }).catch(function(e) { alert('Error: ' + e); });
+    });
+  });
+
+  // Params edit handlers
+  var pmCells = document.querySelectorAll('.params-cell');
+  pmCells.forEach(function(cell) {
+    cell.addEventListener('click', function() {
+      openParamsEdit(this.getAttribute('data-id'), this.getAttribute('data-engine'));
+    });
+  });
+
+  // Column sorting — ID(0 numeric), Name(1 string), Quant(2 string), Params(3 string), Use(4 numeric), Size(5 numeric), ModelPath(6 string), Age(7 timestamp)
+  var _sortCol = parseInt(qrSettings.get('engine_models', 'sort_col', '-1'), 10);
+  var _sortDir = qrSettings.get('engine_models', 'sort_dir', '');
+  var ths = document.querySelectorAll('.sortable');
+
+  function engModelsSortTable(col, dir) {
+    var table = ths[0] ? ths[0].closest('table') : null;
+    if (table) {
+      var tbody = table.querySelector('tbody');
+      if (tbody) {
+        var rows = Array.from(tbody.rows);
+        rows.sort(function(a, b) {
+          var cellA = a.cells[col] ? (a.cells[col].getAttribute('data-sort') || a.cells[col].textContent.trim()) : '';
+          var cellB = b.cells[col] ? (b.cells[col].getAttribute('data-sort') || b.cells[col].textContent.trim()) : '';
+          if (col === 0 || col === 4 || col === 5) {
+            return dir === 'asc' ? (parseFloat(cellA.replace(/[^0-9.]/g, '')) || 0) - (parseFloat(cellB.replace(/[^0-9.]/g, '')) || 0) : (parseFloat(cellB.replace(/[^0-9.]/g, '')) || 0) - (parseFloat(cellA.replace(/[^0-9.]/g, '')) || 0);
+          }
+          return dir === 'asc' ? cellA.localeCompare(cellB) : cellB.localeCompare(cellA);
+        });
+        rows.forEach(function(row) { tbody.appendChild(row); });
+      }
+    }
+  }
+
+  function engModelsApplyArrows(col, dir) {
+    ths.forEach(function(t) {
+      t.textContent = t.textContent.replace(/\s*[\u2191\u2193]\s*$/, '').trim();
+    });
+    var arrow = dir === 'asc' ? ' \u2191' : ' \u2193';
+    ths[col].textContent = ths[col].textContent.trim() + arrow;
+  }
+
+  if (_sortCol >= 0 && _sortDir) {
+    engModelsSortTable(_sortCol, _sortDir);
+    engModelsApplyArrows(_sortCol, _sortDir);
+  }
+
+  ths.forEach(function(th) {
+    th.style.cursor = 'pointer';
+    th.addEventListener('click', function() {
+      var col = parseInt(this.getAttribute('data-col'), 10);
+      var dir = qrSettings.get('engine_models', 'sort_dir', '') === 'desc' ? 'asc' : 'desc';
+      qrSettings.set('engine_models', 'sort_col', col.toString());
+      qrSettings.set('engine_models', 'sort_dir', dir);
+      engModelsSortTable(col, dir);
+      engModelsApplyArrows(col, dir);
+    });
+  });
+
+  // Age column: render relative times — uses global qrFmtRelative from base.html
+  document.querySelectorAll('.age-cell').forEach(function(cell) {
+    var raw = cell.getAttribute('data-sort') || cell.textContent.trim();
+    cell.textContent = qrFmtRelative(raw);
+  });
+
+  // Scan button handler
+  document.getElementById('scan-btn').addEventListener('click', function() {
+    var resultDiv = document.getElementById('scan-result');
+    var nodeSelect = document.getElementById('scan-node');
+    var nodeId = nodeSelect.value;
+    if (!nodeId) {
+      alert('Please select a node to scan.');
+      return;
+    }
+    resultDiv.innerHTML = '<span class="badge badge-other">Scanning...</span>';
+    var url = '/api/v1/models/scan?node=' + encodeURIComponent(nodeId);
+   fetch(url, {method: 'POST'})
+     .then(function(data) {
+       if (data.status === 'ok') {
+         var d = data.data || {};
+         resultDiv.innerHTML = '<p>New models: ' + (d.new_models || 0) + '</p>' +
+           '<p>Existing models: ' + (d.existing_models || 0) + '</p>' +
+           '<p>Total files found: ' + (d.total_files_found || 0) + '</p>' +
+           '<p>Hosts scanned: ' + JSON.stringify(d.hosts_scanned || []) + '</p>';
+         setTimeout(function() { location.reload(); }, 1500);
+       } else {
+         resultDiv.innerHTML = '<p style="color:#f44336;">Scan failed: ' +
+           (data.message || 'Unknown error') + '</p>';
+       }
+     }).catch(function(e) {
+       resultDiv.innerHTML = '<p style="color:#f44336;">Error: ' + e + '</p>';
+     });
+  });
+
+  // Params edit modal functions
+  function openParamsEdit(modelId, engineName) {
+    document.getElementById('pm-id').value = modelId;
+    // Fetch current params from API
+    qrApi('/engine/' + encodeURIComponent(engineName) + '/models/' + modelId)
+     .then(function(data) {
+       if (data.status === 'ok') {
+         var mp = data.data.model_params || {};
+         if (typeof mp === 'string') try { mp = JSON.parse(mp); } catch(e) { mp = {}; }
+         document.getElementById('pm-json').value = JSON.stringify(mp, null, 2);
+         document.getElementById('pm-status').textContent = '';
+       } else {
+         document.getElementById('pm-json').value = '{}';
+         document.getElementById('pm-status').innerHTML = '<span style="color:#f44336;">Failed to load params</span>';
+       }
+     }).catch(function() {
+       document.getElementById('pm-json').value = '{}';
+        document.getElementById('pm-status').innerHTML = '<span style="color:#f44336;">Network error</span>';
+      });
+    document.getElementById('params-modal').style.display = 'block';
+  }
+
+  function closeParamsEdit() {
+    document.getElementById('params-modal').style.display = 'none';
+  }
+  document.getElementById('pm-cancel').addEventListener('click', closeParamsEdit);
+
+  // Save params with syntax check
+  document.getElementById('pm-save').addEventListener('click', function() {
+    var raw = document.getElementById('pm-json').value;
+    var statusEl = document.getElementById('pm-status');
+    try {
+      var parsed = JSON.parse(raw);
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        statusEl.innerHTML = '<span style="color:#f44336;">Error: value must be a JSON object, not ' + typeof parsed + '</span>';
+        return;
+      }
+    } catch(e) {
+      statusEl.innerHTML = '<span style="color:#f44336;">JSON syntax error: ' + e.message + '</span>';
+      return;
+    }
+    statusEl.textContent = 'Saving...';
+    var modelId = document.getElementById('pm-id').value;
+    var engineName = document.getElementById('pm-engine').value;
+    qrApi('/engine/' + encodeURIComponent(engineName) + '/models/' + modelId, {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({model_params: raw})
+    })
+     .then(function(data) {
+       if (data.status === 'ok') {
+         statusEl.innerHTML = '<span style="color:green;">Saved</span>';
+         setTimeout(function() { closeParamsEdit(); location.reload(); }, 500);
+       } else {
+         statusEl.innerHTML = '<span style="color:#f44336;">Save failed: ' + (data.message || 'Unknown') + '</span>';
+       }
+     }).catch(function(e) {
+       statusEl.innerHTML = '<span style="color:#f44336;">Error: ' + e + '</span>';
+     });
+  });
+})();
+</script>

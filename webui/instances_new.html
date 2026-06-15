@@ -1,0 +1,1038 @@
+<h1 style="margin:0;font-size:1.3em;">Create Instance</h1>
+<div style="max-width:750px;">
+
+  <!-- Step 1: Core selection -->
+  <div style="background:#fff;border-radius:6px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,0.1);margin-bottom:16px;">
+    <div style="font-size:0.8em;color:#999;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;font-weight:600;">Step 1 — Basics</div>
+    <div class="form-group">
+      <label>Instance Name *</label>
+      <input type="text" id="inst-name" name="name" required placeholder="e.g., my-llama-instance">
+      <small>Unique name for this instance</small>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Engine Type *</label>
+        <select id="engine-select" name="engine_type">
+          <option value="">-- Select engine --</option>
+          {{ engine_options | safe }}
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Target Node *</label>
+        <select id="node-select" name="node_id">{{ node_options | safe }}</select>
+        <small id="node-hint">Only active nodes shown</small>
+      </div>
+    </div>
+  </div>
+
+  <!-- Step 2: Preset selection with search -->
+  <div id="preset-section" style="display:none;background:#fff;border-radius:6px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,0.1);margin-bottom:16px;">
+    <div style="font-size:0.8em;color:#999;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;font-weight:600;">Step 2 — Preset</div>
+    <div class="form-group">
+      <input type="text" id="preset-search" placeholder="Search presets by name, category, or tags..." style="width:100%;padding:7px 10px;border:1px solid #ccc;border-radius:4px;font-size:0.9em;">
+      <small>Type to filter presets. Click a card to select.</small>
+    </div>
+    <div id="preset-results" style="max-height:300px;overflow-y:auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;margin-top:10px;"></div>
+  </div>
+
+  <!-- Step 2b: Manual config (shown when no preset selected) -->
+  <div id="manual-config-section" style="display:none;background:#fff;border-radius:6px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,0.1);margin-bottom:16px;">
+    <div style="font-size:0.8em;color:#999;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;font-weight:600;">Step 2 — Manual Config</div>
+
+    <!-- llama_server model search -->
+    <div id="fields-llama-server">
+      <div class="form-group">
+        <label>Model *</label>
+        <input type="text" id="model-search" placeholder="Search models by name, quantization, or path..." style="width:100%;padding:7px 10px;border:1px solid #ccc;border-radius:4px;font-size:0.9em;">
+        <div id="model-results" style="max-height:200px;overflow-y:auto;margin-top:8px;"></div>
+      </div>
+      <div id="manual-model-path-group" style="display:none;margin-top:10px;">
+        <div class="form-group">
+          <label>Or enter model path manually</label>
+          <input type="text" id="manual-model-path" placeholder="/mnt/llama/gguf/models/model.gguf">
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Step 3: Engine-specific fields -->
+  <div id="engine-specific-section" style="display:none;background:#fff;border-radius:6px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,0.1);margin-bottom:16px;">
+    <div style="font-size:0.8em;color:#999;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;font-weight:600;">Step 3 — Configuration</div>
+
+    <!-- RPC-specific fields -->
+    <div id="fields-rpc" style="display:none;">
+      <div class="form-group">
+        <label>GPU Device (overrides preset)</label>
+        <input type="text" id="rpc-device" placeholder="Vulkan0, CUDA0, CPU">
+        <small>Preset device takes precedence if set</small>
+      </div>
+      <div class="form-group">
+        <label>Binary Path Override</label>
+        <input type="text" id="rpc-binary-path" placeholder="/opt/quickrobot/llama.cpp/build/bin/rpc-server">
+        <small>Preset binary takes precedence if set</small>
+      </div>
+      <div class="form-group">
+        <label>Extra CLI Args (space-separated)</label>
+        <input type="text" id="rpc-cli-args" placeholder="--log-level debug --ctx-size 8192">
+      </div>
+      <div class="form-group">
+        <label>Split Value</label>
+        <input type="number" id="rpc-split" value="0" min="0" placeholder="Tensor split value for this RPC instance">
+        <small>Used when bound to a llama-server; combined with other RPC splits in tensor_split</small>
+      </div>
+    </div>
+
+    <!-- iperf3 specific fields -->
+    <div id="fields-iperf3" style="display:none;">
+      <div class="form-group">
+        <label>Mode</label>
+        <select id="mode-select" style="width:100%;padding:7px 10px;border:1px solid #ccc;border-radius:4px;font-size:0.9em;">
+          <option value="">-- Select mode --</option>
+          <option value="server">Server (listen mode)</option>
+          <option value="client">Client (connect mode)</option>
+        </select>
+      </div>
+      <div id="client-target-fields" style="display:none;">
+        <div class="form-row">
+          <div class="form-group">
+            <label>Target Host</label>
+            <input type="text" id="target-host" placeholder="e.g., 192.168.31.17 or dllama7.lan">
+          </div>
+          <div class="form-group">
+            <label>Target Port</label>
+            <input type="number" id="target-port" value="5201" placeholder="5201">
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Benchmark Duration (seconds)</label>
+          <input type="number" id="bench-duration" value="30" min="1" max="3600">
+        </div>
+      </div>
+    </div>
+
+    <!-- Universal engine fields — lean config for arbitrary services -->
+    <div id="fields-universal" style="display:none;">
+      <div class="form-group">
+        <label>Binary Path (for health checks)</label>
+        <input type="text" id="univ-binary-path" placeholder="/usr/bin/ping" value="">
+        <small>Also used as ExecStart fallback if no start command set</small>
+      </div>
+      <div class="form-group">
+        <label>Exec Start Command</label>
+        <textarea id="univ-start-cmd" rows="2" placeholder="/CORE/.opencode/bin/opencode web --hostname 0.0.0.0 --port 8666" style="width:100%;padding:7px 10px;border:1px solid #ccc;border-radius:4px;font-family:monospace;font-size:0.9em;"></textarea>
+        <small>The ExecStart line — full command to run (like systemd ExecStart=)</small>
+      </div>
+      <div class="form-group">
+        <label>ENV Vars (one per line, KEY=VALUE)</label>
+        <textarea id="univ-env-vars" rows="3" placeholder='OPENCODE_SERVER_PASSWORD="abc123"
+PORT=8666' style="width:100%;padding:7px 10px;border:1px solid #ccc;border-radius:4px;font-family:monospace;font-size:0.9em;"></textarea>
+        <small>Environment variables — one per line</small>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+            <input type="checkbox" id="univ-instant-fb">
+            <span>Instant Feedback (sync execution)</span>
+          </label>
+        </div>
+        <div class="form-group">
+          <label>Feedback Timeout (seconds)</label>
+          <input type="number" id="univ-feedback-timeout" value="30" min="5" max="300">
+        </div>
+      </div>
+    </div>
+
+    <!-- Subprocess engine fields — configurable executable, working dir, CLI args -->
+    <div id="fields-subprocess" style="display:none;">
+      <div class="form-group">
+        <label>Executable *</label>
+        <input type="text" id="sub-executable" placeholder="/usr/bin/python3">
+        <small>Full path to the executable (required)</small>
+      </div>
+      <div class="form-group">
+        <label>Working Directory</label>
+        <input type="text" id="sub-working-dir" placeholder="/CORE/projects/quickrobot" value="">
+        <small>CWD for the subprocess (empty = no cwd override)</small>
+      </div>
+      <div class="form-group">
+        <label>CLI Args</label>
+        <input type="text" id="sub-cli-args" placeholder="web --hostname {IP} --port {PORT}">
+        <small>Use <code>{IP}</code> and <code>{PORT}</code> as placeholders — substituted from Host/Port at runtime. Space-separated args.</small>
+      </div>
+      <div class="form-group" id="sub-autostart-group">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+          <input type="checkbox" id="sub-start-on-boot" checked style="width:auto;">
+          <span>Auto-start on API restart</span>
+        </label>
+        <small>If checked, dead subprocess will be restarted when API server starts (PID recovery)</small>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Host (config_override)</label>
+          <input type="text" id="sub-host" value="127.0.0.1">
+          <small>Used in CLI args parsing and link generation</small>
+        </div>
+        <div class="form-group">
+          <label>Port (config_override)</label>
+          <input type="number" id="sub-port" value="8667" min="1" max="65535">
+          <small>Single source of truth for the service endpoint</small>
+        </div>
+      </div>
+    </div>
+
+    <!-- Shared override fields -->
+    <div class="form-row" id="override-fields">
+      <div class="form-group" id="port-override-group" style="display:none;">
+        <label>Port Override</label>
+        <input type="text" id="port-override" name="port_override" placeholder="Auto-assigned if empty">
+      </div>
+      <div class="form-group" id="gpu-device-group" style="display:none;">
+        <label>GPU Device</label>
+        <input type="text" id="gpu-device" name="gpu_device" placeholder="auto">
+      </div>
+    </div>
+
+    <!-- Llama-server cluster binding section -->
+    <div id="cluster-binding-section" style="display:none;">
+      <div class="form-group">
+        <label>Split Mode</label>
+        <select id="split-mode" style="width:100%;padding:7px 10px;border:1px solid #ccc;border-radius:4px;font-size:0.9em;">
+          <option value="layer" selected>Layer</option>
+          <option value="row">Row</option>
+          <option value="tensor">Tensor</option>
+        </select>
+        <small>Controls how the model is split across GPU/RPC workers</small>
+      </div>
+      <div class="form-group">
+        <label>Split Value</label>
+        <input type="number" id="split-val" value="0" min="0" placeholder="e.g., 42">
+        <small>This instance's tensor split value (combined with bound RPC splits)</small>
+      </div>
+      <div class="form-group" id="systemd-options-group" style="display:none;">
+        <label>Restart Policy</label>
+        <select id="restart-policy" style="width:100%;padding:7px 10px;border:1px solid #ccc;border-radius:4px;font-size:0.9em;">
+          <option value="no">no</option>
+          <option value="always">always</option>
+          <option value="on-success">on-success</option>
+          <option value="on-failure">on-failure</option>
+          <option value="on-abnormal">on-abnormal</option>
+          <option value="on-watchdog">on-watchdog</option>
+        </select>
+        <small>Systemd Restart= policy for the service unit</small>
+      </div>
+      <div class="form-group" id="start-on-boot-group" style="display:none;">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+          <input type="checkbox" id="start-on-boot" style="width:auto;">
+          <span>Enable service on boot (systemctl enable)</span>
+        </label>
+        <small>Whether the systemd unit should be enabled for automatic start on boot</small>
+      </div>
+      <div class="form-group">
+        <label>Bound RPC Instances</label>
+        <select id="rpc-bind-select" multiple style="width:100%;padding:7px 10px;border:1px solid #ccc;border-radius:4px;font-size:0.9em;height:120px;"></select>
+        <small>Select one or more RPC instances to bind. Tensor split computed automatically.</small>
+        <div id="rpc-bind-preview" style="margin-top:6px;font-size:0.85em;color:#666;">
+          <span>Tensor Split: <strong id="tensor-split-preview">-</strong></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Deploy options -->
+    <div class="form-group">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+        <input type="checkbox" id="deploy-toggle" checked style="width:auto;">
+        <span>Deploy immediately after creation</span>
+      </label>
+    </div>
+    <div class="form-group">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+        <input type="checkbox" id="start-after-deploy-toggle" style="width:auto;">
+        <span>Start service after deploy (systemctl start)</span>
+      </label>
+      <small>Service transitions to "running" state after deployment completes</small>
+    </div>
+  </div>
+
+  <!-- Step 4: Review summary -->
+  <div id="review-section" style="display:none;background:#f8f9fa;border-radius:6px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,0.1);margin-bottom:16px;">
+    <div style="font-size:0.8em;color:#999;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;font-weight:600;">Review &amp; Create</div>
+    <div id="review-content"></div>
+  </div>
+
+  <!-- Status message area -->
+  <div id="status-area" style="display:none;margin-bottom:12px;padding:10px 14px;border-radius:4px;font-size:0.9em;"></div>
+
+  <div class="form-actions">
+    <button type="button" class="btn btn-success" id="create-btn">Create Instance</button>
+    <a href="/webui/instances" class="btn" style="text-decoration:none;background:#999;color:#fff;">Cancel</a>
+  </div>
+</div>
+
+<script>
+(function() {
+  var engineCaps = {{ engine_caps | safe }};
+  var engineSelect = document.getElementById('engine-select');
+  var nodeSelect = document.getElementById('node-select');
+  var instNameInput = document.getElementById('inst-name');
+
+  var presetSection = document.getElementById('preset-section');
+  var presetSearch = document.getElementById('preset-search');
+  var presetResults = document.getElementById('preset-results');
+  var manualConfigSection = document.getElementById('manual-config-section');
+  var engineSpecificSection = document.getElementById('engine-specific-section');
+  var reviewSection = document.getElementById('review-section');
+  var reviewContent = document.getElementById('review-content');
+
+  var presetSelect = document.getElementById('preset-select');
+  var modelSearchInput = document.getElementById('model-search');
+  var modelResults = document.getElementById('model-results');
+  var manualModelPathGroup = document.getElementById('manual-model-path-group');
+  var manualModelPathInput = document.getElementById('manual-model-path');
+
+  var modeSelect = document.getElementById('mode-select');
+  var clientTargetFields = document.getElementById('client-target-fields');
+  var targetHostInput = document.getElementById('target-host');
+  var targetPortInput = document.getElementById('target-port');
+  var benchDurationInput = document.getElementById('bench-duration');
+
+  // RPC engine field references
+  var rpcFields = null;
+  (function() {
+    var f = document.getElementById('fields-rpc');
+    if (f) {
+      rpcFields = {
+        device:   document.getElementById('rpc-device'),
+        binary:   document.getElementById('rpc-binary-path'),
+        cliArgs:  document.getElementById('rpc-cli-args'),
+      };
+    }
+  })();
+
+  // Universal engine field references
+  var univFields = null;
+  (function() {
+    var f = document.getElementById('fields-universal');
+    if (f) {
+      univFields = {
+        binary:    document.getElementById('univ-binary-path'),
+        startCmd:  document.getElementById('univ-start-cmd'),
+        envVars:   document.getElementById('univ-env-vars'),
+        instantFb: document.getElementById('univ-instant-fb'),
+        fbTimeout: document.getElementById('univ-feedback-timeout'),
+      };
+    }
+  })();
+
+  // Subprocess engine field references
+  var subFields = null;
+  (function() {
+    var f = document.getElementById('fields-subprocess');
+    if (f) {
+      subFields = {
+        executable: document.getElementById('sub-executable'),
+        workingDir: document.getElementById('sub-working-dir'),
+        cliArgs:   document.getElementById('sub-cli-args'),
+        host:      document.getElementById('sub-host'),
+        port:      document.getElementById('sub-port'),
+        autostart: document.getElementById('sub-start-on-boot'),
+      };
+    }
+  })();
+
+  var portGroup = document.getElementById('port-override-group');
+  var gpuGroup = document.getElementById('gpu-device-group');
+  var systemdRestartGroup = document.getElementById('systemd-options-group');
+  var systemdBootGroup = document.getElementById('start-on-boot-group');
+
+  var currentPresetId = null;
+  var selectedPresetData = null;
+  var selectedModelPath = '';
+  var iperf3Mode = '';
+  var allPresets = [];
+  var allModels = [];
+
+  // Validation state
+  var errors = {};
+
+  // Persist node selection across innerHTML rebuilds (engine change handler)
+  var lastNodeValue = null;
+
+  function showEngineFields(engineName) {
+    presetSection.style.display = 'none';
+    manualConfigSection.style.display = 'none';
+    engineSpecificSection.style.display = 'none';
+    reviewSection.style.display = 'none';
+    var clusterSection = document.getElementById('cluster-binding-section');
+    if (clusterSection) clusterSection.style.display = 'none';
+    // Reset deploy options labels to default
+    var sobSpan = null;
+    if (systemdBootGroup) sobSpan = systemdBootGroup.querySelector('span');
+    if (sobSpan) sobSpan.textContent = 'Enable service on boot (systemctl enable)';
+    var sad = document.getElementById('start-after-deploy-toggle');
+    if (sad) sad.checked = false;
+    if (sad) {
+      var labelEl = sad.closest('.form-group').querySelector('span');
+      if (labelEl) labelEl.textContent = 'Start service after deploy (systemctl start)';
+    }
+
+    // llama_server: show preset section; other engines: show their own sections
+    if (engineName === 'llama_server') {
+       presetSection.style.display = 'block';
+       portGroup.style.display = 'block';
+       gpuGroup.style.display = 'block';
+       if (systemdRestartGroup) systemdRestartGroup.style.display = 'block';
+       if (systemdBootGroup) systemdBootGroup.style.display = 'block';
+       loadPresets();
+       // Show cluster binding section for llama_server
+       if (clusterSection) {
+         clusterSection.style.display = 'block';
+         loadRpcInstancesForBinding();
+       }
+     } else if (engineName === 'llama_rpc') {
+       presetSection.style.display = 'block';
+       engineSpecificSection.style.display = 'block';
+       document.getElementById('fields-rpc').style.display = 'block';
+       portGroup.style.display = 'block';
+       gpuGroup.style.display = 'block';
+       if (systemdRestartGroup) systemdRestartGroup.style.display = 'block';
+       if (systemdBootGroup) systemdBootGroup.style.display = 'block';
+       loadPresets();
+   } else if (engineName === 'iperf3') {
+        presetSection.style.display = 'block';
+        engineSpecificSection.style.display = 'block';
+        if (systemdRestartGroup) systemdRestartGroup.style.display = 'block';
+        loadPresets();
+  } else if (engineName === 'universal') {
+        engineSpecificSection.style.display = 'block';
+        document.getElementById('fields-universal').style.display = 'block';
+        // Hide port override for universal (uses base_port instead)
+        portGroup.style.display = 'none';
+        gpuGroup.style.display = 'none';
+        clearPresetResults();
+        // Change boot label text for universal
+        var sobSpan = null;
+        if (systemdBootGroup) sobSpan = systemdBootGroup.querySelector('span');
+        if (sobSpan) sobSpan.textContent = 'Auto-start on reboot (systemctl enable)';
+        // Default start-after-deploy checked for universal
+        var sad = document.getElementById('start-after-deploy-toggle');
+        if (sad) sad.checked = true;
+        var sadLabel = null;
+        if (sad) {
+          var labelEl = sad.closest('.form-group').querySelector('span');
+          if (labelEl) labelEl.textContent = 'Auto-start service after deploy (systemctl start)';
+        }
+     } else if (engineName === 'subprocess') {
+       engineSpecificSection.style.display = 'block';
+       document.getElementById('fields-subprocess').style.display = 'block';
+       portGroup.style.display = 'block';
+       gpuGroup.style.display = 'none';
+       clearPresetResults();
+     } else {
+      // Default: hide all engine-specific fields
+      portGroup.style.display = 'none';
+      gpuGroup.style.display = 'none';
+    }
+  }
+
+  function clearPresetResults() {
+    presetResults.innerHTML = '';
+    presetSearch.value = '';
+    currentPresetId = null;
+    selectedPresetData = null;
+  }
+
+  // --- RPC Binding for llama_server cluster ---
+  var allRpcInstances = [];
+  var selectedRpcIds = [];
+
+  function loadRpcInstancesForBinding() {
+    qrApi('/instances?engine_type_id=11')
+    .then(function(data) {
+    allRpcInstances = data.items || [];
+    var sel = document.getElementById('rpc-bind-select');
+    if (!sel) return;
+    sel.innerHTML = '';
+    allRpcInstances.forEach(function(ri) {
+    var opt = document.createElement('option');
+    opt.value = ri.id;
+    opt.textContent = ri.id + ' - ' + (ri.name || 'RPC') + ' @ ' + (ri.node_hostname || '?') + ':' + (ri.port_assigned || '?') + ' [split:' + (ri.split || 0) + ']';
+    // Pre-select if this instance is already bound (from preset or previous selection)
+    if (selectedRpcIds.indexOf(ri.id) !== -1) opt.selected = true;
+    sel.appendChild(opt);
+    });
+    updateTensorSplitPreview();
+    }).catch(function() { /* non-critical */ });
+  }
+
+  function updateTensorSplitPreview() {
+    var sel = document.getElementById('rpc-bind-select');
+    if (!sel) return;
+    selectedRpcIds = [];
+    for (var i = 0; i < sel.options.length; i++) {
+      if (sel.options[i].selected) selectedRpcIds.push(parseInt(sel.options[i].value, 10));
+    }
+    var splitVal = parseInt(document.getElementById('split-val').value, 10) || 0;
+    var parts = [splitVal];
+    allRpcInstances.forEach(function(ri) {
+      if (selectedRpcIds.indexOf(ri.id) !== -1) {
+        parts.push(ri.split || 0);
+      }
+    });
+    var preview = document.getElementById('tensor-split-preview');
+    if (preview) preview.textContent = parts.join(',');
+  }
+
+  // Listen for selection changes on the RPC binding select
+  function bindRpcSelectHandler() {
+    var sel = document.getElementById('rpc-bind-select');
+    if (!sel) return;
+    // Remove old listeners by cloning
+    var newSel = sel.cloneNode(true);
+    sel.parentNode.replaceChild(newSel, sel);
+    newSel.addEventListener('change', updateTensorSplitPreview);
+  }
+
+  function renderPresetCards(presets) {
+    presetResults.innerHTML = '';
+    if (!presets || presets.length === 0) {
+      presetResults.innerHTML = '<small style="color:#888;">No presets match your search</small>';
+      return;
+    }
+    presets.forEach(function(p) {
+      var card = document.createElement('div');
+      card.style.cssText = 'border:2px solid #e0e0e0;border-radius:6px;padding:12px;cursor:pointer;transition:all 0.2s;';
+      card.innerHTML = '<div style="font-weight:600;color:#1a1a2e;">' + (p.name || 'Preset #' + p.id) + '</div>' +
+        '<small style="color:#666;display:block;margin-top:4px;">Model: ' + (p.model_path || 'N/A') + '</small>' +
+        '<small style="color:#888;display:block;margin-top:2px;">Category: ' + (p.category || 'default') + '</small>' +
+        (p.tags ? '<small style="color:#999;display:block;margin-top:2px;">Tags: ' + p.tags + '</small>' : '');
+
+      card.addEventListener('mouseenter', function() {
+        if (currentPresetId !== p.id) this.style.borderColor = '#4fc3f7';
+      });
+      card.addEventListener('mouseleave', function() {
+        if (currentPresetId !== p.id) this.style.borderColor = '#e0e0e0';
+      });
+
+    card.addEventListener('click', function() {
+        // Deselect previous
+        document.querySelectorAll('#preset-results > div').forEach(function(c) {
+          c.style.borderColor = '#e0e0e0';
+        });
+
+        this.style.borderColor = '#4fc3f7';
+        currentPresetId = p.id;
+        selectedPresetData = p;
+        // Pre-select RPC bindings from preset (llama_server only)
+        if (engineSelect.value === 'llama_server' && p.rpc_bind_ids) {
+          try {
+            var presetRpcs = typeof p.rpc_bind_ids === 'string' ? JSON.parse(p.rpc_bind_ids) : p.rpc_bind_ids;
+            selectedRpcIds = Array.isArray(presetRpcs) ? presetRpcs : [];
+            var sel = document.getElementById('rpc-bind-select');
+            if (sel) {
+              for (var oi = 0; oi < sel.options.length; oi++) {
+                sel.options[oi].selected = (selectedRpcIds.indexOf(parseInt(sel.options[oi].value, 10)) !== -1);
+              }
+            }
+          } catch(e) {}
+        }
+        updateReview();
+      });
+
+      presetResults.appendChild(card);
+    });
+  }
+
+  function filterPresets(query) {
+    if (!query) {
+      renderPresetCards(allPresets);
+      return;
+    }
+    var q = query.toLowerCase();
+    var filtered = allPresets.filter(function(p) {
+      return (p.name || '').toLowerCase().indexOf(q) !== -1 ||
+             (p.category || '').toLowerCase().indexOf(q) !== -1 ||
+             (p.tags || '').toLowerCase().indexOf(q) !== -1 ||
+             (p.model_path || '').toLowerCase().indexOf(q) !== -1;
+    });
+    renderPresetCards(filtered);
+  }
+
+  function loadPresets() {
+    var engine = engineSelect.value;
+    if (!engine) return;
+    qrApi('/engine/' + engine + '/presets')
+    .then(function(data) {
+allPresets = data.items || [];
+renderPresetCards(allPresets);
+    }).catch(function(e) {
+        console.log('Failed to load presets: ' + e);
+      });
+  }
+
+  function loadModels() {
+    if (!modelSearchInput) return;
+    qrApi('/engine/llama_server/models')
+    .then(function(data) {
+allModels = data.items || [];
+renderModelCards(allModels);
+    }).catch(function() {});
+  }
+
+  function renderModelCards(models) {
+    modelResults.innerHTML = '';
+    if (!models || models.length === 0) {
+      modelResults.innerHTML = '<small style="color:#888;">No models found</small>';
+      return;
+    }
+    models.forEach(function(m) {
+      var shortPath = (m.model_path || '').replace('/mnt/llama/gguf/models/', 'models/');
+      var card = document.createElement('div');
+      card.style.cssText = 'padding:8px 10px;border:1px solid #e0e0e0;border-radius:4px;cursor:pointer;margin-bottom:4px;transition:all 0.15s;display:flex;justify-content:space-between;align-items:center;';
+      card.innerHTML = '<div>' +
+        '<span style="font-weight:600;">' + (m.name || m.model_path || 'Unknown') + '</span> ' +
+        '<small style="color:#888;">[' + (m.quantization || '?') + ']</small>' +
+        '<br><small style="color:#666;font-size:0.8em;">' + shortPath + '</small></div>';
+
+      card.addEventListener('mouseenter', function() { this.style.background = '#f0f7ff'; });
+      card.addEventListener('mouseleave', function() { this.style.background = ''; });
+      card.addEventListener('click', function() {
+        selectedModelPath = m.model_path || '';
+        modelSearchInput.value = '';
+        modelResults.innerHTML = '';
+        updateReview();
+      });
+
+      modelResults.appendChild(card);
+    });
+  }
+
+  function filterModels(query) {
+    if (!query) { renderModelCards(allModels); return; }
+    var q = query.toLowerCase();
+    var filtered = allModels.filter(function(m) {
+      return (m.name || '').toLowerCase().indexOf(q) !== -1 ||
+             (m.quantization || '').toLowerCase().indexOf(q) !== -1 ||
+             (m.model_path || '').toLowerCase().indexOf(q) !== -1;
+    });
+    renderModelCards(filtered);
+  }
+
+  function validate() {
+    errors = {};
+    var name = instNameInput.value.trim();
+    if (!name) errors.name = 'Instance name is required';
+    if (!engineSelect.value) errors.engine = 'Engine type is required';
+    if (!nodeSelect.value) errors.node = 'Target node is required';
+    if (engineSelect.value === 'llama_server' && !currentPresetId && !selectedModelPath && !manualModelPathInput.value.trim()) {
+      errors.model = 'Select a preset or enter a model path';
+    }
+    // Universal: at least start_command or binary_path must be set for startability
+    if (engineSelect.value === 'universal' && univFields) {
+      var hasStartCmd = univFields.startCmd ? univFields.startCmd.value.trim() !== '' : false;
+      var hasBinary = univFields.binary ? univFields.binary.value.trim() !== '' : false;
+      if (!hasStartCmd && !hasBinary) {
+        errors.universal = 'For Universal engine, set either Start Command or Binary Path';
+      }
+    }
+    // Clear previous error highlights
+    instNameInput.style.borderColor = '';
+    return Object.keys(errors).length === 0;
+  }
+
+  function showError(field, msg) {
+    if (field === 'name') instNameInput.style.borderColor = '#f44336';
+  }
+
+  function updateReview() {
+    var name = instNameInput.value.trim();
+    var engine = engineSelect.options[engineSelect.selectedIndex].text || engineSelect.value;
+    var node = nodeSelect.options[nodeSelect.selectedIndex].text || nodeSelect.value;
+    var presetInfo = selectedPresetData ? (selectedPresetData.name || 'Preset #' + currentPresetId) : 'None';
+    var deployNow = document.getElementById('deploy-toggle').checked;
+
+    var html = '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:0.9em;">' +
+      '<div><small style="color:#888;">Name</small><div style="font-weight:600;">' + (name || '-') + '</div></div>' +
+      '<div><small style="color:#888;">Engine</small><div style="font-weight:600;">' + engine + '</div></div>' +
+      '<div><small style="color:#888;">Node</small><div style="font-weight:600;">' + node + '</div></div>' +
+      '<div><small style="color:#888;">Preset</small><div style="font-weight:600;">' + presetInfo + '</div></div>';
+
+    if (selectedModelPath) {
+      html += '<div style="grid-column:1/-1;"><small style="color:#888;">Model Path</small><div style="font-family:monospace;font-size:0.85em;">' + selectedModelPath + '</div></div>';
+    }
+if (engine === 'llama_server') {
+       var sm = document.getElementById('split-mode');
+       if (sm && sm.value) html += '<div><small style="color:#888;">Split Mode</small><div>' + sm.value + '</div></div>';
+       var sv2 = document.getElementById('split-val');
+       if (sv2 && sv2.value) html += '<div><small style="color:#888;">Split Value</small><div>' + sv2.value + '</div></div>';
+       var rpcSel = document.getElementById('rpc-bind-select');
+       if (rpcSel && rpcSel.selectedOptions.length > 0) {
+         var boundNames = [];
+         for (var bi = 0; bi < rpcSel.selectedOptions.length; bi++) {
+           boundNames.push(rpcSel.options[bi].textContent.split(' @ ')[0]);
+         }
+         html += '<div><small style="color:#888;">Bound RPCs</small><div>' + boundNames.join(', ') + '</div></div>';
+       }
+     }
+    if (engine === 'llama_rpc') {
+       var rpcSplit2 = document.getElementById('rpc-split');
+       if (rpcSplit2 && rpcSplit2.value) html += '<div><small style="color:#888;">RPC Split Value</small><div>' + rpcSplit2.value + '</div></div>';
+     }
+    if (engine === 'iperf3' && iperf3Mode) {
+       html += '<div><small style="color:#888;">Mode</small><div style="font-weight:600;">' + iperf3Mode + '</div></div>';
+     }
+    if (engineSelect.value === 'universal' && univFields) {
+      var bp = univFields.binary ? univFields.binary.value.trim() : '';
+      if (bp) html += '<div style="grid-column:1/-1;"><small style="color:#888;">Binary Path</small><div style="font-family:monospace;font-size:0.85em;">' + bp + '</div></div>';
+      var sc = univFields.startCmd ? univFields.startCmd.value.trim() : '';
+      if (sc) html += '<div style="grid-column:1/-1;"><small style="color:#888;">Exec Start</small><div style="font-family:monospace;font-size:0.85em;">' + sc + '</div></div>';
+      var ev = univFields.envVars ? univFields.envVars.value.trim() : '';
+      if (ev) html += '<div style="grid-column:1/-1;"><small style="color:#888;">ENV Vars</small><div style="font-family:monospace;font-size:0.85em;white-space:pre-line;">' + ev + '</div></div>';
+   if (univFields.instantFb && univFields.instantFb.checked) {
+         html += '<div><small style="color:#888;">Exec Mode</small><div style="font-weight:600;color:#4caf50;">Sync (instant feedback)</div></div>';
+       } else {
+         html += '<div><small style="color:#888;">Exec Mode</small><div style="font-weight:600;">Async</div></div>';
+       }
+     }
+   if (engineSelect.value === 'subprocess' && subFields) {
+        var ex = subFields.executable ? subFields.executable.value.trim() : '';
+        if (ex) html += '<div style="grid-column:1/-1;"><small style="color:#888;">Executable</small><div style="font-family:monospace;font-size:0.85em;">' + ex + '</div></div>';
+        var wd = subFields.workingDir ? subFields.workingDir.value.trim() : '';
+        if (wd) html += '<div><small style="color:#888;">Working Dir</small><div style="font-family:monospace;font-size:0.85em;">' + wd + '</div></div>';
+        var ca = subFields.cliArgs ? subFields.cliArgs.value.trim() : '';
+        if (ca) html += '<div style="grid-column:1/-1;"><small style="color:#888;">CLI Args</small><div style="font-family:monospace;font-size:0.85em;">' + ca + '</div></div>';
+        var sh = subFields.host ? subFields.host.value.trim() : '127.0.0.1';
+        var sp = subFields.port ? subFields.port.value : '8667';
+        html += '<div><small style="color:#888;">Endpoint</small><div style="font-weight:600;color:#4caf50;">' + sh + ':' + sp + '</div></div>';
+        var sa = subFields.autostart;
+        html += '<div><small style="color:#888;">Auto-start on restart</small><div style="font-weight:600;' + (sa && sa.checked ? 'color:#4caf50;' : 'color:#f44336;') + '">' + (sa && sa.checked ? 'Yes' : 'No') + '</div></div>';
+      }
+    if (deployNow) {
+      html += '<div><small style="color:#888;">Deploy</small><div style="font-weight:600;color:#4caf50;">Yes</div></div>';
+      var sad = document.getElementById('start-after-deploy-toggle');
+      if (sad && sad.checked) {
+        html += '<div><small style="color:#888;">Start After Deploy</small><div style="font-weight:600;color:#4caf50;">Yes</div></div>';
+      }
+    } else {
+      html += '<div><small style="color:#888;">Deploy</small><div style="font-weight:600;color:#999;">No (create only)</div></div>';
+    }
+
+    html += '</div>';
+    reviewContent.innerHTML = html;
+    reviewSection.style.display = 'block';
+  }
+
+  // --- Event handlers ---
+
+  engineSelect.addEventListener('change', function() {
+    var val = this.value;
+    clearPresetResults();
+    selectedModelPath = '';
+    manualModelPathInput.value = '';
+    showEngineFields(val);
+    if (val) loadModels();
+    // Re-attach RPC binding select listener when switching engines
+    if (val === 'llama_server') bindRpcSelectHandler();
+    // Switch node options for subprocess vs other engines
+    // Preserve user's selection across innerHTML rebuilds: save before replace, restore after
+    var ns = document.getElementById('node-select');
+    var nh = document.getElementById('node-hint');
+    if (ns) lastNodeValue = ns.value;
+    if (val === 'subprocess') {
+      ns.innerHTML = {{ subprocess_node_options | tojson }};
+      if (nh) nh.textContent = 'Subprocess runs on API host (localhost)';
+    } else {
+      ns.innerHTML = {{ node_options | tojson }};
+      if (nh) nh.textContent = 'Only active nodes shown';
+    }
+    // Restore saved selection if it still exists in new option set
+    if (ns && lastNodeValue) {
+      var restored = false;
+      for (var i = 0; i < ns.options.length; i++) {
+        if (ns.options[i].value === lastNodeValue) {
+          ns.selectedIndex = i;
+          restored = true;
+          break;
+        }
+      }
+      if (!restored) {
+        // Saved value no longer available — keep first option but clear saved value
+        // so next engine switch starts fresh
+        lastNodeValue = null;
+      }
+    }
+    updateReview();
+  });
+
+  instNameInput.addEventListener('input', function() {
+    instNameInput.style.borderColor = '';
+    delete errors.name;
+    updateReview();
+  });
+
+  nodeSelect.addEventListener('change', updateReview);
+
+  presetSearch.addEventListener('input', function() { filterPresets(this.value); });
+
+  modelSearchInput.addEventListener('input', function() { filterModels(this.value); });
+
+  manualModelPathInput.addEventListener('input', function() {
+    selectedModelPath = this.value.trim();
+    updateReview();
+  });
+
+  document.getElementById('deploy-toggle').addEventListener('change', updateReview);
+  document.getElementById('start-after-deploy-toggle').addEventListener('change', updateReview);
+
+  if (modeSelect) {
+    modeSelect.addEventListener('change', function() {
+      iperf3Mode = this.value;
+      if (!clientTargetFields) return;
+      clientTargetFields.style.display = iperf3Mode === 'client' ? 'block' : 'none';
+      updateReview();
+    });
+  }
+
+  // Universal engine field listeners
+  if (univFields) {
+    var univAllInputs = [
+      univFields.binary, univFields.startCmd, univFields.envVars,
+      univFields.fbTimeout
+    ];
+    var univCheckboxes = [univFields.instantFb];
+    univAllInputs.forEach(function(el) {
+      if (el) el.addEventListener('input', updateReview);
+    });
+    univCheckboxes.forEach(function(el) {
+      if (el) el.addEventListener('change', updateReview);
+    });
+  }
+
+  // Subprocess engine field listeners
+  if (subFields) {
+    var subAllInputs = [
+      subFields.executable, subFields.workingDir, subFields.cliArgs,
+      subFields.host, subFields.port
+    ];
+    var subCheckboxes = [subFields.autostart];
+    subAllInputs.forEach(function(el) {
+      if (el) el.addEventListener('input', updateReview);
+    });
+    subCheckboxes.forEach(function(el) {
+      if (el) el.addEventListener('change', updateReview);
+    });
+  }
+
+  document.getElementById('create-btn').addEventListener('click', function() {
+    if (!validate()) {
+      var firstErr = Object.values(errors)[0];
+      setStatus('error', firstErr);
+      return;
+    }
+
+    var name = instNameInput.value.trim();
+    var engineVal = engineSelect.value;
+    var nodeVal = nodeSelect.value;
+    var deployNow = document.getElementById('deploy-toggle').checked;
+    var startAfterDeploy = document.getElementById('start-after-deploy-toggle').checked;
+
+    // Get engine ID from data attr
+    var selOptions = engineSelect.options;
+    var engineId = null;
+    for (var oi = 0; oi < selOptions.length; oi++) {
+      if (selOptions[oi].selected) {
+        engineId = parseInt(selOptions[oi].getAttribute('data-id'), 10);
+        break;
+      }
+    }
+
+    var reqBody = {"name": name, "engine_type_id": engineId, "node_id": parseInt(nodeVal, 10)};
+    if (currentPresetId) reqBody.preset_id = currentPresetId;
+    if (!deployNow) reqBody.deploy = false;
+    if (startAfterDeploy) reqBody.start_after_deploy = true;
+
+    if (engineVal === 'llama_server' && selectedModelPath) {
+      reqBody.config_override = {"model": {"LLAMA_ARG_MODEL": selectedModelPath}};
+    } else if (engineVal === 'llama_server' && manualModelPathInput.value.trim()) {
+      reqBody.config_override = {"model": {"LLAMA_ARG_MODEL": manualModelPathInput.value.trim()}};
+    }
+
+   var portVal = document.getElementById('port-override').value.trim();
+     if (portVal) reqBody.port_override = parseInt(portVal, 10);
+     var gpuVal = document.getElementById('gpu-device').value.trim();
+     if (gpuVal) reqBody.gpu_device = gpuVal;
+
+     // Systemd options for llama_server/rpc/iperf3
+     var rpSel = document.getElementById('restart-policy');
+     if (rpSel && rpSel.value && rpSel.value !== 'no') {
+       reqBody.restart_policy = rpSel.value;
+     }
+     var sobCb = document.getElementById('start-on-boot');
+     if (sobCb && sobCb.checked) {
+       reqBody.start_on_boot = true;
+     }
+
+     // Llama-server cluster binding
+    if (engineVal === 'llama_server') {
+      var splitModeEl = document.getElementById('split-mode');
+      if (splitModeEl && splitModeEl.value) {
+        reqBody.split_mode = splitModeEl.value;
+      }
+      var splitValEl = document.getElementById('split-val');
+      if (splitValEl) {
+        var sv = parseInt(splitValEl.value, 10);
+        if (!isNaN(sv)) {
+          if (!reqBody.config_override) reqBody.config_override = {};
+          reqBody.config_override.split = sv;
+        }
+      }
+      // Collect selected RPC bindings
+      var rpcSel = document.getElementById('rpc-bind-select');
+      if (rpcSel) {
+        selectedRpcIds = [];
+        for (var ri = 0; ri < rpcSel.options.length; ri++) {
+          if (rpcSel.options[ri].selected) {
+            selectedRpcIds.push(parseInt(rpcSel.options[ri].value, 10));
+          }
+        }
+      }
+      if (selectedRpcIds.length > 0) {
+        reqBody.rpc_bind_ids = selectedRpcIds;
+      }
+    }
+
+    // RPC instance split value
+    if (engineVal === 'llama_rpc') {
+      var rpcSplitEl = document.getElementById('rpc-split');
+      if (rpcSplitEl) {
+        var rs = parseInt(rpcSplitEl.value, 10);
+        if (!isNaN(rs)) {
+          if (!reqBody.config_override) reqBody.config_override = {};
+          reqBody.config_override.split = rs;
+        }
+      }
+    }
+
+    if (engineVal === 'iperf3') {
+      if (iperf3Mode === 'server') {
+        reqBody.config_override = {"env": {"binary_path": "/usr/bin/iperf3"}, "cli_opts": ["-s"]};
+      } else if (iperf3Mode === 'client' && targetHostInput) {
+        var th = targetHostInput.value.trim();
+        var tp = targetPortInput ? targetPortInput.value : '5201';
+        var td = benchDurationInput ? benchDurationInput.value : '30';
+        reqBody.config_override = {"env": {"binary_path": "/usr/bin/iperf3"}, "cli_opts": ["-c", th, "-p", tp, "-t", td]};
+      }
+    } else if (engineVal === 'llama_rpc' && rpcFields) {
+      var co_rpc = {};
+      // GPU device override
+      var dev = rpcFields.device ? rpcFields.device.value.trim() : '';
+      if (dev) co_rpc.gpu_device = dev;
+      // Binary path override
+      var bp2 = rpcFields.binary ? rpcFields.binary.value.trim() : '';
+      if (bp2) co_rpc.binary_path = bp2;
+      // Extra CLI args
+      var ca2 = rpcFields.cliArgs ? rpcFields.cliArgs.value.trim() : '';
+      if (ca2) {
+        co_rpc.extra_cli_args = ca2.split(/\s+/);
+      }
+      // Only set config_override if there's something in it
+      if (Object.keys(co_rpc).length > 0) {
+        reqBody.config_override = co_rpc;
+      }
+    } else if (engineVal === 'universal' && univFields) {
+      var co = {};
+      // Binary path (health check fallback)
+      var bp = univFields.binary ? univFields.binary.value.trim() : '';
+      if (bp) co.binary_path = bp;
+      // Start command
+      var sc = univFields.startCmd ? univFields.startCmd.value.trim() : '';
+      if (sc) co.start_command = sc;
+      // ENV vars
+      var envText = univFields.envVars ? univFields.envVars.value.trim() : '';
+      if (envText) {
+        var ev = {};
+        envText.split('\n').forEach(function(line) {
+          line = line.trim();
+          if (line && line.indexOf('=') !== -1) {
+            var idx = line.indexOf('=');
+            ev[line.substring(0, idx).trim()] = line.substring(idx + 1).trim();
+          }
+        });
+        if (Object.keys(ev).length > 0) co.env_vars = ev;
+      }
+      // Instant feedback flag
+      if (univFields.instantFb && univFields.instantFb.checked) {
+        co.sync_execution = true;
+        var ft = univFields.fbTimeout ? parseInt(univFields.fbTimeout.value, 10) : 30;
+        if (!isNaN(ft)) co.feedback_timeout = ft;
+      }
+    // Only set config_override if there's something in it
+       if (Object.keys(co).length > 0) {
+         reqBody.config_override = co;
+       }
+     } else if (engineVal === 'subprocess' && subFields) {
+       var co_sub = {};
+       // Executable (required)
+       var exe = subFields.executable ? subFields.executable.value.trim() : '';
+       if (exe) co_sub.executable = exe;
+       // Working directory
+       var wd = subFields.workingDir ? subFields.workingDir.value.trim() : '';
+       if (wd) co_sub.working_dir = wd;
+       // CLI args
+       var ca = subFields.cliArgs ? subFields.cliArgs.value.trim() : '';
+       if (ca) co_sub.cli_args = ca;
+  // Host/port (single source of truth for endpoint)
+        var sh = subFields.host ? subFields.host.value.trim() || '127.0.0.1' : '127.0.0.1';
+        if (sh) co_sub.host = sh;
+        var sp = subFields.port ? parseInt(subFields.port.value, 10) : 8667;
+        if (!isNaN(sp)) co_sub.port = sp;
+        // Only set config_override if there's something in it
+        if (Object.keys(co_sub).length > 0) {
+          reqBody.config_override = co_sub;
+        }
+        // Auto-start on API restart
+        var sa = subFields.autostart;
+        if (sa && sa.checked) {
+          reqBody.start_on_boot = true;
+        }
+      }
+
+    var btn = document.getElementById('create-btn');
+    btn.disabled = true;
+    btn.textContent = 'Creating...';
+    setStatus('info', 'Creating instance and deploying... this may take a minute.');
+
+    qrApi('/instances', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(reqBody)
+    }).then(function(data) {
+  if (data.status === 'ok') {
+    setStatus('success', 'Instance created successfully! Redirecting...');
+    setTimeout(function() { window.location.href = '/webui/instances'; }, 1500);
+  } else {
+    btn.disabled = false;
+    btn.textContent = 'Create Instance';
+    setStatus('error', 'Error: ' + (data.message || JSON.stringify(data)));
+  }
+}).catch(function(e) {
+        btn.disabled = false;
+        btn.textContent = 'Create Instance';
+        setStatus('error', 'Request failed: ' + e);
+      });
+  });
+
+  function setStatus(type, msg) {
+    var area = document.getElementById('status-area');
+    if (!area) return;
+    area.style.display = 'block';
+    if (type === 'error') {
+      area.style.background = '#fdecea'; area.style.color = '#c62828'; area.style.border = '1px solid #ef9a9a';
+    } else if (type === 'success') {
+      area.style.background = '#e8f5e9'; area.style.color = '#2e7d32'; area.style.border = '1px solid #a5d6a7';
+    } else {
+      area.style.background = '#e3f2fd'; area.style.color = '#1565c0'; area.style.border = '1px solid #90caf9';
+    }
+    area.textContent = msg;
+  }
+})();
+</script>

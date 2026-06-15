@@ -1,0 +1,275 @@
+<a class="back-link" href="/webui/hosts">Back to hosts</a>
+<h1>Node: {{ node.name | default('unknown') }}</h1>
+
+<!-- Node info card -->
+<div class="detail-grid">
+  <div class="detail-card">
+    <label>Hostname</label>
+    <value>{{ node.hostname or '—' }}</value>
+  </div>
+  <div class="detail-card">
+    <label>Status</label>
+    <value>{{ status_badge(node.status) }}</value>
+  </div>
+  <div class="detail-card">
+    <label>Visible in Lists</label>
+    <value>
+      <select id="node-active-toggle" data-id="{{ node.id }}" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.9em;">
+        {% if node.is_active | default(1) == 1 %}
+          <option value="1" selected>Active (show)</option>
+          <option value="0">Inactive (hide)</option>
+        {% else %}
+          <option value="1">Active (show)</option>
+          <option value="0" selected>Inactive (hide)</option>
+        {% endif %}
+      </select>
+    </value>
+  </div>
+  <div class="detail-card">
+    <label>OS</label>
+    <value>{{ node.os or '—' }}</value>
+  </div>
+  <div class="detail-card">
+    <label>CPU</label>
+    <value>{{ (node.cpu_cores or '—') ~ ' cores' }}</value>
+  </div>
+  <div class="detail-card">
+    <label>RAM</label>
+    <value>{{ '%.0f GB' % (node.ram_mb / 1024) if node.ram_mb else '—' }}</value>
+  </div>
+  <div class="detail-card">
+    <label>Age</label>
+    <value>{{ node.age_created or '—' }}</value>
+  </div>
+  <div class="detail-card">
+    <label>SSH User</label>
+    <value>{{ node.ansible_user or '—' }}</value>
+  </div>
+  <div class="detail-card">
+    <label>SSH Key</label>
+    <value>{% if node.ansible_key_path %}{{ node.ansible_key_path }}{% else %}ssh-agent (default){% endif %}</value>
+  </div>
+</div>
+
+<!-- Actions -->
+{% if node.id != 1 %}
+<div class="actions">
+  <button class="btn btn-success node-action" data-action="apt-update" data-id="{{ node.id }}" data-label="Update">Update (apt)</button>
+  <button class="btn btn-primary node-action" data-action="apt-upgrade" data-id="{{ node.id }}" data-label="Upgrade">Upgrade (apt)</button>
+  <button class="btn btn-success node-action" data-action="reboot" data-id="{{ node.id }}" data-label="Reboot">Reboot</button>
+  <button class="btn btn-danger node-action" data-action="shutdown" data-id="{{ node.id }}" data-label="Shutdown">Shutdown</button>
+</div>
+{% endif %}
+
+<!-- Instances table -->
+<h2>Instances on this node</h2>
+<table>
+<thead><tr><th>Name</th><th>State</th><th>Port</th></tr></thead>
+<tbody>
+{% for inst in instances %}
+<tr>
+  <td><a class="row-link" href="/webui/instances/{{ inst.id }}">{{ inst.name }}</a></td>
+  <td>{{ status_badge(inst.state) }}</td>
+  <td>{{ inst.port_assigned or 'N/A' }}</td>
+</tr>
+{% else %}
+<tr><td colspan="3" style="text-align:center;color:#888;">No instances on this node</td></tr>
+{% endfor %}
+</tbody>
+</table>
+
+<!-- Ansible action history -->
+<h2>Action History (Last 20)</h2>
+<table>
+<thead><tr><th>Time</th><th>Action</th><th>Status</th><th>Details</th></tr></thead>
+<tbody>
+{% for act in actions %}
+<tr>
+  <td>{{ act.started_at[:16] if act.started_at and act.started_at|length > 10 else '—' }}</td>
+  <td>{{ act.action_type }}</td>
+  <td>
+    {% if act.status == 'success' %}<span class="badge badge-active">OK</span>
+    {% elif act.status == 'failed' %}<span class="badge badge-failed">Failed</span>
+    {% else %}<span class="badge badge-other">{{ act.status }}</span>{% endif %}
+  </td>
+  <td>
+    {% if act.duration_ms and act.duration_ms > 0 %}{{ '%.1fs' % (act.duration_ms / 1000) }}
+    {% else %}—{% endif %}
+  </td>
+</tr>
+{% else %}
+<tr><td colspan="4" style="text-align:center;color:#888;">No actions recorded</td></tr>
+{% endfor %}
+</tbody>
+</table>
+
+<!-- SSH Settings Edit Section -->
+<div class="detail-card" style="margin-top:16px;">
+  <label>SSH Settings (edit per-host)</label>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px;">
+    <div>
+      <label style="font-size:0.8em;color:#888;">SSH User (empty = unset, falls back to .env/default)</label>
+      <input type="text" id="ssh-user-input" value="{{ node.ansible_user or '' }}" placeholder="unset" style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+    </div>
+    <div>
+      <label style="font-size:0.8em;color:#888;">SSH Key Path (empty = unset, falls back to ssh-agent)</label>
+      <input type="text" id="ssh-key-input" value="{% if node.ansible_key_path %}{{ node.ansible_key_path }}{% endif %}" placeholder="unset" style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+    </div>
+  </div>
+  <button id="save-ssh-settings" class="btn btn-primary" style="margin-top:8px;padding:5px 16px;font-size:0.85em;">Save SSH Settings</button>
+</div>
+
+<!-- Action button JS -->
+<script>
+document.querySelectorAll('.node-action').forEach(function(btn) {
+  btn.addEventListener('click', function() {
+    var action = this.getAttribute('data-action');
+    var id = this.getAttribute('data-id');
+    var label = this.getAttribute('data-label') || action;
+    var origHTML = btn.innerHTML;
+    btn.disabled = true;
+    btn.style.pointerEvents = 'none';
+    btn.style.opacity = '0.6';
+    var dots = ['...', '. .', ' . .'];
+    var dotIdx = 0;
+    var dotInterval = setInterval(function() {
+      btn.textContent = dots[dotIdx % 3];
+      dotIdx++;
+    }, 400);
+
+    var toast = document.createElement('div');
+    toast.style.cssText = 'position:fixed;top:20px;right:20px;z-index:9999;padding:10px 16px;background:#1976d2;color:#fff;border-radius:4px;font-size:0.85em;opacity:0.95;box-shadow:0 2px 8px rgba(0,0,0,0.2);';
+    toast.textContent = label + 'ing node...';
+    document.body.appendChild(toast);
+
+    qrApi('/nodes/' + id + '/' + action, {method:'POST'})
+    .then(function(data) {
+    clearInterval(dotInterval);
+    toast.style.opacity = '0';
+    setTimeout(function() { toast.remove(); }, 300);
+    if (data.status === 'ok') {
+    btn.textContent = origHTML;
+    btn.disabled = false;
+    btn.style.pointerEvents = '';
+    btn.style.opacity = '';
+    // Reload action history without full page reload
+    loadActionHistory(id);
+    } else {
+    btn.disabled = false;
+    btn.textContent = origHTML;
+    btn.style.pointerEvents = '';
+    btn.style.opacity = '';
+    alert(label + ' failed: ' + (data.message || JSON.stringify(data)));
+    }
+    }).catch(function(e) {
+        clearInterval(dotInterval);
+        toast.style.opacity = '0';
+        setTimeout(function() { toast.remove(); }, 300);
+        btn.disabled = false;
+        btn.textContent = origHTML;
+        btn.style.pointerEvents = '';
+        btn.style.opacity = '';
+        alert(label + ' failed: ' + e);
+      });
+  });
+});
+
+// Node active/inactive toggle
+var toggle = document.getElementById('node-active-toggle');
+if (toggle) {
+  toggle.addEventListener('change', function() {
+    var nodeId = this.getAttribute('data-id');
+    var newActive = this.value;
+
+    qrApi('/nodes/' + nodeId + '/host-status', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({is_active: newActive})
+    })
+    .then(function(data) {
+      if (data.status === 'ok') {
+        // Reload action history to refresh page context
+        loadActionHistory(nodeId);
+        // Show toast confirmation
+        var toast = document.createElement('div');
+        toast.style.cssText = 'position:fixed;top:20px;right:20px;z-index:9999;padding:10px 16px;background:' + (newActive === '1' ? '#4caf50' : '#f57c00') + ';color:#fff;border-radius:4px;font-size:0.85em;box-shadow:0 2px 8px rgba(0,0,0,0.2);';
+        toast.textContent = 'Host set to ' + (newActive === '1' ? 'active' : 'inactive') + ' — will apply on next page reload';
+        document.body.appendChild(toast);
+        setTimeout(function() { toast.style.opacity = '0'; setTimeout(function() { toast.remove(); }, 300); }, 2500);
+      } else {
+        alert('Failed: ' + (data.message || JSON.stringify(data)));
+      }
+    })
+    .catch(function(e) { alert('Toggle failed: ' + e); });
+  });
+}
+
+// Load action history via AJAX (partial refresh)
+function loadActionHistory(nodeId) {
+  qrApi('/ansible_actions?node_id=' + nodeId + '&limit=20')
+    .then(function(data) {
+      var tbody = document.querySelector('table tbody:last-of-type');
+      if (!tbody) return;
+      var items = data.items || [];
+      if (items.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:#888;">No actions recorded</td></tr>';
+        return;
+      }
+      tbody.innerHTML = items.map(function(act) {
+        var time = act.started_at && act.started_at.length > 10 ? act.started_at.substring(0, 16) : '—';
+        var statusHtml;
+        if (act.status === 'success') statusHtml = '<span class="badge badge-active">OK</span>';
+        else if (act.status === 'failed') statusHtml = '<span class="badge badge-failed">Failed</span>';
+        else statusHtml = '<span class="badge badge-other">' + act.status + '</span>';
+        var dur = act.duration_ms && act.duration_ms > 0 ? (act.duration_ms / 1000).toFixed(1) + 's' : '—';
+        return '<tr><td>' + time + '</td><td>' + act.action_type + '</td><td>' + statusHtml + '</td><td>' + dur + '</td></tr>';
+      }).join('');
+    }).catch(function() { /* silent fail */ });
+}
+
+// SSH settings save handler
+var saveBtn = document.getElementById('save-ssh-settings');
+if (saveBtn) {
+  saveBtn.addEventListener('click', function() {
+    var nodeId = '{{ node.id }}';
+    var userVal = document.getElementById('ssh-user-input').value.trim();
+    var keyVal = document.getElementById('ssh-key-input').value.trim();
+
+    var payload = {};
+    if (userVal === '') payload.ansible_user = null;
+    else payload.ansible_user = userVal;
+    if (keyVal === '') payload.ansible_key_path = null;
+    else payload.ansible_key_path = keyVal;
+
+    // Nothing to save
+    if (Object.keys(payload).length === 0) return;
+
+    var origText = saveBtn.textContent;
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving...';
+
+    qrApi('/nodes/' + nodeId, {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    })
+    .then(function(data) {
+      if (data.status === 'ok') {
+        var toast = document.createElement('div');
+        toast.style.cssText = 'position:fixed;top:20px;right:20px;z-index:9999;padding:10px 16px;background:#4caf50;color:#fff;border-radius:4px;font-size:0.85em;box-shadow:0 2px 8px rgba(0,0,0,0.2);';
+        toast.textContent = 'SSH settings saved';
+        document.body.appendChild(toast);
+        setTimeout(function() { toast.style.opacity = '0'; setTimeout(function() { toast.remove(); }, 300); }, 2500);
+      } else {
+        alert('Save failed: ' + (data.message || JSON.stringify(data)));
+      }
+    }).catch(function(e) {
+      alert('Save failed: ' + e);
+    })
+    .finally(function() {
+      saveBtn.disabled = false;
+      saveBtn.textContent = origText;
+    });
+  });
+}
+</script>

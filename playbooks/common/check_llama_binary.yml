@@ -1,0 +1,23 @@
+# @name: Check Llama Binary
+# @playbook_id: COMMON_CHECK_LLAMA_BINARY_V1
+# @version: 1
+# @timeout: 60
+# check_llama_binary.yml — Check if a compiled binary exists on the remote node
+# Input variables:
+#   binary_path: full path to the binary (e.g., {{ node_build_dir }}/bin/llama-server)
+# Output registers:
+#   binary_exists: True/False
+
+- name: Check if prebuilt binary exists
+  stat:
+    path: "{{ binary_path }}"
+  register: _binary_stat
+
+- name: Set binary_exists fact
+  set_fact:
+    binary_exists: "{{ _binary_stat.stat.exists | default(false) }}"
+
+- name: Report binary existence
+  debug:
+    msg: "Binary check: {{ binary_path }} -> {{ 'EXISTS' if binary_exists else 'MISSING' }}"
+  changed_when: false

@@ -1,0 +1,17 @@
+# @name: Shutdown Node
+# @playbook_id: SHUTDOWN_NODE_V1
+# @version: 1
+# @timeout: 300
+# shutdown_node.yml — Graceful shutdown of a remote node
+# NOTE: become: yes required — sudoers.d not yet active on target nodes.
+#       Once NOPASSWD sudo is confirmed, remove become and align with other playbooks.
+- hosts: "{{ inventory_host }}"
+  become: yes
+  gather_facts: no
+  tasks:
+    - name: Shutdown node
+      ansible.builtin.command:
+        cmd: shutdown -h now
+        creates: /tmp/shutdown_in_progress
+      async: 1
+      poll: 0

@@ -1,0 +1,53 @@
+# @name: Instance Health Check
+# @playbook_id: INSTANCE_HEALTH_CHECK_V1
+# @version: 1
+# @timeout: 30
+# instance_health_check.yml — Unified health check for ANY qr-* service
+# Input variables: unit_name (e.g., qr-123-llama_server), engine_type, node_id, instance_id
+# Output: task results contain parsed JSON in debug msg → parsed by run_playbook()
+
+- hosts: "{{ inventory_host }}"
+  gather_facts: no
+  become: yes
+  tasks:
+    - name: Get service state, PID, restart count from systemctl
+      shell: |
+        systemctl show "{{ unit_name }}" \
+          -p ActiveState -p SubState -p MainPID -p NRestarts 2>/dev/null || true
+      register: _svc_show
+      changed_when: false
+
+    - name: Get memory usage from /proc (if PID exists)
+      shell: |
+        P=$(systemctl show "{{ unit_name }}" -p MainPID 2>/dev/null | cut -d= -f2)
+        if [ -n "$P" ] && [ "$P" != "0" ]; then
+          awk '/VmRSS/{print $2}' /proc/$P/status 2>/dev/null || echo "0"
+        else
+          echo "0"
+        fi
+      register: _memory_raw
+      changed_when: false
+
+    - name: Extract service fields from systemctl output
+      set_fact:
+        _svc_state: >-
+          {{ (_svc_show.stdout | regex_findall('ActiveState=(.*)') | first | trim) | default('unknown') }}
+        _svc_substate: >-
+          {{ (_svc_show.stdout | regex_findall('SubState=(.*)') | first | trim) | default('unknown') }}
+        _main_pid_raw: >-
+          {{ (_svc_show.stdout | regex_findall('MainPID=(.*)') | first | trim) | default('0') }}
+        _restart_count_raw: >-
+          {{ (_svc_show.stdout | regex_findall('NRestarts=(.*)') | first | trim) | default('0') }}
+        _memory_kb_raw: >-
+          {{ (_memory_raw.stdout | trim) | default('0') }}
+
+    - name: Build single-line JSON output
+      set_fact:
+        _json_output: |
+           {"service_state":"{{ _svc_state }}","sub_state":"{{ _svc_substate }}","main_pid":"{{ _main_pid_raw }}","restart_count":"{{ _restart_count_raw }}","memory_kb":"{{ _memory_kb_raw }}"}
+      changed_when: false
+
+    - name: Output health check result
+      debug:
+        msg: "{{ _json_output }}"
+      changed_when: false

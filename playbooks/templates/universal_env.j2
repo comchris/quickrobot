@@ -1,0 +1,2 @@
+{% for k, v in (env_vars | default({})).items() %}{{ k }}="{{ v | replace('"', '\\"') }}"
+{% endfor %}

@@ -1,0 +1,965 @@
+<!-- Single row header with controls and filters -->
+<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
+  <h1 style="margin:0;font-size:1.3em;">Instances</h1>
+  <a href="/webui/instances/new" class="btn btn-primary" style="display:inline-block;padding:4px 12px;border-radius:4px;text-decoration:none;font-size:0.85em;">+ Add Instance</a>
+  <form method="get" action="/webui/instances" id="filter-form" style="display:flex;gap:8px;align-items:center;margin:0;">
+    <label style="font-size:0.85em;color:#666;">Engine:</label>
+    <select name="engine" id="filter-engine" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+      <option value="">Any</option>
+      <option value="system_only" {% if filter_engine == 'system_only' %}selected="selected"{% endif %}>System only (ID &lt; 100)</option>
+      <option value="exclude_system" {% if filter_engine == 'exclude_system' %}selected="selected"{% endif %}>All except system</option>
+      {% for eng in all_engines %}
+      <option value="{{ eng }}" {% if eng == filter_engine %}selected="selected"{% endif %}>{{ eng }}</option>
+      {% endfor %}
+    </select>
+
+    <label style="font-size:0.85em;color:#666;">State:</label>
+    <select name="state" id="filter-state" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+      <option value="">Any</option>
+      {% for st in all_states %}
+      <option value="{{ st }}" {% if st == filter_state %}selected="selected"{% endif %}>{{ st }}</option>
+      {% endfor %}
+    </select>
+
+    <label style="font-size:0.85em;color:#666;">Host:</label>
+    <select name="host" id="filter-host" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+      <option value="all" {% if not filter_host or filter_host == 'all' %}selected="selected"{% endif %}>All hosts</option>
+      <option value="active_only" {% if filter_host == 'active_only' %}selected="selected"{% endif %}>Active only</option>
+      {% for h in all_hosts %}
+      <option value="{{ h }}" {% if h == filter_host %}selected="selected"{% endif %}>{{ h }} ({{ host_counts.get(h, 0) }})</option>
+      {% endfor %}
+    </select>
+
+    <button type="button" id="apply-refresh-btn" class="btn btn-primary" style="padding:4px 10px;font-size:0.85em;">Apply &amp; Refresh</button>
+    {% if filter_engine or filter_state or filter_host %}
+    <a href="/webui/instances" class="btn" style="padding:4px 10px;font-size:0.85em;text-decoration:none;background:#999;color:#fff;">Clear</a>
+    {% endif %}
+  </form>
+  <div style="display:flex;align-items:center;gap:6px;">
+    <label style="font-size:0.8em;color:#666;">Auto:</label>
+    <select id="refresh-interval" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+      <option value="0">Off</option>
+      <option value="10">10s</option>
+      <option value="30" selected>30s</option>
+      <option value="60">60s</option>
+      <option value="120">120s</option>
+    </select>
+  </div>
+</div>
+{% if default_refresh_ms is defined %}
+{% endif %}
+
+<style>
+  table th[data-col="6"] { min-width: 80px; }
+  table th[data-col="7"], table td.state-cell { min-width: 40px; white-space: nowrap; }
+  table th[data-col="8"] { min-width: 100px; }
+  .badge-over { display:inline-block;padding:2px 8px;background:#fdebd0;color:#873b00;border-radius:10px;font-size:0.8em;font-weight:600;vertical-align:middle;line-height:inherit; }
+  #filter-form select, #filter-form .btn { white-space:nowrap; }
+</style>
+<table>
+<thead>
+  <tr>
+    <th class="sortable" data-col="0">ID</th>
+    <th class="sortable" data-col="1">Name</th>
+    <th class="sortable" data-col="2">Age</th>
+    <th class="sortable" data-col="3">Engine</th>
+    <th class="sortable" data-col="4">Host</th>
+    <th class="sortable" data-col="5">Remote</th>
+    <th class="sortable" data-col="6">Preset</th>
+    <th class="sortable" data-col="7">State</th>
+    <th class="sortable" data-col="8">ACTIONS</th>
+    <th class="sortable" data-col="9">Info</th>
+  </tr>
+</thead>
+<tbody>
+{% for inst in instances %}
+<tr>
+  <!-- ID -->
+  <td>{{ inst.id }}</td>
+  <!-- Name: link to instance detail -->
+  <td><a class="row-link" href="/webui/instances/{{ inst.id }}">{{ inst.name }}</a></td>
+  <!-- Age: relative time, sortable via data-sort; system-managed + subprocess use process uptime -->
+  <td class="age-cell"{% if (inst.system_managed or inst.engine_type_name == 'subprocess') and inst.process_age_seconds is defined %} data-uptime="{{ inst.process_age_seconds }}"{% endif %} data-sort="{{ inst.created_at or '' }}">{{ inst.created_at or '-' }}</td>
+  <!-- Engine + build number (RPC binding shown in REMOTE column only) -->
+   <td>
+     {{ inst.engine_display_name or inst.engine_type_name }}
+     {% if inst.build_number and inst.engine_type_name in ('llama_server','llama_rpc') %}
+     <br><small style="color:#888;">{{ inst.build_number }}</small>
+     {% endif %}
+   </td>
+  <!-- Host: clickable link to filter instances by this host, also links to node detail -->
+  <td class="host-cell">
+    {% if inst.node_id %}
+    <a href="/webui/instances?host={{ (inst.node_hostname or inst.node_name or '')|urlencode }}" title="Filter by host">{{ inst.node_name or inst.node_hostname or '?' }}</a>
+    {% elif inst.node_hostname %}<a href="/webui/instances?host={{ inst.node_hostname|urlencode }}" title="Filter by host">{{ inst.node_hostname }}</a>{% else %}-{% endif %}
+  </td>
+  <!-- Remote: llama_rpc shows plain text IP:port (binary protocol); all others get HTTP links + proxy -->
+    <td>
+      {% if inst.engine_type_name == 'llama_rpc' %}
+        {% if inst.node_hostname and inst.port_assigned %}
+          {% set co = inst.config_override or {} %}
+          {% set bind_host = co.get("LLAMA_ARG_HOST", "") or co.get("host", "") or "0.0.0.0" %}
+          <span style="font-size:0.85em;">{{ bind_host }}:{{ inst.port_assigned }}</span>
+          {% if bind_host == '0.0.0.0' %}
+            <span style="font-size:0.7em;color:#e67e22;margin-left:4px;" title="Bind address is 0.0.0.0 — consider adding override for local subnet">⚠</span>
+          {% endif %}
+          {% if inst.id in rpc_to_llama %}
+            <br><small style="color:#666;">→ <a href="/webui/instances/{{ rpc_to_llama[inst.id].id }}">{{ rpc_to_llama[inst.id].name }}</a></small>
+          {% else %}
+            <br><small style="color:#e67e22;">unbound</small>
+          {% endif %}
+        {% else %}-{% endif %}
+      {% elif inst.engine_type_name == 'llama_server' %}
+        {% if inst.node_hostname and inst.port_assigned %}
+          {% set co = inst.config_override or {} %}
+          {% set bind_host = co.get("LLAMA_ARG_HOST", "") or co.get("host", "") or "0.0.0.0" %}
+          <a href="http://{{ inst.node_hostname }}:{{ inst.port_assigned }}" target="_blank" rel="noopener" style="font-size:0.85em;">{{ inst.node_hostname }}:{{ inst.port_assigned }}</a>
+          {% if bind_host == '0.0.0.0' %}
+            <span style="font-size:0.7em;color:#e67e22;margin-left:4px;" title="Bind address is 0.0.0.0 — consider adding override for local subnet">⚠</span>
+          {% endif %}
+          <br>
+          <a href="/webui/proxy/{{ inst.id }}" target="_parent" style="font-size:0.8em;color:#4fc3f7;">[proxy frame]</a>
+        {% else %}-{% endif %}
+      {% elif inst.engine_type_name == "subprocess" %}
+          {% set sp_host = inst.config_override.get("host") or "127.0.0.1" %}
+          {% set sp_port = inst.config_override.get("port") or inst.port_assigned %}
+          {% if sp_port %}<a href="http://{{ sp_host }}:{{ sp_port }}" target="_blank" rel="noopener" style="font-size:0.85em;">{{ sp_host }}:{{ sp_port }}</a>{% else %}-{% endif %}
+       {% elif inst.node_hostname and inst.port_assigned and inst.system_managed == 0 %}
+           <a href="http://{{ inst.node_hostname }}:{{ inst.port_assigned }}" target="_blank" rel="noopener" style="font-size:0.85em;">{{ inst.node_hostname }}:{{ inst.port_assigned }}</a>
+           <br>
+           <a href="/webui/proxy/{{ inst.id }}" target="_parent" style="font-size:0.8em;color:#4fc3f7;">[proxy frame]</a>
+       {% elif inst.system_managed and inst.engine_type_name == "quickrobot-webui" %}
+         {% set ws_host = inst.config_override.get("web_ui_host") or inst.node_hostname or "127.0.0.1" %}
+         {% set ws_port = inst.config_override.get("web_ui_port") or inst.port_assigned %}
+         {% if ws_port %}<a href="http://{{ ws_host }}:{{ ws_port }}" target="_blank" rel="noopener" style="font-size:0.85em;">{{ ws_host }}:{{ ws_port }}</a>{% else %}-{% endif %}
+ {% elif inst.system_managed and inst.engine_type_name == "quickrobot-api" %}
+           {% set svc_host = inst.config_override.get("host") or inst.node_hostname or "127.0.0.1" %}
+           {% set svc_port = inst.config_override.get("port") %}
+           {% if not svc_port %}{% if inst.port_assigned %}{% set svc_port = inst.port_assigned %}{% endif %}{% endif %}
+           {% if svc_port %}<a href="http://{{ svc_host }}:{{ svc_port }}" target="_blank" rel="noopener" style="font-size:0.85em;">{{ svc_host }}:{{ svc_port }}</a>{% else %}-{% endif %}
+       {% elif inst.system_managed and inst.engine_type_name == "quickrobot-mcp" %}
+            {% set mcp_host = inst.config_override.get("mcp_host") or inst.config_override.get("mcp_api_host") or inst.node_hostname or "127.0.0.1" %}
+            {% set mcp_port_val = inst.config_override.get("mcp_port") or inst.port_assigned %}
+            {% if mcp_port_val %}<a href="http://{{ mcp_host }}:{{ mcp_port_val }}/sse" target="_blank" rel="noopener" style="font-size:0.85em;">http://{{ mcp_host }}:{{ mcp_port_val }}/sse</a>{% else %}-{% endif %}
+        {% else %}-{% endif %}
+     </td>
+ <!-- Preset column -->
+   <td>
+     {# Engine-specific preset name display — hidden for dropdown engines #}
+     {% if inst.engine_type_name == 'subprocess' %}
+        {% set _co = inst.config_override or {} %}
+        {% set _exe = _co.get("executable", "-") %}
+        {% set _cli = _co.get("cli_args", "") %}
+        <span id="preset-name-{{ inst.id }}" class="preset-name-display" style="font-family:monospace;font-size:0.8em;" data-inst-id="{{ inst.id }}">
+          {{ _exe }}{% if _cli %} {{ _cli }}{% endif %}
+        </span>
+        <button class="btn" data-edit-preset="{{ inst.id }}" style="font-size:0.7em;padding:1px 4px;margin-left:4px;color:#666;" title="Edit command line">&#9998;</button>
+     {% elif inst.engine_type_name in ('llama_server', 'llama_rpc', 'iperf3') %}
+         {# Dropdown engines: preset options loaded via AJAX, not Jinja2 #}
+         <span id="preset-name-{{ inst.id }}" class="preset-name-display" data-inst-id="{{ inst.id }}" style="display:none;">{{ inst.preset_name or '-' }}</span>
+         <span class="preset-loading" data-inst-id="{{ inst.id }}" style="font-size:0.7em;color:#999;">loading...</span>
+         <select class="preset-sel" data-inst-id="{{ inst.id }}" data-engine="{{ inst.engine_type_name }}" data-preset-id="{{ inst.preset_id or '' }}" style="display:none;font-size:0.8em;margin-top:4px;padding:2px 4px;border:1px solid #ccc;border-radius:3px;">
+         </select>
+     {% elif inst.preset_name %}
+        {# Other engines: show preset name only if one is set #}
+        <span id="preset-name-{{ inst.id }}" class="preset-name-display">{{ inst.preset_name }}</span>
+     {% endif %}
+      {# MCP tool permissions — only for engine 3 #}
+      {% if inst.engine_type_name == "quickrobot-mcp" %}
+      <div style="margin-top:6px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+        <label style="display:flex;align-items:center;gap:3px;font-size:0.75em;cursor:pointer;"><input type="checkbox" class="mcp-flag-cb" data-inst-id="{{ inst.id }}" data-flag="allow_reads" {% if inst.mcp_allow_reads %}checked{% endif %}><span>Read</span></label>
+        <label style="display:flex;align-items:center;gap:3px;font-size:0.75em;cursor:pointer;"><input type="checkbox" class="mcp-flag-cb" data-inst-id="{{ inst.id }}" data-flag="allow_writes" {% if inst.mcp_allow_writes %}checked{% endif %}><span>Write</span></label>
+        <label style="display:flex;align-items:center;gap:3px;font-size:0.75em;cursor:pointer;"><input type="checkbox" class="mcp-flag-cb" data-inst-id="{{ inst.id }}" data-flag="allow_proxy" {% if inst.mcp_allow_proxy %}checked{% endif %}><span>Full-API-Proxy-Mode</span></label>
+      </div>
+      <button class="btn btn-success mcp-apply-btn" data-inst-id="{{ inst.id }}" style="font-size:0.7em;padding:2px 6px;margin-top:4px;">Apply &amp; Restart</button>
+      {% endif %}
+    </td>
+  <!-- State: badges stacked vertically (no buttons) -->
+   <td class="state-cell" data-sort="{{ inst.state or '' }}" style="display:flex;flex-direction:column;gap:1px;align-items:flex-start;">
+     {{ status_badge(inst.state) }}{{ system_badge(inst.system_managed) }}
+     {# Orphaned instance indicator (node was deleted) #}
+     {% if not inst.node_name and inst.node_id %}
+     <span title="Node deleted — instance may be orphaned" style="color:#e67e22;font-size:0.7em;">&#9888; ORPHAN</span>
+     {% endif %}
+     {# RPC binding warnings for llama_server instances #}
+     {% if inst.engine_type_name == 'llama_server' and inst._rpc_warnings %}
+       {% for warn in inst._rpc_warnings %}
+       <span title="{{ warn }}" style="color:#e67e22;font-size:0.7em;">&#9888;</span>
+       {% endfor %}
+     {% endif %}
+     {# Per-instance config override indicator #}
+      {% if inst.has_custom_config %}<span class="badge-over" title="Per-instance config overrides active">override</span>{% endif %}
+      {# MCP availability indicator #}
+      {% if inst.engine_type_name == 'quickrobot-mcp' and inst._mcp_available is defined and not inst._mcp_available %}
+        <span title="MCP Python package not installed — cannot start" style="color:#e67e22;font-size:0.7em;">&#9888; NO-MCP</span>
+      {% endif %}
+    </td>
+   <!-- ACTIONS: all control buttons -->
+   <td>
+     {% set sm = inst.system_managed %}
+      {% set show_restart = inst.engine_type_name in ('quickrobot-webui', 'quickrobot-mcp', 'llama_server', 'llama_rpc', 'subprocess') %}
+      {% set mcp_controls = (sm and inst.engine_type_name == 'quickrobot-mcp') %}
+     <span style="display:inline-block;"
+       {% if inst._rpc_warnings %}data-rpc-warnings="{{ inst._rpc_warnings | join('|||') }}"{% endif %}>
+       {% if sm and inst.state == 'unconfigured' %}
+        <small style="color:#e67e22;">system</small>
+        {% elif sm and inst.state in ('running','deployed','started','stopping','starting') %}
+        {# System-managed engines: MCP=3 buttons, WebUI=restart only, API=none #}
+        {% if mcp_controls %}
+        <button class="btn btn-success inst-action" data-action="start" data-id="{{ inst.id }}" title="Start" style="font-size:0.65em;padding:1px 4px;">&#9654;</button>
+        <button class="btn btn-danger inst-action" data-action="stop" data-id="{{ inst.id }}" title="Stop" style="font-size:0.65em;padding:1px 4px;">&#9632;</button>
+        {% endif %}
+        {% if show_restart %}<button class="btn btn-primary inst-action" data-action="restart" data-id="{{ inst.id }}" title="Restart" style="font-size:0.65em;padding:1px 4px;">&#8635;</button>{% endif %}
+        {% elif sm and inst.state == 'stopped' %}
+        {# System-managed engines stopped: MCP=start+restart, WebUI=restart only #}
+        {% if mcp_controls %}
+        <button class="btn btn-success inst-action" data-action="start" data-id="{{ inst.id }}" title="Start" style="font-size:0.65em;padding:1px 4px;">&#9654;</button>
+        {% endif %}
+        {% if show_restart %}<button class="btn btn-primary inst-action" data-action="restart" data-id="{{ inst.id }}" title="Restart" style="font-size:0.65em;padding:1px 4px;">&#8635;</button>{% endif %}
+       {% elif not sm %}
+       {# Unconfigured: Deploy + Delete #}
+       {% if inst.state == 'unconfigured' %}
+       <button class="btn btn-success inst-action" data-action="deploy" data-id="{{ inst.id }}" title="Deploy" style="font-size:0.65em;padding:1px 4px;">&#9655;</button>
+       <button class="btn btn-danger inst-action" data-action="delete" data-id="{{ inst.id }}" title="Delete from DB" style="font-size:0.65em;padding:1px 4px;">&#10006;</button>
+       {% elif inst.state == 'stopped' %}
+       {# Stopped: Start + (Reconfigure for llama/rpc) + Build (llama/rpc) + Undeploy (non-subprocess) + Delete (subprocess) #}
+         {% if inst.engine_type_name in ('llama_server','llama_rpc') %}
+         <button class="btn btn-success inst-action" data-action="reconfigure" data-id="{{ inst.id }}" title="Reconfigure: update env+systemd, reload daemon, restart service (no rebuild)" style="font-size:0.65em;padding:1px 4px;">&#9655; Reconfig</button>
+         {% endif %}
+        <button class="btn btn-success inst-action" data-action="start" data-id="{{ inst.id }}" title="Start" style="font-size:0.65em;padding:1px 4px;">&#9654;</button>
+        {% if inst.engine_type_name in ('llama_server','llama_rpc') %}
+        <button class="btn btn-warning inst-action" data-action="update-build" data-id="{{ inst.id }}" title="Git pull + cmake build" style="font-size:0.65em;padding:1px 4px;">&#9652; Build</button>
+        {% endif %}
+        {% if inst.engine_type_name == 'subprocess' %}
+        <button class="btn btn-danger inst-action" data-action="delete" data-id="{{ inst.id }}" title="Delete from DB" style="font-size:0.65em;padding:1px 4px;">&#10006;</button>
+        {% endif %}
+        {% if inst.engine_type_name not in ('subprocess',) and not inst.system_managed %}
+        <button class="btn btn-secondary inst-action" data-action="undeploy" data-id="{{ inst.id }}" title="Undeploy" style="font-size:0.65em;padding:1px 4px;font-weight:bold;">&times;</button>
+        {% endif %}
+       {% elif inst.state == 'deployed' %}
+        {# Deployed (not running): Start + Stop + Restart + Build (llama/rpc) + Undeploy (non-subprocess) + Delete (subprocess) #}
+        <button class="btn btn-success inst-action" data-action="start" data-id="{{ inst.id }}" title="Start service" style="font-size:0.65em;padding:1px 4px;">&#9654;</button>
+        <button class="btn btn-danger inst-action" data-action="stop" data-id="{{ inst.id }}" title="Stop" style="font-size:0.65em;padding:1px 4px;">&#9632;</button>
+        {% if show_restart %}<button class="btn btn-primary inst-action" data-action="restart" data-id="{{ inst.id }}" title="Restart" style="font-size:0.65em;padding:1px 4px;">&#8635;</button>{% endif %}
+        {% if inst.engine_type_name in ('llama_server','llama_rpc') %}
+        <button class="btn btn-warning inst-action" data-action="update-build" data-id="{{ inst.id }}" title="Git pull + cmake build" style="font-size:0.65em;padding:1px 4px;">&#9652; Build</button>
+        {% endif %}
+        {% if inst.engine_type_name == 'subprocess' %}
+        <button class="btn btn-danger inst-action" data-action="delete" data-id="{{ inst.id }}" title="Delete from DB" style="font-size:0.65em;padding:1px 4px;">&#10006;</button>
+        {% endif %}
+        {% if inst.engine_type_name not in ('subprocess',) and not inst.system_managed %}
+        <button class="btn btn-secondary inst-action" data-action="undeploy" data-id="{{ inst.id }}" title="Undeploy" style="font-size:0.65em;padding:1px 4px;font-weight:bold;">&times;</button>
+        {% endif %}
+      {% elif inst.state == 'running' %}
+        {# Running: Stop + Restart (subprocess) + Delete (subprocess) + Restart (llama/rpc) — no Build #}
+        <button class="btn btn-danger inst-action" data-action="stop" data-id="{{ inst.id }}" title="Stop" style="font-size:0.65em;padding:1px 4px;">&#9632;</button>
+        {% if show_restart %}<button class="btn btn-primary inst-action" data-action="restart" data-id="{{ inst.id }}" title="Restart" style="font-size:0.65em;padding:1px 4px;">&#8635;</button>{% endif %}
+        {% if inst.engine_type_name == 'subprocess' %}
+        <button class="btn btn-danger inst-action" data-action="delete" data-id="{{ inst.id }}" title="Delete from DB" style="font-size:0.65em;padding:1px 4px;">&#10006;</button>
+        {% endif %}
+    {% elif inst.state == 'error' %}
+          {# Error: Stop + Start (if llama_server/rpc) + Restart (subprocess) + Reconfigure + Build (llama/rpc) + Undeploy + Delete #}
+          {% if inst.engine_type_name in ('llama_server','llama_rpc') %}
+          <button class="btn btn-danger inst-action" data-action="stop" data-id="{{ inst.id }}" title="Stop service" style="font-size:0.65em;padding:1px 4px;">&#9632;</button>
+          {% endif %}
+          {% if inst.engine_type_name in ('llama_server','llama_rpc') %}
+          <button class="btn btn-success inst-action" data-action="start" data-id="{{ inst.id }}" title="Start service (no rebuild)" style="font-size:0.65em;padding:1px 4px;">&#9654;</button>
+          {% endif %}
+          {% if inst.engine_type_name == 'subprocess' %}
+          <button class="btn btn-success inst-action" data-action="restart" data-id="{{ inst.id }}" title="Restart subprocess (no rebuild)" style="font-size:0.65em;padding:1px 4px;">&#8635;</button>
+          {% endif %}
+          <button class="btn btn-success inst-action" data-action="reconfigure" data-id="{{ inst.id }}" title="Reconfigure: update env+systemd, reload daemon, restart (no rebuild)" style="font-size:0.65em;padding:1px 4px;">&#9655; Reconfig</button>
+         {% if inst.engine_type_name in ('llama_server','llama_rpc') %}
+          <button class="btn btn-warning inst-action" data-action="update-build" data-id="{{ inst.id }}" title="Git pull + cmake build" style="font-size:0.65em;padding:1px 4px;">&#9652; Build</button>
+          {% endif %}
+          {% if not inst.system_managed %}
+           <button class="btn btn-secondary inst-action" data-action="undeploy" data-id="{{ inst.id }}" title="Undeploy" style="font-size:0.65em;padding:1px 4px;font-weight:bold;">&times;</button>
+          {% endif %}
+           <button class="btn btn-danger inst-action" data-action="delete" data-id="{{ inst.id }}" title="Delete from DB" style="font-size:0.65em;padding:1px 4px;">&#10006;</button>
+     {% else %}
+       {# Other states (starting, deploying, configuring, build_error, compiling, timeout, updating): Stop + Undeploy #}
+       {% if inst.state not in ('stopped','stopping') %}
+       <button class="btn btn-danger inst-action" data-action="stop" data-id="{{ inst.id }}" title="Stop" style="font-size:0.65em;padding:1px 4px;">&#9632;</button>
+       {% endif %}
+       {% if inst.state in ('running','deployed') %}
+         {% if show_restart %}<button class="btn btn-primary inst-action" data-action="restart" data-id="{{ inst.id }}" title="Restart" style="font-size:0.65em;padding:1px 4px;">&#8635;</button>{% endif %}
+         {% endif %}
+        {% if not inst.system_managed %}
+        <button class="btn btn-secondary inst-action" data-action="undeploy" data-id="{{ inst.id }}" title="Undeploy" style="font-size:0.65em;padding:1px 4px;font-weight:bold;">&times;</button>
+        {% endif %}
+        {% endif %}
+       {% endif %}
+     </span>
+     {# Force delete button for orphaned instances #}
+     {% if not inst.node_name and inst.node_id %}
+     <button class="btn btn-danger inst-action" data-action="force-delete" data-id="{{ inst.id }}" title="Force delete (node deleted)" style="font-size:0.65em;padding:1px 4px;margin-left:4px;">&#10006; FDEL</button>
+     {% endif %}
+   </td>
+  <!-- Info: relative time + refresh button -->
+  <td class="last-info-cell" data-ts="{{ inst.last_state_change or '' }}" data-ts-utc="{{ inst.last_state_change or '' }}" data-id="{{ inst.id }}">
+    {{ inst.last_state_change[:19] if inst.last_state_change else '-' }}
+    <button class="btn btn-xs refresh-inst" data-id="{{ inst.id }}" title="Query remote status" style="font-size:0.7em;padding:2px 5px;">&#8635;</button>
+  </td>
+</tr>
+{% else %}
+<tr><td colspan="10" style="text-align:center;color:#888;">No instances match filters</td></tr>
+{% endfor %}
+</tbody>
+</table>
+
+<!-- Column sorting JS — sortable columns: 0(ID),1(Name),2(Age),3(Engine),4(Host),5(Remote),6(Preset),7(State),8(ACTIONS),9(Info) -->
+<script>
+// Apply relative time + localized timestamp formatting on load
+(function() {
+  document.querySelectorAll('.age-cell').forEach(function(cell) {
+    var uptime = cell.getAttribute('data-uptime');
+    if (uptime !== null) {
+      // System-managed instance: show process uptime directly
+      var secs = parseInt(uptime, 10);
+      if (!isNaN(secs) && secs >= 0) {
+        var d = Math.floor(secs / 86400);
+        secs %= 86400;
+        var h = Math.floor(secs / 3600);
+        secs %= 3600;
+        var m = Math.floor(secs / 60);
+        if (d > 0) cell.textContent = d + 'd ' + h + 'h';
+        else if (h > 0) cell.textContent = h + 'h ' + m + 'm';
+        else if (m > 0) cell.textContent = m + 'm';
+        else cell.textContent = secs + 's';
+      }
+      return;
+    }
+    var raw = cell.getAttribute('data-sort') || cell.textContent.trim();
+    cell.textContent = qrFmtRelative(raw);
+  });
+  document.querySelectorAll('.last-info-cell').forEach(function(cell) {
+    var raw = cell.getAttribute('data-ts-utc') || cell.getAttribute('data-ts') || cell.textContent.trim();
+    var id = cell.getAttribute('data-id');
+    var btnHtml = '<button class="btn btn-xs refresh-inst" data-id="' + (id||'') + '" title="Query remote status" style="font-size:0.7em;padding:2px 5px;">&#8635;</button>';
+    // qrFmtTimestamp: <24h returns relative-only, >=24h returns "datetime (relative)"
+    if (raw && raw !== '-') {
+      var formatted = qrFmtTimestamp(raw);
+      // Check if it contains parentheses (means >=24h, has datetime + relative)
+      var parenIdx = formatted.indexOf('(');
+      if (parenIdx > 0) {
+        // Split: show datetime part, then parenthesized relative as secondary
+        var datePart = formatted.substring(0, parenIdx).trim();
+        var relPart = formatted.substring(parenIdx);
+        cell.innerHTML = datePart + ' <span style="color:#888;font-size:0.85em;">' + relPart + '</span>' + btnHtml;
+      } else {
+        // Relative-only (<24h)
+        cell.innerHTML = formatted + ' ' + btnHtml;
+      }
+    } else {
+      cell.innerHTML = '-' + ' ' + btnHtml;
+    }
+  });
+})();
+
+var ths = document.querySelectorAll('.sortable');
+function getCellValue(row, colIdx) {
+  var td = row.cells[colIdx];
+  if (!td) return '';
+  return td.getAttribute('data-sort') || td.textContent.trim();
+}
+function sortTable(col, dir) {
+  var table = ths[0] ? ths[0].closest('table') : null;
+  if (!table) return;
+  var tbody = table.querySelector('tbody');
+  if (!tbody) return;
+  var rows = Array.from(tbody.rows);
+  rows.sort(function(a, b) {
+    var cellA = getCellValue(a, col);
+    var cellB = getCellValue(b, col);
+    if (col === 0) {
+      return dir === 'asc' ? (parseInt(cellA, 10) || 0) - (parseInt(cellB, 10) || 0) : (parseInt(cellB, 10) || 0) - (parseInt(cellA, 10) || 0);
+    }
+    if (col === 2) {
+      var uptimeA = a.cells[col].getAttribute('data-uptime');
+      var uptimeB = b.cells[col].getAttribute('data-uptime');
+      if (uptimeA !== null && uptimeB !== null) {
+        var numA = parseInt(uptimeA, 10) || 0;
+        var numB = parseInt(uptimeB, 10) || 0;
+        return dir === 'asc' ? numA - numB : numB - numA;
+      }
+    }
+    return dir === 'asc' ? cellA.localeCompare(cellB) : cellB.localeCompare(cellA);
+  });
+  rows.forEach(function(row) { tbody.appendChild(row); });
+}
+function applySortArrows(col, dir) {
+  ths.forEach(function(t) {
+    var c = parseInt(t.getAttribute('data-col'), 10);
+    t.textContent = t.textContent.replace(/\s*[\u2191\u2193]\s*$/, '').trim();
+    if (c === col) {
+      t.textContent = t.textContent.trim() + (dir === 'asc' ? ' \u2191' : ' \u2193');
+    }
+  });
+}
+var _sortCol = parseInt(qrSettings.get('instances', 'sort_col', '-1'), 10);
+var _sortDir = qrSettings.get('instances', 'sort_dir', '');
+if (_sortCol >= 0 && _sortDir) {
+  sortTable(_sortCol, _sortDir);
+  applySortArrows(_sortCol, _sortDir);
+}
+ths.forEach(function(th) {
+  th.style.cursor = 'pointer';
+  th.addEventListener('click', function() {
+    var col = parseInt(this.getAttribute('data-col'), 10);
+    var dir = qrSettings.get('instances', 'sort_dir', '') === 'desc' ? 'asc' : 'desc';
+    qrSettings.set('instances', 'sort_col', col.toString());
+    qrSettings.set('instances', 'sort_dir', dir);
+    sortTable(col, dir);
+    applySortArrows(col, dir);
+  });
+});
+
+// Wrap action buttons to second row when > 3 buttons (fits narrow viewports)
+(function(){
+  var rows = document.querySelectorAll('.state-cell');
+  rows.forEach(function(stateCell) {
+    var actionTd = stateCell.parentElement.querySelector('td:nth-child(9)');
+    if (!actionTd) return;
+    var btns = actionTd.querySelectorAll('.inst-action');
+    if (btns.length <= 3) return;
+    // Split: first 3 in row 1, rest wrapped to row 2 with <br> spacer
+    var frag = document.createDocumentFragment();
+    for (var i = 0; i < btns.length; i++) {
+      if (i > 0 && i === 3) {
+        var br = document.createElement('br');
+        br.style.marginBottom = '2px';
+        frag.appendChild(br);
+      }
+      var origBtn = btns[i];
+      var clone = origBtn.cloneNode(true);
+      clone.setAttribute('data-action', origBtn.getAttribute('data-action'));
+      clone.setAttribute('data-id', origBtn.getAttribute('data-id'));
+      clone.setAttribute('title', origBtn.getAttribute('title'));
+      // Restore inline padding that may have been overridden
+      clone.style.padding = '1px 4px';
+      clone.addEventListener('click', function(){ origBtn.click(); });
+      frag.appendChild(clone);
+    }
+    actionTd.innerHTML = '';
+    actionTd.appendChild(frag);
+  });
+})();
+
+document.querySelectorAll('.inst-action').forEach(function(btn) {
+  btn.addEventListener('click', function() {
+    var action = this.getAttribute('data-action');
+    var id = this.getAttribute('data-id');
+    // Check for RPC binding warnings on the row
+    var rpcWarnings = btn.closest('tr').getAttribute('data-rpc-warnings');
+    if (rpcWarnings) {
+      var warns = rpcWarnings.split('|||');
+      var msg = 'Not all bound RPCs are running:\n';
+      warns.forEach(function(w) { msg += '  - ' + w + '\n'; });
+      msg += '\nAre you sure you want to continue?';
+      if (!confirm(msg)) return;
+    } else if (!confirm('Are you sure you want to ' + action + ' this instance?')) {
+      return;
+    }
+    var ep = action;
+    // Determine HTTP method: DELETE for delete action, POST for others
+    var method = action === 'delete' ? 'DELETE' : 'POST';
+    // Busy indicator: disable button, show dots, show toast
+    var origHTML = btn.innerHTML;
+    btn.disabled = true;
+    btn.style.pointerEvents = 'none';
+    btn.style.opacity = '0.6';
+    var dots = ['...', '. .', ' . .'];
+    var dotIdx = 0;
+    var dotInterval = setInterval(function() {
+      btn.textContent = dots[dotIdx % 3];
+      dotIdx++;
+    }, 400);
+    // Construct URL: delete uses /instances/<id>, others use /instances/<id>/<action>
+    var url = action === 'delete' ? '/api/v1/instances/' + id : '/api/v1/instances/' + id + '/' + ep;
+    // Force-delete sends POST with clean_remote body
+    if (action === 'force-delete') {
+      method = 'POST';
+    }
+    var toast = document.createElement('div');
+    toast.style.cssText = 'position:fixed;top:20px;right:20px;z-index:9999;padding:10px 16px;background:#1976d2;color:#fff;border-radius:4px;font-size:0.85em;opacity:0.95;box-shadow:0 2px 8px rgba(0,0,0,0.2);';
+    toast.textContent = action.charAt(0).toUpperCase() + action.slice(1) + 'ing instance... please wait';
+    document.body.appendChild(toast);
+    fetch(url, {method: method})
+      .then(function(r) {
+        var ct = r.headers.get('content-type') || '';
+        if (ct.indexOf('application/json') !== -1) return r.json();
+        return r.text().then(function(t) { throw new Error(t); });
+      })
+      .then(function(data) {
+        clearInterval(dotInterval);
+        toast.style.opacity = '0';
+        setTimeout(function() { toast.remove(); }, 300);
+        if (data.status === 'ok') {
+          btn.style.pointerEvents = '';
+          btn.style.opacity = '';
+          setTimeout(function() { window.location.reload(); }, 1200);
+        } else {
+          btn.disabled = false;
+          btn.textContent = origHTML;
+          btn.style.pointerEvents = '';
+          btn.style.opacity = '';
+          alert('Action failed: ' + (data.message || JSON.stringify(data)));
+        }
+      }).catch(function(e) {
+         clearInterval(dotInterval);
+         toast.style.opacity = '0';
+         setTimeout(function() { toast.remove(); }, 300);
+         btn.disabled = false;
+         btn.textContent = origHTML;
+         btn.style.pointerEvents = '';
+         btn.style.opacity = '';
+         // Self-restart detection: if restarting a system-managed instance,
+         // the fetch may fail because the webui process is killed. In that case,
+         // show a friendly message and wait for the service to come back.
+         if (action === 'restart' && (parseInt(id, 10) === 1 || parseInt(id, 10) === 2 || parseInt(id, 10) === 3)) {
+           var toast2 = document.createElement('div');
+           toast2.style.cssText = 'position:fixed;top:20px;right:20px;z-index:9999;padding:10px 16px;background:#388e3c;color:#fff;border-radius:4px;font-size:0.85em;opacity:0.95;box-shadow:0 2px 8px rgba(0,0,0,0.2);';
+           toast2.textContent = 'Restarting... page will reload when service is back (30s max)';
+           document.body.appendChild(toast2);
+           // Poll for the API to come back, then reload
+           var tries = 0;
+           var poll = setInterval(function() {
+             tries++;
+             qrApi('/instances', {method: 'GET'})
+               .then(function(data) {
+                 if (data.status === 'ok') {
+                   clearInterval(poll);
+                   toast2.style.opacity = '0';
+                   setTimeout(function() { toast2.remove(); }, 500);
+                   window.location.reload();
+                 }
+               }).catch(function() {
+                 // Best effort — continue polling
+               });
+             if (tries >= 30) {
+               clearInterval(poll);
+               toast2.textContent = 'Restart may still be in progress. Refresh the page.';
+               setTimeout(function() { toast2.remove(); }, 3000);
+             }
+           }, 1000);
+         } else {
+           alert('Request failed: ' + e);
+         }
+       });
+  });
+});
+
+document.querySelectorAll('.refresh-inst').forEach(function(btn) {
+   btn.addEventListener('click', function() {
+     var id = this.getAttribute('data-id');
+     var origHTML = btn.innerHTML;
+     btn.innerHTML = '...';
+     qrApi('/instances/' + id + '/query-status')
+       .then(function(data) {
+         btn.innerHTML = origHTML;
+         // Reload to show updated state + last_state_change from DB
+         if (data.status === 'ok' && data.data.alive !== undefined) {
+           window.location.reload();
+         }
+       }).catch(function(e) {
+         btn.innerHTML = origHTML;
+       });
+   });
+ });
+
+// Preset dropdowns — AJAX-loaded (single fetch per engine type, shared across dropdowns)
+(function initPresetDropdowns() {
+  var presetCache = {};
+
+  function getPresets(engineType) {
+    if (presetCache[engineType]) return Promise.resolve(presetCache[engineType]);
+    var etype = engineType.toLowerCase().replace(/\s+/g, '_');
+    return qrApi('/engine/' + encodeURIComponent(etype) + '/presets')
+      .then(function(data) {
+        var items = (data && data.data && data.data.items) || (data && data.items) || [];
+        presetCache[engineType] = items;
+        return items;
+      })
+      .catch(function(e) {
+        console.error('[preset] getPresets(' + engineType + ') failed:', e);
+        presetCache[engineType] = [];
+        return [];
+      });
+  }
+
+  function populateDropdown(sel, presets, currentPresetId) {
+    sel.innerHTML = '';
+    for (var i = 0; i < presets.length; i++) {
+      var p = presets[i];
+      var opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = p.name;
+      if (p.id == currentPresetId) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    sel.style.display = '';
+    var loadingEl = sel.previousElementSibling;
+    if (loadingEl && loadingEl.classList.contains('preset-loading')) {
+      loadingEl.parentNode.removeChild(loadingEl);
+    }
+  }
+
+  function removeLoadingIndicator(sel) {
+    var loadingEl = sel.previousElementSibling;
+    if (loadingEl && loadingEl.classList.contains('preset-loading')) {
+      loadingEl.parentNode.removeChild(loadingEl);
+    }
+  }
+
+  var selects = document.querySelectorAll('.preset-sel');
+  var engineTypesNeeded = {};
+  for (var i = 0; i < selects.length; i++) {
+    var sel = selects[i];
+    var engine = sel.getAttribute('data-engine') || '';
+    var presetId = sel.getAttribute('data-preset-id') || '';
+    if (!engineTypesNeeded[engine]) engineTypesNeeded[engine] = [];
+    engineTypesNeeded[engine].push({sel: sel, presetId: presetId});
+  }
+
+  // Use IIFE to capture etype per iteration — avoids closure sharing issue
+  var engineKeys = [];
+  for (var key in engineTypesNeeded) { if (engineTypesNeeded.hasOwnProperty(key)) engineKeys.push(key); }
+  for (var ki = 0; ki < engineKeys.length; ki++) {
+    (function(etype) {
+      getPresets(etype).then(function(items) {
+        var group = engineTypesNeeded[etype];
+        if (!group || !group.length) return;
+        for (var j = 0; j < group.length; j++) {
+          populateDropdown(group[j].sel, items, group[j].presetId);
+        }
+      }).catch(function(e) {
+        console.error('[preset] failed loading ' + etype + ':', e);
+        var group = engineTypesNeeded[etype];
+        if (group && group.length) {
+          for (var j = 0; j < group.length; j++) {
+            removeLoadingIndicator(group[j].sel);
+          }
+        }
+      });
+    })(engineKeys[ki]);
+  }
+
+  selects.forEach(function(sel) {
+    sel.addEventListener('change', function() {
+      var instId = this.getAttribute('data-inst-id');
+      var newPreset = parseInt(this.value, 10);
+      var engineType = this.getAttribute('data-engine') || '';
+      var etype = engineType.toLowerCase().replace(/\s+/g, '_');
+      qrApi('/engine/' + encodeURIComponent(etype) + '/presets/' + newPreset)
+        .then(function(data) {
+          var p = data.data || {};
+          var details = [];
+          details.push('Instance: ' + document.querySelector('#preset-name-' + instId).textContent);
+          if (p.model_path) details.push('Model: ' + p.model_path);
+          if (p.category) details.push('Category: ' + p.category);
+          if (p.tags) details.push('Tags: ' + p.tags);
+          var msg = 'Switch to preset "' + (p.name || 'preset #' + newPreset) + '"?\n\n' + details.join('\n');
+          if (!confirm(msg)) {
+            sel.selectedIndex = sel.options.length - 1;
+            return;
+          }
+          _proceedChangePreset(instId, newPreset);
+        }).catch(function(e) { _proceedChangePreset(instId, newPreset); });
+    });
+  });
+
+  window._proceedChangePreset = function(id, preset) {
+    var nameEl = document.getElementById('preset-name-' + id);
+    var sel = document.querySelector('.preset-sel[data-inst-id="' + id + '"]');
+    if (sel) sel.disabled = true;
+    var toast = document.createElement('div');
+    toast.style.cssText = 'position:fixed;top:20px;right:20px;z-index:9999;padding:10px 16px;background:#1976d2;color:#fff;border-radius:4px;font-size:0.85em;opacity:0.95;box-shadow:0 2px 8px rgba(0,0,0,0.2);';
+    toast.textContent = 'Applying preset change... stopping instance';
+    document.body.appendChild(toast);
+    qrApi('/instances/' + id, {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({preset_id: preset, skip_build: true})
+    })
+    .then(function(data) {
+      toast.style.opacity = '0';
+      setTimeout(function() { toast.remove(); }, 300);
+      if (data.status === 'ok') {
+        var pn = data.data.preset_name || '-';
+        if (nameEl) nameEl.textContent = pn;
+        var t2 = document.createElement('div');
+        t2.style.cssText = 'position:fixed;top:20px;right:20px;z-index:9999;padding:10px 16px;background:#388e3c;color:#fff;border-radius:4px;font-size:0.85em;opacity:0.95;box-shadow:0 2px 8px rgba(0,0,0,0.2);';
+        t2.textContent = 'Deploying new preset... reloading page';
+        document.body.appendChild(t2);
+        setTimeout(function() {
+          t2.style.opacity = '0';
+          setTimeout(function() { t2.remove(); }, 300);
+          window.location.reload();
+        }, 1000);
+      } else {
+        if (sel) sel.disabled = false;
+        alert('Preset change failed: ' + (data.message || JSON.stringify(data)));
+      }
+    }).catch(function(e) {
+      toast.style.opacity = '0';
+      setTimeout(function() { toast.remove(); }, 300);
+      if (sel) sel.disabled = false;
+      var errMsg = typeof e === 'string' ? e : (e.message || e.toString());
+      alert('Preset change failed: ' + errMsg);
+    });
+  };
+})();
+
+
+// Refresh interval timer
+var refreshInterval = null;
+var refreshSelect = document.getElementById('refresh-interval');
+var applyRefreshBtn = document.getElementById('apply-refresh-btn');
+var filterForm = document.getElementById('filter-form');
+var filterEngine = document.getElementById('filter-engine');
+var filterState = document.getElementById('filter-state');
+var filterHost = document.getElementById('filter-host');
+
+// Pause auto-refresh while edit overlay is open to prevent losing unsaved changes
+var _editOverlayOpen = false;
+
+function startAutoRefresh(seconds) {
+  if (seconds <= 0) return;
+  // Don't restart if edit overlay is still open from previous session
+  if (_editOverlayOpen) {
+    var pauseMsg = document.createElement('div');
+    pauseMsg.style.cssText = 'position:fixed;top:20px;left:50%;transform:translateX(-50%);z-index:9999;padding:8px 16px;background:#f57c00;color:#fff;border-radius:4px;font-size:0.85em;box-shadow:0 2px 8px rgba(0,0,0,0.2);';
+    pauseMsg.textContent = 'Auto-refresh paused (edit overlay open)';
+    document.body.appendChild(pauseMsg);
+    setTimeout(function() { pauseMsg.remove(); }, 3000);
+    return;
+  }
+  stopAutoRefresh();
+  refreshInterval = setInterval(function() { queryAndReload(); }, seconds * 1000);
+}
+
+// Check before each auto-refresh cycle: if edit overlay opened during pause, skip reload
+var _lastCheckEditOpen = false;
+var checkEditOverlay = function() {
+  // sessionStorage tracks whether edit overlay is currently open
+  _lastCheckEditOpen = sessionStorage.getItem('qr_edit_overlay_open') === 'true';
+};
+
+function queryAndReload() {
+  checkEditOverlay();
+  if (_lastCheckEditOpen) return; // Skip reload while edit overlay is open
+  var buttons = document.querySelectorAll('.refresh-inst');
+  if (!buttons.length) { window.location.reload(); return; }
+  var ids = [];
+  buttons.forEach(function(b) { var id = b.getAttribute('data-id'); if (id) ids.push(id); });
+  var idx = 0;
+  function next() {
+    if (idx >= ids.length) { window.location.reload(); return; }
+    var curId = ids[idx++];
+    qrApi('/instances/' + curId + '/query-status')
+      .catch(function() { /* best effort, continue */ });
+    setTimeout(next, 300);
+  }
+  next();
+}
+
+function stopAutoRefresh() {
+  if (refreshInterval) {
+    clearInterval(refreshInterval);
+    refreshInterval = null;
+  }
+}
+
+// Store refresh interval in centralized settings store
+function saveRefreshInterval(seconds) {
+  qrSettings.set('instances', 'refresh_sec', seconds.toString());
+}
+
+refreshSelect.addEventListener('change', function() {
+  var val = parseInt(this.value, 10);
+  startAutoRefresh(val);
+  saveRefreshInterval(val);
+});
+
+// Load stored refresh interval on page load — default to "30s"
+(function() {
+  var stored = qrSettings.get('instances', 'refresh_sec', '30');
+  if (stored && refreshSelect) {
+    var storedVal = parseInt(stored, 10);
+    // Validate against available options
+    var valid = false;
+    for (var i = 0; i < refreshSelect.options.length; i++) {
+      if (parseInt(refreshSelect.options[i].value, 10) === storedVal) {
+        refreshSelect.value = stored.toString();
+        valid = true;
+        break;
+      }
+    }
+    // If stored value not in options, clear and use default "30s"
+    if (!valid) qrSettings.set('instances', 'refresh_sec', '30');
+  }
+  startAutoRefresh(stored ? parseInt(stored, 10) : 30);
+})();
+
+applyRefreshBtn.addEventListener('click', function() {
+  // Check if any filter is active
+  var hasFilter = (filterEngine.value !== '') || (filterState.value !== '') || (filterHost && filterHost.value !== '');
+  if (hasFilter) {
+    filterForm.submit();
+  } else {
+    // No filters: clear URL and reload to show all instances
+    window.location.href = '/webui/instances';
+  }
+});
+
+// MCP tool permission Apply & Restart handler
+document.querySelectorAll('.mcp-apply-btn').forEach(function(btn) {
+  btn.addEventListener('click', function() {
+    var instId = this.getAttribute('data-inst-id');
+    // Collect checkbox states
+    var reads = false, writes = false, proxy = false;
+    document.querySelectorAll('.mcp-flag-cb[data-inst-id="' + instId + '"]').forEach(function(cb) {
+      var flag = cb.getAttribute('data-flag');
+      if (flag === 'allow_reads' && cb.checked) reads = true;
+      if (flag === 'allow_writes' && cb.checked) writes = true;
+      if (flag === 'allow_proxy' && cb.checked) proxy = true;
+    });
+    // Save via API
+    var self = this;
+    self.disabled = true;
+    self.textContent = 'Saving...';
+    qrApi('/engines/quickrobot-mcp/settings', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        mcp_allow_reads: reads ? 'true' : 'false',
+        mcp_allow_writes: writes ? 'true' : 'false',
+        mcp_allow_proxy: proxy ? 'true' : 'false'
+      })
+    })
+    .then(function(data) {
+      if (data.status === 'ok') {
+        // Restart MCP instance
+        return qrApi('/instances/' + instId + '/restart_system', {method: 'POST'});
+      } else {
+        throw new Error(data.message || 'Save failed');
+      }
+    })
+    .then(function(data) {
+      if (data.status === 'ok') {
+        self.textContent = 'Applied ✓';
+        self.style.background = '#4caf50';
+        setTimeout(function() { window.location.reload(); }, 1500);
+      } else {
+         throw new Error(data.message || 'Restart failed');
+       }
+     })
+    .catch(function(err) {
+      self.textContent = 'Error';
+      self.style.background = '#f44336';
+      setTimeout(function() { self.disabled = false; }, 2000);
+    });
+  });
+});
+
+// Subprocess command-line inline edit
+(function() {
+  var _editOverlay = null;
+  document.querySelectorAll('[data-edit-preset]').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var instId = this.getAttribute('data-edit-preset');
+      var span = document.getElementById('preset-name-' + instId);
+      if (!span) return;
+      var currentText = span.textContent.trim();
+
+      // Track edit overlay open state to pause auto-refresh
+      sessionStorage.setItem('qr_edit_overlay_open', 'true');
+      
+      // Build overlay
+      _editOverlay = document.createElement('div');
+      _editOverlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center;';
+      var inner = document.createElement('div');
+      inner.style.cssText = 'background:#fff;padding:20px;border-radius:8px;max-width:600px;width:90%;';
+      inner.innerHTML = '<h3 style="margin:0 0 12px;font-size:1em;">Edit Subprocess Command</h3>' +
+        '<textarea id="edit-preset-textarea" rows="3" style="width:100%;font-family:monospace;font-size:0.85em;padding:8px;border:1px solid #ccc;border-radius:4px;resize:vertical;">' + currentText.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</textarea>' +
+      '<div style="margin:8px 0 0;font-size:0.8em;color:#888;line-height:1.5;">' +
+         '<strong>Template variables:</strong> <code style="background:#f0f0f0;padding:1px 3px;border-radius:2px;">{IP}</code>, <code style="background:#f0f0f0;padding:1px 3px;border-radius:2px;">{PORT}</code>, <code style="background:#f0f0f0;padding:1px 3px;border-radius:2px;">{ID}</code>, <code style="background:#f0f0f0;padding:1px 3px;border-radius:2px;">{NAME}</code> — ' +
+         '{IP}/{PORT} from config_override host/port; {ID} from DB instance ID; {NAME} from instance name column (raw value, wrap in double-quotes yourself when name may contain spaces).<br>' +
+         '<strong>Example:</strong> <code style="background:#f0f0f0;padding:1px 3px;">tmux new-session -d -s "{NAME}_{ID}"</code> → <code style="background:#f0f0f0;padding:1px 3px;">tmux new-session -d -s "my_session_61"</code><br>' +
+         'Fields <em>host</em> and <em>port</em> must be set separately (used for health-check URL and REMOTE column link).' +
+         '</div>' +
+        '<div style="display:flex;gap:8px;margin-top:12px;justify-content:flex-end;">' +
+        '<button class="btn" id="edit-preset-cancel" style="padding:4px 10px;font-size:0.85em;">Cancel</button>' +
+        '<button class="btn btn-primary" id="edit-preset-save" style="padding:4px 10px;font-size:0.85em;">Save</button></div>';
+      _editOverlay.appendChild(inner);
+      document.body.appendChild(_editOverlay);
+      inner.querySelector('#edit-preset-textarea').focus();
+
+      // Cancel handler
+      inner.querySelector('#edit-preset-cancel').addEventListener('click', function() {
+        document.body.removeChild(_editOverlay);
+        _editOverlay = null;
+        sessionStorage.removeItem('qr_edit_overlay_open');
+      });
+
+      // Save handler
+      inner.querySelector('#edit-preset-save').addEventListener('click', function() {
+        var textarea = inner.querySelector('#edit-preset-textarea');
+        var newText = textarea.value.trim();
+        // Parse: first word = executable, rest = cli_args
+        var parts = newText.split(/\s+/);
+        var executable = parts[0] || '';
+        var cliArgs = parts.slice(1).join(' ');
+        if (!executable) {
+          alert('Executable is required.');
+          return;
+        }
+        // Validate: check for basic syntax issues
+        if (executable.indexOf('"') !== -1 && executable.indexOf('"') === executable.lastIndexOf('"')) {
+          alert('Unmatched quotes in executable path.');
+          return;
+        }
+
+        var saveBtn = this;
+        saveBtn.textContent = 'Saving...';
+        saveBtn.disabled = true;
+        // First fetch current config to preserve host/port/working_dir
+        qrApi('/instances/' + instId).then(function(currentData) {
+            var co = currentData.data && currentData.data.config_override || {};
+            if (typeof co === 'string') { try { co = JSON.parse(co); } catch(e) { co = {}; } }
+            var merged = Object.assign({}, co, {executable: executable, cli_args: cliArgs});
+            qrApi('/instances/' + instId, {
+              method: 'PUT',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({config_override: JSON.stringify(merged)})
+            }).then(function(data) {
+              if (data.status === 'ok') {
+                span.textContent = executable + (cliArgs ? ' ' + cliArgs : '');
+                document.body.removeChild(_editOverlay);
+                _editOverlay = null;
+              } else {
+                alert('Save failed: ' + (data.message || 'Unknown'));
+              }
+              saveBtn.textContent = 'Save';
+              saveBtn.disabled = false;
+            }).catch(function(e) {
+              alert('Error: ' + e);
+              saveBtn.textContent = 'Save';
+              saveBtn.disabled = false;
+            });
+      });
+      });
+
+      // Close on overlay click (not inner content)
+      _editOverlay.addEventListener('click', function(e) {
+        if (e.target === _editOverlay) {
+          document.body.removeChild(_editOverlay);
+          _editOverlay = null;
+          sessionStorage.removeItem('qr_edit_overlay_open');
+        }
+      });
+    });
+});
+})();
+
+</script>

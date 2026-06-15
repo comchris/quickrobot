@@ -1,0 +1,53 @@
+# @name: Scan Models
+# @playbook_id: NODE_SCAN_MODELS_V1
+# @version: 1
+# @timeout: 600
+# scan_models.yml — Scan nodes for available GGUF model files
+# Returns JSON with path, size, and optional mmproj_path per file
+- hosts: all
+  gather_facts: no
+  tasks:
+    - name: Find GGUF models with metadata via shell
+      shell: >
+        find {{ model_root_path | default('/mnt/llama/gguf/models') }}
+        -name '*.gguf' -type f 2>/dev/null | grep -v mmproj | while read f; do
+          sz=$(stat -c '%s' "$f" 2>/dev/null || echo "0")
+          # Look for companion mmproj in same directory
+          dir=$(dirname "$f")
+          base=$(basename "$f" .gguf)
+          mmproj_path=""
+          # Pattern 1: exact base name match with .mmproj extension
+          if [ -f "${dir}/${base}.mmproj" ]; then
+            mmproj_path="${dir}/${base}.mmproj"
+          # Pattern 2: base_mmproj.gguf
+          elif [ -f "${dir}/${base}_mmproj.gguf" ]; then
+            mmproj_path="${dir}/${base}_mmproj.gguf"
+          # Pattern 3: try removing quantization suffix from base name
+          # e.g., "MiniCPM-V-4.6-bf16" -> look for "MiniCPM-V-4.6-mmproj*.gguf" or "mmproj-MiniCPM-V-4.6*.gguf"
+          else
+            clean_base=$(echo "$base" | sed -E 's/-(bf?16|f32|q[0-9]+_[a-z]+|-Q[0-9])$//i')
+            for pattern in "${dir}/${clean_base}-mmproj*.gguf" "${dir}/${clean_base}_mmproj*.gguf" "${dir}/mmproj-${clean_base}*.gguf"; do
+              if [ -f "$pattern" ]; then
+                mmproj_path="$pattern"
+                break
+              fi
+            done
+          fi
+          # Pattern 4: fallback — use ls to find ANY mmproj file in same directory
+          if [ -z "$mmproj_path" ] && [ -d "$dir" ]; then
+            for mp in $(ls "${dir}"/mmproj*.gguf 2>/dev/null); do
+              if [ -f "$mp" ]; then
+                mmproj_path="$mp"
+                break
+              fi
+            done
+          fi
+          printf '{"path":"%s","size":%s,"mmproj_path":"%s"}\n' "$f" "$sz" "$mmproj_path"
+        done
+      register: _find_output
+      changed_when: false
+
+    - name: Output model list per host
+      debug:
+        msg: "{{ { 'host': inventory_hostname,
+                   'models_raw': (_find_output.stdout_lines | select('search', '^.*')) | list } }}"

@@ -1,0 +1,204 @@
+# @name: Validate
+# @playbook_id: NODE_VALIDATE_V1
+# @version: 1
+# @timeout: 300
+# validate_node.yml — Collect full node inventory (IPs, CPU, RAM, OS)
+# Used during node creation to verify SSH and gather hardware info
+- hosts: all
+  gather_facts: no
+  become: yes
+  tasks:
+    - name: Check connectivity
+      ansible.builtin.ping:
+
+    - name: Ensure /opt/quickrobot is owned by ansible user
+      ansible.builtin.file:
+        path: "/opt/quickrobot"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0755'
+
+    - name: Get all interface IPs (IPv4 + IPv6)
+      ansible.builtin.command: ip addr show scope global
+      register: _ip_output
+      changed_when: false
+      failed_when: false
+
+    - name: Get CPU cores
+      ansible.builtin.command: nproc
+      register: _cpu_output
+      changed_when: false
+      failed_when: false
+
+    - name: Get total RAM (MB)
+      ansible.builtin.shell: free -m | awk 'NR==2{printf "%d", $2}'
+      register: _ram_output
+      changed_when: false
+      failed_when: false
+
+    - name: Get OS identifier
+      ansible.builtin.shell: |
+        if [ -f /etc/os-release ]; then
+          grep '^PRETTY_NAME=' /etc/os-release | cut -d'"' -f2
+        elif command -v lsb_release >/dev/null 2>&1; then
+          lsb_release -d | cut -d':' -f2
+        else
+          uname -s
+        fi
+      register: _os_output
+      changed_when: false
+      failed_when: false
+
+    - name: Detect NVIDIA GPU (nvidia-smi)
+      ansible.builtin.shell: nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits 2>/dev/null | head -1
+      register: _nvidia_output
+      changed_when: false
+      failed_when: false
+
+    - name: Detect GPU via lspci (Vulkan/AMD)
+      ansible.builtin.shell: |
+        if command -v lspci >/dev/null 2>&1; then
+          lspci 2>/dev/null | grep -iE 'vga|3d|display' | head -1 | sed 's/.*: //'
+        else
+          echo ""
+        fi
+      register: _lspci_output
+      changed_when: false
+      failed_when: false
+
+    - name: Detect Vulkan render devices
+      ansible.builtin.shell: ls /dev/dri/render* 2>/dev/null | head -1 || echo ""
+      register: _vulkan_render
+      changed_when: false
+      failed_when: false
+
+    - name: Get root FS free space (GB)
+      ansible.builtin.shell: df -BG / | tail -1 | awk '{gsub(/G/,"",$4); print $4}'
+      register: _fs_output
+      changed_when: false
+      failed_when: false
+
+    - name: Check pre-existing keeper files
+      ansible.builtin.shell: |
+        _found=""
+        for f in $(find /etc -name 'keeper-*.service' 2>/dev/null); do _found="$_found keeper-$f "; done
+        for d in /etc/quickrobot; do [ -d "$d" ] && _found="$_found /etc/quickrobot/ "; done
+        echo "${_found:-none}"
+      register: _keeper_files_output
+      changed_when: false
+      failed_when: false
+
+    - name: Check for stale qr-* systemd units and processes
+      ansible.builtin.shell: |
+        _qr_units=""
+        for u in $(systemctl list-units --all 'qr-*' --no-pager --plain 2>/dev/null | awk '{print $1}' | grep '^qr-'); do
+          state=$(systemctl is-active "$u" 2>/dev/null || echo "inactive")
+          _qr_units="$_qr_units $u=$state"
+        done
+        # Also check for orphaned processes not tied to a known unit
+        _orphan_procs=""
+        for p in $(pgrep -f '/opt/quickrobot' 2>/dev/null); do
+          comm=$(ps -p "$p" -o comm= 2>/dev/null || echo "?")
+          _orphan_procs="$_orphan_procs pid=$p comm=$comm"
+        done
+        if [ -z "$_qr_units" ]; then _qr_units="none"; fi
+        if [ -z "$_orphan_procs" ]; then _orphan_procs="none"; fi
+        echo "units=$_qr_units; orphans=$_orphan_procs"
+      register: _stale_qr_output
+      changed_when: false
+      failed_when: false
+
+    - name: Check GPU device permissions
+      ansible.builtin.shell: |
+        _warn=""
+        for d in /dev/dri/render*; do
+          if [ -e "$d" ]; then
+            perm=$(stat -c '%U' "$d" 2>/dev/null || echo "?")
+            if [ "$perm" != "root" ] && [ "$perm" != "video" ]; then
+              _warn="$_warn $d=$perm"
+            fi
+          fi
+        done
+        echo "${_warn:-ok}"
+      register: _gpu_perm_output
+      changed_when: false
+      failed_when: false
+
+    - name: Check nvidia-smi access
+      ansible.builtin.shell: |
+        if command -v nvidia-smi >/dev/null 2>&1; then
+          nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | head -1 && echo "OK" || echo "FAIL"
+        else
+          echo "N/A"
+        fi
+      register: _nvidia_smi_output
+      changed_when: false
+      failed_when: false
+
+    - name: Check binary existence (llama-server + rpc-server)
+      ansible.builtin.shell: |
+        _ls=/opt/quickrobot/llama.cpp/build/bin/llama-server
+        _rs=/opt/quickrobot/llama.cpp/build/bin/rpc-server
+        [ -x "$_ls" ] && echo "ls=OK" || echo "ls=MISSING"
+        [ -x "$_rs" ] && echo "rs=OK" || echo "rs=MISSING"
+      register: _binary_check
+      changed_when: false
+      failed_when: false
+
+    - name: Determine GPU info
+      ansible.builtin.set_fact:
+        _gpu_name: >-
+          {% if _nvidia_output.stdout and _nvidia_output.stdout | length > 0 %}
+            {{ _nvidia_output.stdout.split(',')[0] | trim }}
+          {% elif _lspci_output.stdout and _lspci_output.stdout | trim | length > 0 %}
+            {{ _lspci_output.stdout | trim }}
+          {% elif _vulkan_render.stdout and _vulkan_render.stdout | trim | length > 0 %}
+            Vulkan (Mesa)
+          {% else %}
+            None
+          {% endif %}
+        _gpu_type: >-
+          {% if _nvidia_output.stdout and _nvidia_output.stdout | length > 0 %}
+            CUDA
+          {% elif (_lspci_output.stdout and _lspci_output.stdout | trim | length > 0) or (_vulkan_render.stdout and _vulkan_render.stdout | trim | length > 0) %}
+            Vulkan
+          {% else %}
+            None
+          {% endif %}
+        _gpu_memory_mb: "{{ (_nvidia_output.stdout.split(',')[1] | trim | int if (_nvidia_output.rc == 0 and _nvidia_output.stdout | length > 0) else None) }}"
+
+    - name: Output inventory JSON
+      ansible.builtin.debug:
+        msg:
+          connectivity: ok
+          ipv4_address: >-
+            {% set _v4 = [] %}
+            {% for _line in (_ip_output.stdout_lines | default([])) %}
+              {% if ('    inet ' in _line) and ('inet6 ' not in _line) %}
+                {% set _ip = _line.split()[1].split('/')[0] %}
+                {% set _dummy = _v4.append(_ip) %}
+              {% endif %}
+            {% endfor %}
+            {{ _v4[0] if _v4 else None }}
+          ipv6_address: >-
+            {% set _v6 = [] %}
+            {% for _line in (_ip_output.stdout_lines | default([])) %}
+              {% if '    inet6 ' in _line %}
+                {% set _ip = _line.split()[1].split('/')[0] %}
+                {% set _dummy = _v6.append(_ip) %}
+              {% endif %}
+            {% endfor %}
+            {{ _v6[0] if _v6 else None }}
+          cpu_cores: "{{ _cpu_output.stdout | int if _cpu_output.rc == 0 else None }}"
+          ram_mb: "{{ _ram_output.stdout | int if _ram_output.rc == 0 else None }}"
+          os: "{{ _os_output.stdout.strip() | default('unknown') }}"
+          gpu_name: "{{ _gpu_name | default('None') }}"
+          gpu_type: "{{ _gpu_type | default('None') }}"
+          gpu_memory_mb: "{{ _gpu_memory_mb | default(None) }}"
+          fs_free_gb: "{{ _fs_output.stdout | int if _fs_output.rc == 0 else None }}"
+          keeper_files: "{{ _keeper_files_output.stdout | default('none') }}"
+          gpu_perm_warn: "{{ _gpu_perm_output.stdout | default('ok') }}"
+          nvidia_smi: "{{ _nvidia_smi_output.stdout | default('N/A') }}"
+          binaries: "{{ _binary_check.stdout | default('ls=MISSING rs=MISSING') }}"
+          stale_qr_services: "{{ _stale_qr_output.stdout | default('units=none; orphans=none') }}"

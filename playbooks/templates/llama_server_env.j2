@@ -1,0 +1,3 @@
+{% for k, v in (merged_env | default({})).items() %}{% if k not in ['restart_policy', 'default_timeout', 'binary_path', 'LLAMA_ARG_TENSOR_SPLIT', 'LLAMA_ARG_SPLIT_MODE', 'LLAMA_ARG_DEVICE'] and v is not none and v != '' %}{{ k }}="{{ v | replace('"', '\\"') }}"
+{% endif %}{% endfor %}LLAMA_ARG_TENSOR_SPLIT="{{ tensor_split_value | default('') }}"
+LLAMA_ARG_SPLIT_MODE="{{ split_mode_value | default('layer') }}"

@@ -1,0 +1,215 @@
+# @name: Deploy Llama Rpc Deploy Rpc
+# @playbook_id: DEPLOY_LLAMA_RPC_V1
+# @version: 1
+# @timeout: 1800
+# deploy_rpc.yml — Deploy RPC engine instance to target node
+# Source + binaries are SHARED per node, not per-instance
+- hosts: "{{ inventory_host }}"
+  become: yes
+  vars:
+    instance_id: "{{ instance_id }}"
+    instance_name: "{{ instance_name }}"
+    engine_type: "{{ engine_type }}"
+    instance_port: "{{ instance_port }}"
+    rpc_host: "{{ rpc_host | default('0.0.0.0') }}"
+    instance_env_vars: "{{ instance_env_vars | default([]) }}"
+    log_dir: "/var/log/quickrobot"
+    start_on_boot: "{{ start_on_boot | default(false) }}"
+    start_after_deploy: "{{ start_after_deploy | default(false) }}"
+    restart_policy: "{{ restart_policy | default('no') }}"
+    unit_name: "qr-{{ instance_id }}-{{ engine_type }}"
+    env_file: "/etc/quickrobot/{{ unit_name }}.env"
+    # SHARED universal paths — from engine_configs via extra_vars, with fallback defaults
+    node_src_dir: "{{ node_src_dir | default('/opt/quickrobot/llama.cpp') }}"
+    node_build_dir: "{{ node_build_dir | default('/opt/quickrobot/llama.cpp/build') }}"
+    remote_node_user: "{{ remote_node_user }}"
+
+  tasks:
+    - name: Preflight check — verify host is reachable and controllable
+      ansible.builtin.ping:
+
+    - name: Preflight check — scan existing QR service UUIDs on remote node
+      shell: "grep -h 'QR_UUID' /etc/systemd/system/qr-*.service 2>/dev/null || true"
+      register: preflight_uuids
+      changed_when: false
+
+    - name: Preflight check — log any UUID mismatches
+      debug:
+        msg: "UUID mismatch on {{ inventory_hostname }}: {{ preflight_uuids.stdout }}"
+      when: preflight_uuids.stdout | trim | length > 0
+
+    - name: Preflight check — log node build state
+      debug:
+        msg: "Node {{ inventory_hostname }} build state: {{ node_build_state | default('idle') }}"
+      changed_when: false
+
+    - name: Preflight check — verify available disk space on root filesystem
+      shell: df -BG / | tail -1 | awk '{print $4}' | tr -d 'G'
+      register: disk_free_gb
+      changed_when: false
+
+    - name: Fail if insufficient disk space (< 5 GB free)
+      fail:
+        msg: "Insufficient disk space on root filesystem. Free: {{ disk_free_gb.stdout }} GB (need >= 5 GB for git clone + cmake build)"
+      when: disk_free_gb.stdout | int < 5
+
+    - name: Log available disk space
+      debug:
+        msg: "Available disk space: {{ disk_free_gb.stdout }} GB"
+      changed_when: false
+
+    - name: Create /etc/quickrobot directory (needs root)
+      file:
+        path: "/etc/quickrobot"
+        state: directory
+        mode: '0755'
+
+    - name: Create shared build parent directory /opt/quickrobot (needs root, 0775 for user subdirs)
+      file:
+        path: "/opt/quickrobot"
+        state: directory
+        mode: '0775'
+
+    - name: Set ownership of /opt/quickrobot to remote user (for git/build)
+      file:
+        path: "/opt/quickrobot"
+        state: directory
+        owner: "{{ remote_node_user }}"
+        group: "{{ remote_node_user }}"
+        mode: '0775'
+
+    - name: Create per-instance unit directory (for env files)
+      file:
+        path: "/opt/quickrobot/{{ unit_name }}"
+        state: directory
+        mode: '0755'
+
+    # --- Pre-build binary existence check (Ansible-based, replaces SSH subprocess) ---
+    - name: Auto-detect skip_build for rpc
+      import_tasks: "{{ playbook_dir }}/common/check_llama_binary.yml"
+      vars:
+        binary_path: "{{ binary_path }}"
+      changed_when: false
+
+    - name: Set skip_build from binary check result
+      set_fact:
+        skip_build: "{{ binary_exists | bool }}"
+
+  # --- Per-instance env file + systemd unit (created BEFORE build so configs exist if build fails/takes long) ---
+    - name: Build ExecStart line
+      set_fact:
+        exec_start_line: "ExecStart={{ binary_path }}{% if merged_cli_opts is defined and merged_cli_opts %} {{ merged_cli_opts | join(' ') }}{% endif %}"
+
+    - name: Write RPC environment file from template
+      template:
+        src: rpc_env.j2
+        dest: "{{ env_file }}"
+        mode: '0644'
+
+    - name: Generate systemd service unit from template
+      template:
+        src: rpc_service.j2
+        dest: "/etc/systemd/system/{{ unit_name }}.service"
+
+    - name: Reload systemd after unit creation
+      systemd:
+        daemon_reload: yes
+
+  # --- Shared source clone + cmake build (run as remote user, not root) ---
+    - block:
+        - name: Check if shared source is a git repo
+          stat:
+            path: "{{ node_src_dir }}/.git"
+          register: git_repo_exists
+
+        - name: Check no stale cmake running before build
+          shell: pgrep -x cmake || true
+          register: cmake_pgrep
+          changed_when: false
+          become_user: "{{ remote_node_user }}"
+
+        - name: Fail if cmake already running on this node
+          fail:
+            msg: "cmake is already running on this node (PID {{ cmake_pgrep.stdout }}). Wait for it to finish or kill it."
+          when: cmake_pgrep.stdout | length > 0
+
+        - name: Clone llama.cpp to shared node source dir
+          ansible.builtin.git:
+            repo: "https://github.com/ggml-org/llama.cpp.git"
+            dest: "{{ node_src_dir }}"
+            version: master
+          become_user: "{{ remote_node_user }}"
+          when: not git_repo_exists.stat.exists
+
+        - name: Pull latest source ({{ node_git_pull_cmd | default('git pull origin main') }})
+          shell: "{{ node_git_pull_cmd | default('git pull origin main') }}"
+          args:
+            chdir: "{{ node_src_dir }}"
+          become_user: "{{ remote_node_user }}"
+          register: git_pull_result
+          changed_when: git_pull_result.rc == 0
+
+        - name: Ensure shared build directory exists
+          file:
+            path: "{{ node_build_dir }}"
+            state: directory
+            mode: '0755'
+          become_user: "{{ remote_node_user }}"
+
+        - name: Configure cmake for rpc
+          shell: "{{ node_build_set_cmd | default('cmake -B build -DGGML_RPC=ON -DGGML_NATIVE=ON -DGGML_CPU=ON -DLLAMA_OPENSSL=ON -DGGML_AVX2=ON -DGGML_VULKAN=ON') }}"
+          args:
+            chdir: "{{ node_src_dir }}"
+          become_user: "{{ remote_node_user }}"
+          register: cmake_configure
+          changed_when: "'-- Configuring' in cmake_configure.stdout"
+
+        - name: Build rpc-server
+          shell: "{{ node_build_run_cmd | default('cmake --build build --config Release -j 2') }}"
+          args:
+            chdir: "{{ node_src_dir }}"
+          become_user: "{{ remote_node_user }}"
+          register: cmake_build
+          changed_when: false
+
+        - name: Verify rpc-server binary exists
+          stat:
+            path: "{{ node_build_dir }}/bin/rpc-server"
+          become_user: "{{ remote_node_user }}"
+          register: new_binary
+
+        - name: Fail if binary not found
+          fail:
+            msg: "Build failed — rpc-server not in {{ node_build_dir }}/bin"
+          when: not new_binary.stat.exists
+
+        - name: Get short commit hash (for API build_number tracking)
+          shell: git rev-parse --short=7 HEAD
+          args:
+            chdir: "{{ node_src_dir }}"
+          register: commit_hash
+          changed_when: false
+          when: git_repo_exists.stat.exists
+
+        - name: Report build info for API tracking
+          debug:
+            msg: "BUILD_COMMIT={{ commit_hash.stdout | default('N/A') }}"
+          when: git_repo_exists.stat.exists | default(false)
+      when: not (skip_build | default(false))
+
+    # NOTE: env file + systemd unit were created BEFORE the build block so configs exist if build fails.
+
+    - name: Log systemd config (boot + restart)
+      debug:
+        msg: "[qr] {{ inventory_hostname }}: {{ unit_name }} enabled={{ start_on_boot | default(false) }}, restart={{ restart_policy | default('no') }}"
+
+    - name: Set service boot state (start_on_boot)
+      systemd:
+        name: "{{ unit_name }}"
+        enabled: "{{ start_on_boot | default(false) | bool }}"
+
+    - name: Start service after deploy (start_after_deploy)
+      systemd:
+        name: "{{ unit_name }}"
+        state: started
+      when: start_after_deploy | default(false)

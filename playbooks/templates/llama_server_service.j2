@@ -1,0 +1,19 @@
+# systemd service unit for llama-server
+# QR_UUID={{ instance_uuid }}
+[Unit]
+Description=quickrobot llama-server instance {{ instance_name }}
+After=network.target
+
+[Service]
+Type=simple
+User={{ remote_node_user | default('mepaw') }}
+WorkingDirectory=/opt/quickrobot/{{ unit_name }}
+EnvironmentFile={{ env_file }}
+{% if binary_path %}ExecStart={{ binary_path }} {% else %}ExecStart=/opt/quickrobot/llama.cpp/build/bin/llama-server {% endif %}{{ merged_cli_opts | join(' ') }}
+Restart={{ restart_policy | default('no') }}
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

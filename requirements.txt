@@ -1,0 +1,54 @@
+# quickrobot Python dependencies
+# Generated 2026-05-23 — Updated 2026-06-15
+
+# ============================================================
+# CORE — All available as Debian apt python3-* packages
+# ============================================================
+# These packages are all in the Debian Trixie (13) repos.
+# Use the apt install string below instead of pip3 for production
+# deployments on Debian/Ubuntu.
+# ============================================================
+
+# Web framework + templates
+Flask==3.1.1
+Jinja2==3.1.6
+MarkupSafe==2.1.5
+
+# Automation / playbooks
+ansible==12.0.0
+ansible-core==2.19.4
+PyYAML==6.0.2
+
+# HTTP client + auth (MCP proxy, SSH negotiation)
+requests==2.32.3
+requests_ntlm==1.3.0
+
+# CORS + WebSocket support
+flask-cors==6.0.1
+Flask-SocketIO==5.5.1
+
+# Process monitoring (conditionally imported)
+psutil==7.0.0
+
+# ASGI server (MCP, uvicorn-based)
+#uvicorn==0.32.0
+
+# ============================================================
+# MCP — Standalone (installed via pipx, not pip3)
+# ============================================================
+# The MCP SDK lives in a separate pipx environment.
+# This keeps it isolated from the main quickrobot Python env.
+# ============================================================
+# pipx install mcp
+
+# ============================================================
+# DEBIAN APT — Required packages (all python3-*)
+# ============================================================
+# sudo apt update && sudo apt install -y ansible-core python3-flask python3-jinja2 python3-markupsafe python3-yaml python3-psutil python3-requests python3-requests-ntlm python3-flask-cors python3-flask-socketio
+
+# ============================================================
+# DEBIAN APT — Suggested dev tools
+# ============================================================
+# Git, tmux, curl, jq — useful for debugging, health checks,
+# and manual operations (not required for the API to function).
+# sudo apt update && sudo apt install -y git tmux curl jq

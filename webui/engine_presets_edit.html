@@ -1,0 +1,331 @@
+<h1 style="margin:0;font-size:1.3em;">Edit Preset: {{ preset.name }} (ID #{{ preset.id | default('?') }}) — {{ engine_type }}</h1>
+<form id="preset-form" style="max-width:600px;">
+  <div style="margin-bottom:12px;">
+    <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Preset Name</label>
+    <input type="text" name="name" value="{{ preset.name | default('?') }}" required style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+  </div>
+  <div style="margin-bottom:12px;">
+    <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Category</label>
+    <input type="text" name="category" value="{{ preset.category | default('default') }}" style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+  </div>
+
+  <!-- GPU Device Selector -->
+  <div style="margin-bottom:12px;">
+    <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">GPU Device</label>
+    <select id="gpu-device-select" style="width:100%;max-width:300px;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+      <option value="" {% if not preset.gpu_device %}selected{% endif %}>-- Default (from instance or engine) --</option>
+      <option value="none" {% if preset.gpu_device == 'none' %}selected{% endif %}>None (CPU only)</option>
+      <option value="Vulkan0" {% if preset.gpu_device == 'Vulkan0' %}selected{% endif %}>Vulkan0 (AMD/Intel)</option>
+      <option value="CUDA0" {% if preset.gpu_device == 'CUDA0' %}selected{% endif %}>CUDA0 (NVIDIA)</option>
+    </select>
+  </div>
+
+  <!-- Model Selection -->
+  <div style="margin-bottom:12px;">
+    <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Linked Model</label>
+    <select id="model-select" style="width:100%;max-width:700px;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+      <option value="">-- No linked model --</option>
+    </select>
+    <div id="model-info" style="margin-top:8px;font-size:0.85em;color:#666;display:none;">
+      <strong id="mi-name"></strong>
+      <span style="color:#888;margin-left:8px;" id="mi-quant"></span>
+      <span style="color:#888;margin-left:8px;" id="mi-size"></span>
+      <br><span style="color:#555;" id="mi-mmproj-wrap" style="display:none;">MMPROJ: <code id="mi-mmproj"></code></span>
+      <br><span style="color:#555;" id="mi-draft-wrap" style="display:none;">Draft: <code id="mi-draft"></code></span>
+    </div>
+  </div>
+
+  <!-- CLI Options Editor -->
+  <div style="margin-bottom:12px;">
+    <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">CLI Options</label>
+    <button type="button" class="btn btn-xs btn-success" id="edit-cli-btn">Edit CLI Options</button>
+    <div id="cli-preview" style="font-size:0.85em;color:#666;margin-top:4px;font-family:monospace;">{{ preset.cli_data | default('[]') | tojson }}</div>
+  </div>
+
+  <!-- Env Vars Editor -->
+  <div style="margin-bottom:12px;">
+    <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Environment Variables</label>
+    <button type="button" class="btn btn-xs btn-success" id="edit-env-btn">Edit Env Vars</button>
+   <div id="env-preview" style="font-size:0.85em;color:#666;margin-top:4px;font-family:monospace;">{{ preset.env_data | default('{}') | tojson }}</div>
+  </div>
+
+  <!-- Merged Preview -->
+  <div style="margin-bottom:12px;">
+    <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Merged Preview</label>
+    <pre id="merged-preview" style="background:#f5f5f5;padding:8px;border-radius:4px;font-size:0.85em;max-height:150px;overflow:auto;"></pre>
+  </div>
+
+  <button type="submit" class="btn btn-success">Save Preset</button>
+  <a href="/webui/engine/{{ engine_type }}/presets" class="btn btn-primary" style="text-decoration:none;">Cancel</a>
+</form>
+
+{% if affected_instances %}
+<h2>Affected Instances ({{ affected_count }})</h2>
+<table>
+<thead><tr><th>Instance</th><th>Node</th><th>State</th></tr></thead>
+<tbody>
+{% for ai in affected_instances %}
+<tr>
+  <td><a class="row-link" href="/webui/instances/{{ ai.id }}">{{ ai.name }}</a></td>
+  <td>{{ ai.node_name }}</td>
+  <td>{{ status_badge(ai.state) }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+
+<h2>Restart All Instances Using This Preset</h2>
+<p>This will restart {{ affected_count }} instance(s). Each instance will be redeployed with updated config.</p>
+<button class="btn btn-danger" id="preset-restart-all">Restart All {{ affected_count }} Instance(s)</button>
+
+<script>
+(function() {
+   var btn = document.getElementById('preset-restart-all');
+   if (btn) {
+     btn.addEventListener('click', function(e) {
+       if (!confirm('Restart all instances using this preset?')) return;
+       e.target.textContent = 'Restarting...';
+       e.target.disabled = true;
+     qrApi('/engine/{{ engine_type }}/presets/{{ preset_id }}/restart_all', {method: 'POST'})
+       .then(function(data) {
+       if (data.status === 'ok') {
+       var ok = data.succeeded || 0;
+       var total = data.total || 0;
+       alert('Restart completed: ' + ok + '/' + total + ' succeeded');
+       setTimeout(function() { window.location.reload(); }, 800);
+       } else {
+       alert('Error: ' + (data.message || 'Unknown'));
+       e.target.textContent = 'Restart All';
+       e.target.disabled = false;
+       }
+       }).catch(function(e) {
+           console.log('Failed to load presets: ' + e);
+         });
+       });
+     });
+   }
+})();
+</script>
+{% else %}
+<h2>Affected Instances</h2>
+<p>No instances currently use this preset.</p>
+{% endif %}
+
+<!-- CLI JSON Modal -->
+<div id="cli-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:1000;">
+  <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:#fff;padding:20px;border-radius:8px;max-width:700px;width:90%;max-height:80vh;overflow-y:auto;">
+    <h3 style="margin-top:0;">Edit CLI Options</h3>
+    <p style="color:#888;font-size:0.85em;margin-bottom:8px;">JSON array of CLI flag strings (e.g. `["-v","-d"]`) or a single string (e.g. `-v`). Last occurrence wins on dedup.</p>
+    <textarea id="cli-json" rows="14" style="width:100%;font-family:monospace;padding:8px;border:1px solid #ccc;border-radius:4px;font-size:0.9em;"></textarea>
+    <span id="cli-status" style="font-size:0.85em;margin-top:4px;display:block;"></span>
+    <div style="margin-top:12px;text-align:right;">
+      <button class="btn btn-xs" id="cli-cancel">Cancel</button>
+      <button class="btn btn-success btn-xs" id="cli-save">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Env JSON Modal -->
+<div id="env-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:1000;">
+  <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:#fff;padding:20px;border-radius:8px;max-width:700px;width:90%;max-height:80vh;overflow-y:auto;">
+    <h3 style="margin-top:0;">Edit Environment Variables</h3>
+    <p style="color:#888;font-size:0.85em;margin-bottom:8px;">JSON dict of key/value pairs for LLAMA_ARG_* env vars.</p>
+    <textarea id="env-json" rows="14" style="width:100%;font-family:monospace;padding:8px;border:1px solid #ccc;border-radius:4px;font-size:0.9em;"></textarea>
+    <span id="env-status" style="font-size:0.85em;margin-top:4px;display:block;"></span>
+    <div style="margin-top:12px;text-align:right;">
+      <button class="btn btn-xs" id="env-cancel">Cancel</button>
+      <button class="btn btn-success btn-xs" id="env-save">Save</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+  var modelSelect = document.getElementById('model-select');
+  var modelInfo = document.getElementById('model-info');
+  var cliPreview = document.getElementById('cli-preview');
+  var envPreview = document.getElementById('env-preview');
+  var mergedPreview = document.getElementById('merged-preview');
+  var gpuSelect = document.getElementById('gpu-device-select');
+
+  // Initialize from server-rendered values
+  var currentCli = {{ preset.cli_data | default("{}") | tojson }};
+  var currentEnv = {{ preset.env_data | default("{}") | tojson }};
+  var currentModelId = {{ preset.model_id | default("null") | tojson }};
+
+  function formatSize(bytes) {
+    if (!bytes || bytes === 0) return '';
+    var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    var i = 0;
+    var size = parseFloat(bytes);
+    while (size >= 1024 && i < units.length - 1) { size /= 1024; i++; }
+    return size.toFixed(1) + units[i];
+  }
+
+// Load models list (active only)
+  qrApi('/engine/{{ engine_type }}/models?include_inactive=false')
+    .then(function(data) {
+       var items = data.items || [];
+       items.forEach(function(m) {
+         var opt = document.createElement('option');
+         opt.value = m.id;
+         var q = m.quantization ? ' (' + m.quantization + ')' : '';
+         var tags = [];
+         if (m.mmproj_path) tags.push('(+ mmproj)');
+         if (m.draft_model_path) tags.push('(+ draft)');
+         opt.textContent = m.name + q + (tags.length ? ' ' + tags.join(' ') : '');
+         modelSelect.appendChild(opt);
+       });
+       // Select current model_id if set
+       if (currentModelId) {
+         modelSelect.value = currentModelId;
+         modelInfo.style.display = 'block';
+         document.getElementById('mi-name').textContent = modelSelect.options[modelSelect.selectedIndex].text;
+         // Fetch model details
+         qrApi('/engine/{{ engine_type }}/models/' + currentModelId)
+         .then(function(d) {
+  if (d.status === 'ok' && d.data) {
+    document.getElementById('mi-quant').textContent = d.data.quantization || '';
+    document.getElementById('mi-size').textContent = d.data.size_bytes ? formatSize(d.data.size_bytes) : '';
+    if (d.data.mmproj_path) {
+      document.getElementById('mi-mmproj').textContent = d.data.mmproj_path;
+      document.getElementById('mi-mmproj-wrap').style.display = 'inline';
+    }
+    if (d.data.draft_model_path) {
+      document.getElementById('mi-draft').textContent = d.data.draft_model_path;
+      document.getElementById('mi-draft-wrap').style.display = 'inline';
+    }
+ }
+         }).catch(function() {});
+       }
+     }).catch(function(e) {
+        console.log('Model fetch failed: ' + e);
+      });
+
+modelSelect.addEventListener('change', function() {
+    currentModelId = this.value ? parseInt(this.value, 10) : null;
+    if (currentModelId) {
+      modelInfo.style.display = 'block';
+      document.getElementById('mi-name').textContent = this.options[this.selectedIndex].text;
+      qrApi('/engine/{{ engine_type }}/models/' + currentModelId)
+      .then(function(d) {
+ if (d.status === 'ok' && d.data) {
+  document.getElementById('mi-quant').textContent = d.data.quantization || '';
+  document.getElementById('mi-size').textContent = d.data.size_bytes ? formatSize(d.data.size_bytes) : '';
+  if (d.data.mmproj_path) {
+    document.getElementById('mi-mmproj').textContent = d.data.mmproj_path;
+    document.getElementById('mi-mmproj-wrap').style.display = 'inline';
+  }
+  if (d.data.draft_model_path) {
+    document.getElementById('mi-draft').textContent = d.data.draft_model_path;
+    document.getElementById('mi-draft-wrap').style.display = 'inline';
+  }
+ }
+      }).catch(function() {});
+    } else {
+      modelInfo.style.display = 'none';
+    }
+    updatePreview();
+  });
+
+  // CLI modal handlers
+  document.getElementById('edit-cli-btn').addEventListener('click', function() {
+    document.getElementById('cli-json').value = JSON.stringify(currentCli, null, 2);
+    document.getElementById('cli-status').textContent = '';
+    document.getElementById('cli-modal').style.display = 'block';
+  });
+  document.getElementById('cli-cancel').addEventListener('click', function() {
+    document.getElementById('cli-modal').style.display = 'none';
+  });
+  document.getElementById('cli-save').addEventListener('click', function() {
+    var raw = document.getElementById('cli-json').value.trim();
+    if (!raw) { currentCli = []; cliPreview.textContent = '[]'; document.getElementById('cli-status').textContent = 'Cleared'; setTimeout(function() { document.getElementById('cli-modal').style.display = 'none'; }, 400); updatePreview(); return; }
+    try {
+      var parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) { currentCli = parsed; }
+      else if (typeof parsed === 'string') { currentCli = [parsed]; }
+      else { throw new Error('Value must be a string or array'); }
+      cliPreview.textContent = JSON.stringify(currentCli, null, 2);
+      document.getElementById('cli-status').innerHTML = '<span style="color:green;">OK</span>';
+      setTimeout(function() { document.getElementById('cli-modal').style.display = 'none'; }, 400);
+      updatePreview();
+    } catch(e) {
+      // Fallback: treat as single CLI arg
+      currentCli = [raw];
+      cliPreview.textContent = JSON.stringify(currentCli, null, 2);
+      document.getElementById('cli-status').innerHTML = '<span style="color:green;">Saved (as single arg)</span>';
+      setTimeout(function() { document.getElementById('cli-modal').style.display = 'none'; }, 400);
+      updatePreview();
+    }
+  });
+
+  // Env modal handlers
+  document.getElementById('edit-env-btn').addEventListener('click', function() {
+    document.getElementById('env-json').value = JSON.stringify(currentEnv, null, 2);
+    document.getElementById('env-status').textContent = '';
+    document.getElementById('env-modal').style.display = 'block';
+  });
+  document.getElementById('env-cancel').addEventListener('click', function() {
+    document.getElementById('env-modal').style.display = 'none';
+  });
+  document.getElementById('env-save').addEventListener('click', function() {
+    try {
+      var parsed = JSON.parse(document.getElementById('env-json').value);
+      if (typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Must be a JSON object');
+      currentEnv = parsed;
+      envPreview.textContent = JSON.stringify(currentEnv, null, 2);
+      document.getElementById('env-status').innerHTML = '<span style="color:green;">OK</span>';
+      setTimeout(function() { document.getElementById('env-modal').style.display = 'none'; }, 400);
+      updatePreview();
+    } catch(e) {
+      document.getElementById('env-status').innerHTML = '<span style="color:red;">' + e.message + '</span>';
+    }
+  });
+
+  function updatePreview() {
+    var merged = {};
+    merged.env = Object.keys(currentEnv).length > 0 ? currentEnv : {};
+    merged.cli_opts = currentCli.length > 0 ? currentCli : [];
+    document.getElementById('merged-preview').textContent = JSON.stringify(merged, null, 2);
+  }
+
+  updatePreview();
+
+  document.querySelector('#preset-form').addEventListener('submit', function(e) {
+    e.preventDefault();
+    var submitBtn = this.querySelector('button[type="submit"]');
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Saving...';
+    var formData = {};
+    formData.name = this.querySelector('[name="name"]').value;
+    formData.category = this.querySelector('[name="category"]').value;
+    formData.config_template = {
+      env: currentEnv,
+      cli_opts: currentCli
+    };
+    formData.model_id = currentModelId;
+    formData.gpu_device = gpuSelect ? (gpuSelect.value || null) : null;
+    qrApi('/engine/{{ engine_type }}/presets/{{ preset_id }}', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(formData)
+    }).then(function(data) {
+        console.log('Save response:', data);
+        if (data.status === 'ok') {
+          document.querySelector('form').innerHTML = '<p style="color:#4caf50;font-weight:bold;padding:16px;">Preset saved successfully.</p>';
+          setTimeout(function() { window.location.reload(); }, 800);
+        } else {
+          alert('Error: ' + (data.message || 'Unknown'));
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'Save Preset';
+        }
+      })
+      .catch(function(e) {
+        console.error('Save failed:', e);
+        alert('Request failed: ' + e);
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Save Preset';
+      });
+  });
+})();
+</script>

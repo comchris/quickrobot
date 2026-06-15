@@ -1,0 +1,19 @@
+# systemd service unit for rpc-server
+# QR_UUID={{ instance_uuid }}
+[Unit]
+Description=quickrobot RPC server instance {{ instance_name }}
+After=network.target
+
+[Service]
+Type=simple
+User={{ remote_node_user | default('mepaw') }}
+WorkingDirectory=/opt/quickrobot/{{ unit_name }}
+EnvironmentFile={{ env_file }}
+ExecStart={{ binary_path }} {{ merged_cli_opts | join(' ') | default('') }}
+Restart={{ restart_policy | default('no') }}
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

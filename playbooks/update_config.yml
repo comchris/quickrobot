@@ -1,0 +1,102 @@
+# @name: Update Config
+# @playbook_id: UPDATE_CONFIG_V1
+# @version: 1
+# @timeout: 600
+# update_config.yml — Config-only update for llama_server and rpc instances
+# Writes env file, regenerates systemd unit, reloads + restarts service.
+# No git, no cmake — all config pre-computed by Python cluster builder.
+- hosts: "{{ inventory_host }}"
+  become: yes
+  vars:
+    instance_id: "{{ instance_id }}"
+    instance_name: "{{ instance_name }}"
+    engine_type: "{{ engine_type }}"
+    instance_port: "{{ instance_port }}"
+    unit_name: "qr-{{ instance_id }}-{{ engine_type }}"
+    env_file: "/etc/quickrobot/{{ unit_name }}.env"
+    binary_path: "{{ binary_path | default('') }}"
+    remote_node_user: "{{ remote_node_user }}"
+    # Pre-computed cluster values (from lib_cluster_env_builder)
+    merged_env: "{{ merged_env | default({}) }}"
+    merged_cli_opts: "{{ merged_cli_opts | default([]) }}"
+    tensor_split_value: "{{ tensor_split_value | default('') }}"
+    split_mode_value: "{{ split_mode_value | default('layer') }}"
+    rpc_bind_ids: "{{ rpc_bind_ids | default([]) }}"
+
+  tasks:
+    - name: Preflight check — verify host is reachable
+      ansible.builtin.ping:
+
+    - name: Preflight check — scan existing QR service UUIDs
+      shell: "grep -h 'QR_UUID' /etc/systemd/system/qr-*.service 2>/dev/null || true"
+      register: preflight_uuids
+      changed_when: false
+
+    - name: Preflight check — log UUID mismatches
+      debug:
+        msg: "UUID mismatch on {{ inventory_hostname }}: {{ preflight_uuids.stdout }}"
+      when: preflight_uuids.stdout | trim | length > 0
+
+    - name: Create /etc/quickrobot directory
+      file:
+        path: "/etc/quickrobot"
+        state: directory
+        mode: '0755'
+
+    - name: Create per-instance unit directory
+      file:
+        path: "/opt/quickrobot/{{ unit_name }}"
+        state: directory
+        mode: '0755'
+
+    # --- Write env file (engine-specific template) ---
+    - name: Write environment file from template (llama_server)
+      when: engine_type == "llama_server"
+      template:
+        src: llama_server_env.j2
+        dest: "{{ env_file }}"
+        mode: '0644'
+
+    - name: Write environment file from template (rpc)
+      when: engine_type == "llama_rpc"
+      template:
+        src: rpc_env.j2
+        dest: "{{ env_file }}"
+        mode: '0644'
+
+    # --- Generate systemd unit (engine-specific) ---
+    - name: Build ExecStart line (rpc)
+      when: engine_type == "llama_rpc"
+      set_fact:
+        exec_start_line: "ExecStart={{ binary_path }}{% if merged_cli_opts is defined and merged_cli_opts %} {{ merged_cli_opts | join(' ') }}{% endif %}"
+
+    - name: Generate systemd service unit (llama_server)
+      when: engine_type == "llama_server"
+      template:
+        src: llama_server_service.j2
+        dest: "/etc/systemd/system/{{ unit_name }}.service"
+
+    - name: Generate systemd service unit (rpc)
+      when: engine_type == "llama_rpc"
+      template:
+        src: rpc_service.j2
+        dest: "/etc/systemd/system/{{ unit_name }}.service"
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Restart service
+      systemd:
+        name: "{{ unit_name }}"
+        state: restarted
+
+    - name: Wait for port availability
+      wait_for:
+        port: "{{ instance_port }}"
+        timeout: 30
+        delay: 2
+
+    - name: Record update success
+      set_fact:
+        update_success: true

@@ -1,0 +1,578 @@
+<!-- Top row: title, add button, refresh interval -->
+<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
+  <h1 style="margin:0;font-size:1.3em;">Hosts</h1>
+  <a href="/webui/nodes/new" class="btn btn-primary" style="display:inline-block;padding:4px 12px;border-radius:4px;text-decoration:none;font-size:0.85em;">+ Add Host</a>
+  <!-- Filter bar: hostname search + show inactive toggle -->
+  <div style="display:flex;gap:8px;align-items:center;">
+    <input type="text" id="host-search" placeholder="Search hosts..." style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;width:160px;">
+    <select id="show-inactive" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+      <option value="false">Hide inactive</option>
+      <option value="true">Show inactive</option>
+    </select>
+  </div>
+  <div style="display:flex;align-items:center;gap:6px;">
+    <label style="font-size:0.8em;color:#666;">Refresh:</label>
+    <select id="refresh-interval" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+      <option value="0">Off</option>
+      <option value="10">10s</option>
+      <option value="30" selected>30s</option>
+      <option value="60">60s</option>
+      <option value="120">120s</option>
+    </select>
+    <button id="refresh-once-btn" class="btn btn-primary" style="padding:4px 10px;font-size:0.85em;">Refresh</button>
+    <button id="refresh-all-btn" class="btn btn-success" style="padding:4px 10px;font-size:0.85em;" title="SSH probe all nodes + health check all instances">&#x21bb;</button>
+  </div>
+</div>
+
+<table>
+<thead>
+  <tr>
+    <th class="sortable" data-col="0">ID</th>
+    <th class="sortable" data-col="1">Name</th>
+    <th class="sortable" data-col="2">Hostname</th>
+    <th class="sortable" data-col="3">Capabilities</th>
+    <th class="sortable" data-col="4">GPU</th>
+    <th class="sortable" data-col="5">FS Free</th>
+    <th class="sortable" data-col="6">Build</th>
+    <th class="sortable" data-col="7">Age</th>
+    <th class="sortable" data-col="8">INST.</th>
+    <th class="sortable" data-col="9">PING</th>
+    <th>Actions</th>
+  </tr>
+</thead>
+<tbody>
+{% for n in nodes %}
+<tr>
+  <td>{{ n.id }}</td>
+  <td><a class="row-link" href="/webui/nodes/{{ n.id }}">{{ n.name }}</a></td>
+  <td>{{ n.hostname }}</td>
+  <td>{% set cap_parts = [] %}{% if n.cpu_cores %}{% set _ = cap_parts.append(n.cpu_cores ~ 'c') %}{% endif %}{% if n.ram_mb %}{% if n.ram_mb >= 1024 %}{% set _ = cap_parts.append((n.ram_mb // 1024) ~ 'GB') %}{% else %}{% set _ = cap_parts.append(n.ram_mb ~ 'MB') %}{% endif %}{% endif %}{% if n.os %}{% set _ = cap_parts.append(n.os) %}{% endif %}{{ cap_parts|join(', ') if cap_parts else '\u2014' }}</td>
+  <td>{% set gt = (n.gpu_type or '')|trim %}{% set gn = (n.gpu_name or '')|trim %}{% if gt and gt not in ['None','none',''] %}{% if gt == 'CUDA' %}<span style="color:#76b900;">CUDA</span>{% else %}<span style="color:#00bcd4;">Vulkan</span>{% endif %}{% if gn and gn not in ['None','none',''] and gn != gt %} {{ gn[:20] ~ (gn[20:] and '...') }}{% endif %}{% if n.gpu_memory_mb %} ({{ (n.gpu_memory_mb // 1024) }}GB){% endif %}{% else %}none detected{% endif %}</td>
+  <td>{{ '%.0f GB' % n.fs_free_gb if n.fs_free_gb else '—' }}</td>
+  <td class="build-cell" data-sort="{{ build_states.get(n.id, {}).get('state', 'idle') }}">
+    {% set bs = build_states.get(n.id, {}) %}
+    {% if bs.get('compiling') %}
+      <span style="color:#e67e22;">&#9881;</span> {{ bs.compiling|join(', ') }}
+    {% elif bs.get('state') == 'running' %}
+      <span style="color:#e67e22;">&#9881;</span> compiling
+    {% else %}
+      idle
+    {% endif %}
+    <button class="btn btn-sm btn-outline-danger reset-build-btn" data-node-id="{{ n.id }}" title="Reset build state" style="margin-left:8px;font-size:0.7em;padding:1px 5px;">&#10227;</button>
+  </td>
+  <td class="age-cell" data-sort="{{ n.created_at or '' }}" data-ts-utc="{{ n.created_at or '' }}">{{ n.created_at or '-' }}</td>
+  <td class="inst-count-cell" data-sort="{{ instance_counts.get(n.id, 0) }}">{{ instance_counts.get(n.id, 0) }}</td>
+   <td style="text-align:center;min-width:90px;">
+      {% if n.id != 1 %}
+        {% set ps = n.ping_state or 'disabled' %}
+        {% set ia = n.is_active | default(1) %}
+        {% if ia == 0 %}
+          <span title="Host inactive (not being pinged){% if ps != 'disabled' %} | last known: {{ ps }}{% endif %}" class="ping-dot" data-id="{{ n.id }}" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#9e9e9e;vertical-align:middle;margin-right:6px;"></span>
+        {% elif ps == 'online' %}
+          <span title="Reachable (ping OK)" class="ping-dot" data-id="{{ n.id }}" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#4caf50;vertical-align:middle;margin-right:6px;"></span>
+        {% elif ps == 'offline' %}
+          <span title="Unreachable (ping failed)" class="ping-dot" data-id="{{ n.id }}" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#f44336;vertical-align:middle;margin-right:6px;"></span>
+        {% else %}
+          <span title="Ping state: {{ ps }}" class="ping-dot" data-id="{{ n.id }}" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#9e9e9e;vertical-align:middle;margin-right:6px;"></span>
+        {% endif %}
+        <select class="host-active-toggle" data-id="{{ n.id }}" title="Click to toggle active/inactive filter state" style="font-size:0.72em;padding:2px 4px;border:1px solid #bbb;border-radius:3px;background:#f5f5f5;">
+          {% if ia == 1 %}
+            <option value="1" selected>Active</option>
+            <option value="0">Inactive</option>
+          {% else %}
+            <option value="1">Active</option>
+            <option value="0" selected>Inactive</option>
+          {% endif %}
+        </select>
+      {% else %}
+        <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#4caf50;"></span>
+      {% endif %}
+    </td>
+ {% if n.id != 1 %}
+   <td style="display:inline-block;margin-left:6px;">
+      {% if n.status != 'active' %}
+      <button class="btn btn-success node-action" data-action="discover" data-id="{{ n.id }}" title="Discover" style="font-size:0.65em;padding:1px 4px;">&#9870;</button>
+      {% endif %}
+      <button class="btn btn-primary node-action node-action-regular" data-action="reboot" data-id="{{ n.id }}" title="Reboot" style="font-size:0.65em;padding:1px 4px;">&#8635;</button>
+      <button class="btn btn-danger node-action node-action-regular" data-action="shutdown" data-id="{{ n.id }}" title="Shutdown" style="font-size:0.65em;padding:1px 4px;">&#9000;</button>
+      <button class="btn btn-danger node-action node-action-regular" data-action="delete" data-id="{{ n.id }}" title="Remove host" style="font-size:0.65em;padding:1px 4px;">&#10006;</button>
+    </td>
+  {% else %}
+  <td>-</td>
+  {% endif %}
+</tr>
+{% else %}
+ <tr><td colspan="11" style="text-align:center;color:#888;">No hosts registered</td></tr>
+{% endfor %}
+</tbody>
+</table>
+
+<!-- Column sorting JS — sortable columns: 0(ID),1(Name),2(Hostname),3(Capabilities),4(GPU),5(FS Free),6(Build),7(Age),8(Instances),9(Ping Status),10(Status) -->
+<script>
+// Compact timestamp display — page-specific for node age column
+// < 24h: relative only (e.g. "2h 30m")
+// >= 24h and < 7d: compact date + relative (e.g. "May 28 (3d)")
+// >= 7d: full date + relative (e.g. "May 20, 2026 (10d)")
+function fmtCompact(iso) {
+    if (!iso || iso === '-') return '-';
+    var ts = new Date(iso);
+    if (isNaN(ts.getTime())) return iso;
+    var now = new Date();
+    var diff = Math.floor((now - ts) / 1000);
+    if (diff < 0) return iso;
+    var tzName = typeof window._qr_tz_name !== 'undefined' ? window._qr_tz_name : null;
+    var fmtOpts = { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false };
+    if (tzName) fmtOpts.timeZone = tzName;
+    var dateStr = ts.toLocaleString(undefined, fmtOpts);
+    return { date: dateStr, diff: diff };
+}
+
+// Apply relative time + compact timestamp formatting on load
+(function() {
+  document.querySelectorAll('.age-cell').forEach(function(cell) {
+    var raw = cell.getAttribute('data-ts-utc') || cell.getAttribute('data-sort') || cell.textContent.trim();
+    var info = fmtCompact(raw);
+    var relStr = qrFmtRelative(raw);
+    if (relStr !== '-') {
+        if (info.diff !== undefined && info.diff < 86400) {
+            cell.textContent = relStr;
+        } else if (info.date) {
+            cell.innerHTML = info.date + ' <span style="color:#888;font-size:0.85em;">(' + relStr + ')</span>';
+        } else {
+            cell.textContent = relStr;
+        }
+    } else {
+        cell.textContent = relStr;
+    }
+  });
+})();
+var _savedSortCol = parseInt(qrSettings.get('hosts', 'sort_col', '-1'), 10);
+var _savedSortDir = qrSettings.get('hosts', 'sort_dir', '');
+var ths = document.querySelectorAll('.sortable');
+
+// Sort table function — delegates inline sort logic for reuse in applySavedSort
+function sortTable(col, dir) {
+  var th = ths[col];
+  if (!th) return;
+  var table = th.closest('table');
+  if (!table) return;
+  var tbody = table.querySelector('tbody');
+  if (!tbody) return;
+  var rows = Array.from(tbody.rows);
+  rows.sort(function(a, b) {
+    var cellA = a.cells[col] ? (a.cells[col].getAttribute('data-sort') || a.cells[col].textContent.trim()) : '';
+    var cellB = b.cells[col] ? (b.cells[col].getAttribute('data-sort') || b.cells[col].textContent.trim()) : '';
+    // Numeric sort: ID(0), Instances(8)
+    if (col === 0 || col === 8) {
+      return dir === 'asc' ? (parseInt(cellA, 10) || 0) - (parseInt(cellB, 10) || 0) : (parseInt(cellB, 10) || 0) - (parseInt(cellA, 10) || 0);
+    }
+    return dir === 'asc' ? cellA.localeCompare(cellB) : cellB.localeCompare(cellA);
+  });
+  rows.forEach(function(row) { tbody.appendChild(row); });
+}
+
+function applySavedSort() {
+  if (_savedSortCol >= 0 && _savedSortDir) {
+    sortTable(_savedSortCol, _savedSortDir);
+    ths.forEach(function(t) {
+      t.textContent = t.textContent.replace(/\s*[\u2191\u2193]\s*$/, '').trim();
+    });
+    var arrow = _savedSortDir === 'asc' ? ' \u2191' : ' \u2193';
+    ths[_savedSortCol].textContent = ths[_savedSortCol].textContent.trim() + arrow;
+  }
+}
+applySavedSort();
+
+ths.forEach(function(th) {
+  th.style.cursor = 'pointer';
+  th.addEventListener('click', function() {
+    var col = parseInt(this.getAttribute('data-col'), 10);
+    var dir = qrSettings.get('hosts', 'sort_dir', '') === 'desc' ? 'asc' : 'desc';
+    qrSettings.set('hosts', 'sort_col', col.toString());
+    qrSettings.set('hosts', 'sort_dir', dir);
+
+    ths.forEach(function(t) {
+      t.textContent = t.textContent.replace(/\s*[\u2191\u2193]\s*$/, '').trim();
+    });
+    var arrow = dir === 'asc' ? ' \u2191' : ' \u2193';
+    this.textContent = this.textContent.trim() + arrow;
+
+    sortTable(col, dir);
+  });
+});
+
+// Node action buttons (discover, reboot, shutdown, delete)
+document.querySelectorAll('.node-action').forEach(function(btn) {
+  btn.addEventListener('click', function() {
+    var action = this.getAttribute('data-action');
+    var id = this.getAttribute('data-id');
+    var origHTML = btn.innerHTML;
+
+    if (action === 'delete') {
+      var name = this.closest('tr').cells[0].textContent.trim();
+      if (!confirm('Remove host "' + name + '"?\nThis will undeploy all instances on the node.')) return;
+    } else if (action === 'reboot') {
+      var name = this.closest('tr').cells[0].textContent.trim();
+      if (!confirm('Reboot host "' + name + '"?\nThe node will restart.')) return;
+    } else if (action === 'shutdown') {
+      var name = this.closest('tr').cells[0].textContent.trim();
+      if (!confirm('Shutdown host "' + name + '"?\nThe node will power off.')) return;
+    }
+
+    btn.disabled = true;
+    btn.style.pointerEvents = 'none';
+    btn.style.opacity = '0.6';
+    var dots = ['...', '. .', ' . .'];
+    var dotIdx = 0;
+    var dotInterval = setInterval(function() {
+      btn.textContent = dots[dotIdx % 3];
+      dotIdx++;
+    }, 400);
+
+    var toast = document.createElement('div');
+    toast.style.cssText = 'position:fixed;top:20px;right:20px;z-index:9999;padding:10px 16px;background:#1976d2;color:#fff;border-radius:4px;font-size:0.85em;opacity:0.95;box-shadow:0 2px 8px rgba(0,0,0,0.2);';
+    toast.textContent = action.charAt(0).toUpperCase() + action.slice(1) + 'ing node...';
+    document.body.appendChild(toast);
+
+    // Delete uses DELETE /api/v1/nodes/<id>, others use POST /api/v1/nodes/<id>/<action>
+    var method = action === 'delete' ? 'DELETE' : 'POST';
+    var url = action === 'delete' ? '/api/v1/nodes/' + id : '/api/v1/nodes/' + id + '/' + action;
+
+    fetch(url, {method: method})
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        clearInterval(dotInterval);
+        toast.style.opacity = '0';
+        setTimeout(function() { toast.remove(); }, 300);
+        if (data.status === 'ok') {
+          setTimeout(function() { window.location.reload(); }, 1200);
+        } else {
+          btn.disabled = false;
+          btn.textContent = origHTML;
+          btn.style.pointerEvents = '';
+          btn.style.opacity = '';
+          alert(action.charAt(0).toUpperCase() + action.slice(1) + ' failed: ' + (data.message || JSON.stringify(data)));
+        }
+      }).catch(function(e) {
+        clearInterval(dotInterval);
+        toast.style.opacity = '0';
+        setTimeout(function() { toast.remove(); }, 300);
+        btn.disabled = false;
+        btn.textContent = origHTML;
+        btn.style.pointerEvents = '';
+        btn.style.opacity = '';
+        alert(action.charAt(0).toUpperCase() + action.slice(1) + ' failed: ' + (e.message || String(e)));
+      });
+  });
+});
+
+// Host active/inactive toggle — PUT /api/v1/nodes/<id>/host-status
+document.querySelectorAll('.host-active-toggle').forEach(function(sel) {
+  sel.addEventListener('change', function() {
+    var node_id = this.getAttribute('data-id');
+    var new_active = this.value;
+    var origStyle = this.style.cssText;
+
+    // Disable buttons for this row when inactive (is_active=0)
+    var row = this.closest('tr');
+    if (row) {
+      row.querySelectorAll('.node-action-regular').forEach(function(btn) {
+        btn.disabled = new_active === '0';
+        btn.style.opacity = new_active === '0' ? '0.3' : '';
+        btn.style.pointerEvents = new_active === '0' ? 'none' : '';
+      });
+    }
+
+    qrApi('/nodes/' + node_id + '/host-status', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({is_active: new_active})
+    })
+    .then(function(data) {
+      if (data.status === 'ok') {
+        // Dot color is based on ping_state (auto-managed), not admin toggle
+        // Keep current dot appearance; update tooltip to reflect active state
+        var dot = row ? row.querySelector('.ping-dot') : null;
+        if (dot && data.data) {
+          var ps = data.data.ping_state || 'disabled';
+          var ia = data.data.is_active ?? 1;
+          dot.style.background = '#9e9e9e';
+          if (ia == 0) {
+            dot.title = 'Host inactive (not being pinged)' + (ps !== 'disabled' ? ' | last known: ' + ps : '');
+          } else {
+            if (ps === 'online') dot.style.background = '#4caf50';
+            else if (ps === 'offline') dot.style.background = '#f44336';
+            dot.title = ps === 'online' ? 'Reachable (ping OK)' : (ps === 'offline' ? 'Unreachable (ping failed)' : 'Ping state: ' + ps);
+          }
+        }
+      } else {
+        alert('Failed to update host active state: ' + (data.message || JSON.stringify(data)));
+      }
+    })
+    .catch(function(e) {
+      alert('Host active state update failed: ' + e);
+    });
+  });
+});
+
+// Ping status dots — one-shot ping refresh on click
+document.querySelectorAll('.ping-dot').forEach(function(dot) {
+  dot.addEventListener('click', function() {
+    var id = this.getAttribute('data-id');
+    var origBg = this.style.background;
+    this.style.background = '#ffeb3b'; // yellow while pinging
+    qrApi('/nodes/' + id + '/ping')
+      .then(function(data) {
+        if (data.status === 'ok' && data.data) {
+          var ps = data.data.ping_state || 'disabled';
+          var ia = data.data.is_active ?? 1;
+          this.style.background = '#9e9e9e';
+          if (ia == 0) {
+            this.title = 'Host inactive (not being pinged)' + (ps !== 'disabled' ? ' | last known: ' + ps : '');
+          } else {
+            if (ps === 'online') this.style.background = '#4caf50';
+            else if (ps === 'offline') this.style.background = '#f44336';
+            this.title = ps === 'online' ? 'Reachable (ping OK)' : (ps === 'offline' ? 'Unreachable (ping failed)' : 'Ping state: ' + ps);
+          }
+        } else {
+          this.style.background = origBg;
+        }
+      }.bind(this))
+      .catch(function() { this.style.background = origBg; }.bind(this));
+  }.bind(dot));
+});
+
+// Refresh interval timer
+var refreshInterval = null;
+var refreshSelect = document.getElementById('refresh-interval');
+var refreshOnceBtn = document.getElementById('refresh-once-btn');
+
+function startAutoRefresh(seconds) {
+  if (seconds <= 0) return;
+  stopAutoRefresh();
+  refreshInterval = setInterval(function() { window.location.reload(); }, seconds * 1000);
+}
+
+function stopAutoRefresh() {
+  if (refreshInterval) {
+    clearInterval(refreshInterval);
+    refreshInterval = null;
+  }
+}
+
+// Store refresh interval in centralized settings store
+function saveRefreshInterval(seconds) {
+  qrSettings.set('hosts', 'refresh_sec', seconds.toString());
+}
+
+refreshSelect.addEventListener('change', function() {
+  var val = parseInt(this.value, 10);
+  startAutoRefresh(val);
+  saveRefreshInterval(val);
+});
+
+// Load stored refresh interval on page load — default to "30s"
+(function() {
+  var stored = qrSettings.get('hosts', 'refresh_sec', '30');
+  if (stored && refreshSelect) {
+    var storedVal = parseInt(stored, 10);
+    // Validate against available options
+    var valid = false;
+    for (var i = 0; i < refreshSelect.options.length; i++) {
+      if (parseInt(refreshSelect.options[i].value, 10) === storedVal) {
+        refreshSelect.value = stored.toString();
+        valid = true;
+        break;
+      }
+    }
+    // If stored value not in options, clear and use default "30s"
+    if (!valid) qrSettings.set('hosts', 'refresh_sec', '30');
+  }
+  startAutoRefresh(stored ? parseInt(stored, 10) : 30);
+})();
+
+refreshOnceBtn.addEventListener('click', function() { window.location.reload(); });
+
+ // Reset build state button: prompt confirmation, then POST to API
+ document.querySelectorAll('.reset-build-btn').forEach(function(btn) {
+   btn.addEventListener('click', function(e) {
+     e.stopPropagation();
+     var nodeId = this.getAttribute('data-node-id');
+     if (!confirm('Really remove build state for this host? This allows a new build to start.')) return;
+     fetch('/api/v1/nodes/' + nodeId + '/reset-build-state', {method: 'POST'})
+       .then(function(r) { return r.json(); })
+       .then(function(data) {
+         if (data.status === 'ok') {
+           alert('Build state reset. Page will reload.');
+           window.location.reload();
+         } else {
+           alert('Reset failed: ' + (data.message || JSON.stringify(data)));
+         }
+       }).catch(function(err) {
+         alert('Request failed: ' + err);
+       });
+   });
+ });
+
+// Host filtering: show/inactive hosts + hostname search
+var hostSearchInput = document.getElementById('host-search');
+var showInactiveSelect = document.getElementById('show-inactive');
+var tbody = document.querySelector('table tbody');
+
+// Read filter preference from localStorage or URL
+function getFilterSettings() {
+  // Check URL first, then localStorage, then default
+  var urlParams = new URLSearchParams(window.location.search);
+  if (urlParams.has('include_inactive')) {
+    return urlParams.get('include_inactive') === 'true';
+  }
+  var stored = localStorage.getItem('qr_hosts_show_inactive');
+  if (stored !== null) {
+    return stored === 'true';
+  }
+  return false; // default: hide inactive
+}
+
+// Apply filter and re-fetch hosts from API
+function applyFilter() {
+  var showInactive = showInactiveSelect.value === 'true';
+  var searchQuery = (hostSearchInput && hostSearchInput.value) || '';
+  // Update URL without reload for shareability
+  var url = new URL(window.location);
+  if (showInactive) url.searchParams.set('include_inactive', 'true');
+  else url.searchParams.delete('include_inactive');
+  history.replaceState(null, '', url.toString());
+
+  var apiPath = '/api/v1/nodes?include_inactive=' + showInactive;
+  if (searchQuery) apiPath += '&q=' + encodeURIComponent(searchQuery);
+
+  fetch(apiPath)
+    .then(function(data) {
+      var items = data.items || [];
+      // Filter by hostname search if query present
+      if (searchQuery) {
+        var q = searchQuery.toLowerCase();
+        items = items.filter(function(n) {
+          return (n.name && n.name.toLowerCase().indexOf(q) !== -1) ||
+                 (n.hostname && n.hostname.toLowerCase().indexOf(q) !== -1);
+        });
+      }
+      renderHostTable(items);
+    })
+    .catch(function(e) { console.error('Filter fetch failed:', e); });
+}
+
+// Render host table rows (called after filter)
+function renderHostTable(nodes) {
+  if (!tbody) return;
+  // We need to get the original HTML template for rows.
+  // Since we can't easily clone them, just reload the page with the correct URL
+  // This is simpler and consistent with other pages' approach
+  window.location.reload();
+}
+
+// Wire up dropdown change — triggers API filter via reload
+showInactiveSelect.addEventListener('change', function() {
+  // Store preference for next page load
+  localStorage.setItem('qr_hosts_show_inactive', this.value);
+  applyFilter();
+});
+
+// Fix initial load mismatch: if URL has no filter param but localStorage says "show",
+// the server rendered active-only (default false) but dropdown says "Show inactive".
+// Trigger applyFilter() to reload with correct data.
+(function() {
+  var showInactive = getFilterSettings();
+  var urlParams = new URLSearchParams(window.location.search);
+  if (showInactiveSelect) {
+    showInactiveSelect.value = showInactive ? 'true' : 'false';
+  }
+  // If dropdown says "show" but no URL param, reload to get all hosts
+  if (showInactive && !urlParams.has('include_inactive')) {
+    applyFilter();
+  }
+})();
+
+// Wire up search input — debounced
+if (hostSearchInput) {
+  var searchTimeout;
+  hostSearchInput.addEventListener('input', function() {
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(applyFilter, 300);
+  });
+}
+
+// Initialize filter from URL/localStorage on page load
+(function() {
+  var showInactive = getFilterSettings();
+  if (showInactiveSelect) {
+    showInactiveSelect.value = showInactive ? 'true' : 'false';
+  }
+})();
+
+// Refresh All button — POST /api/v1/health/check with scope=all
+var refreshAllBtn = document.getElementById('refresh-all-btn');
+if (refreshAllBtn) {
+  refreshAllBtn.addEventListener('click', function() {
+    var btn = this;
+    var origHTML = btn.innerHTML;
+    btn.disabled = true;
+    btn.style.pointerEvents = 'none';
+    btn.style.opacity = '0.6';
+    var dots = ['...', '. .', ' . .'];
+    var dotIdx = 0;
+    var dotInterval = setInterval(function() {
+      btn.innerHTML = dots[dotIdx % 3];
+      dotIdx++;
+    }, 400);
+
+    var toast = document.createElement('div');
+    toast.style.cssText = 'position:fixed;top:20px;right:20px;z-index:9999;padding:10px 16px;background:#1976d2;color:#fff;border-radius:4px;font-size:0.85em;opacity:0.95;box-shadow:0 2px 8px rgba(0,0,0,0.2);';
+    toast.textContent = 'Health check running...';
+    document.body.appendChild(toast);
+
+    qrApi('/health/check', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({scope: 'all'})}).then(function(data) {
+      clearInterval(dotInterval);
+      toast.style.opacity = '0';
+      setTimeout(function() { toast.remove(); }, 300);
+
+      if (data.status !== 'ok') {
+        btn.disabled = false;
+        btn.innerHTML = origHTML;
+        btn.style.pointerEvents = '';
+        btn.style.opacity = '';
+        alert('Health check failed: ' + (data.message || JSON.stringify(data)));
+        return;
+      }
+
+      var s = data.data.summary;
+      var msg = 'Health check done — ';
+      msg += 'Nodes: ' + s.nodes_ok + '/' + s.nodes_checked + ' OK';
+      if (s.nodes_fail) msg += ', ' + s.nodes_fail + ' down';
+      msg += ' | ';
+      msg += 'Instances: ' + s.instances_ok + '/' + s.instances_checked + ' OK';
+      if (s.instances_fail) msg += ', ' + s.instances_fail + ' down';
+
+      toast.textContent = msg;
+      toast.style.background = '#2e7d32';
+      document.body.appendChild(toast);
+
+      setTimeout(function() {
+        window.location.reload();
+      }, 1500);
+    }).catch(function(e) {
+      clearInterval(dotInterval);
+      toast.style.opacity = '0';
+      setTimeout(function() { toast.remove(); }, 300);
+      btn.disabled = false;
+      btn.innerHTML = origHTML;
+      btn.style.pointerEvents = '';
+      btn.style.opacity = '';
+      alert('Health check failed: ' + e);
+    });
+  });
+}
+</script>

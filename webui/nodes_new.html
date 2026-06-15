@@ -1,0 +1,21 @@
+<h1>Add Host</h1>
+<form method="post" style="max-width:400px;">
+  <div style="margin-bottom:12px;">
+    <label style="display:block;margin-bottom:4px;font-size:0.85em;color:#888;">Node Name *</label>
+    <input type="text" name="name" required style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+  </div>
+  <div style="margin-bottom:12px;">
+    <label style="display:block;margin-bottom:4px;font-size:0.85em;color:#888;">Hostname (DNS) *</label>
+    <input type="text" name="hostname" required placeholder="e.g., dllama6.lan" style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+  </div>
+  <div style="margin-bottom:12px;">
+    <label style="display:block;margin-bottom:4px;font-size:0.85em;color:#888;">Ansible SSH User</label>
+    <input type="text" name="ansible_user" value="mepaw" style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+  </div>
+  <div style="margin-bottom:12px;">
+    <label style="display:block;margin-bottom:4px;font-size:0.85em;color:#888;">SSH Key Path (optional)</label>
+    <input type="text" name="ansible_key_path" placeholder="/home/mepaw/.ssh/id_rsa" style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+  </div>
+  <button type="submit" style="padding:8px 20px;background:#28a745;color:#fff;border:none;border-radius:4px;cursor:pointer;">Add &amp; Validate</button>
+</form>
+<p style="color:#888;margin-top:8px;font-size:0.85em;">Node will be validated via SSH immediately. Only added if validation succeeds.</p>

@@ -1,0 +1,145 @@
+<!-- Single row header with controls, search, and model filter -->
+<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
+  <h1 style="margin:0;font-size:1.3em;">Presets</h1>
+  <span style="display:inline-block;padding:2px 8px;background:#555;color:#fff;border-radius:10px;font-size:0.75em;font-weight:normal;" title="Total presets matching current filters">{{ preset_count }}</span>
+  <a href="/webui/engine/{{ engine_type }}/presets/create" class="btn btn-primary" style="display:inline-block;padding:4px 12px;border-radius:4px;text-decoration:none;font-size:0.85em;">+ Add Preset</a>
+  <form method="get" action="/webui/engine/{{ engine_type }}/presets" id="filter-form" style="display:flex;gap:6px;align-items:center;margin:0;">
+    <input type="text" name="q" placeholder="Search..." value="{{ search_q }}"
+           style="padding:4px 10px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;" />
+    <button type="submit" class="btn btn-primary" style="padding:4px 10px;font-size:0.85em;">Search</button>
+    {% if search_q or filter_model %}
+    <a href="/webui/engine/{{ engine_type }}/presets" class="btn" style="padding:4px 10px;font-size:0.85em;text-decoration:none;background:#999;color:#fff;">Clear</a>
+    {% endif %}
+    <select name="model" id="filter-model" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;max-width:320px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" onchange="document.getElementById('filter-form').submit();">
+      <option value="">All models</option>
+      {% for mid, mname in all_models %}
+      <option value="{{ mid }}" {% if mid|string == filter_model %}selected="selected"{% endif %}>{{ mname }} ({{ model_counts.get((mid|string) + '|||' + mname, 0) }})</option>
+      {% endfor %}
+    </select>
+  </form>
+</div>
+
+<table>
+<thead><tr><th class="sortable" data-col="0">ID</th><th class="sortable" data-col="1">Name</th><th class="sortable" data-col="2">Model</th><th class="sortable" data-col="3">GPU Device</th><th class="sortable" data-col="4">Category</th><th class="sortable" data-col="5">Age</th><th>Actions</th></tr></thead>
+<tbody>
+{% for p in presets %}
+<tr>
+  <td>{{ p.id }}</td>
+  <td><a class="row-link" href="/webui/engine/{{ engine_type }}/presets/{{ p.id }}">{{ p.name }}</a></td>
+  <td>{% if p.model_name and p.model_id %}<a class="row-link" href="/webui/models?q={{ p.model_name | urlencode }}&engine={{ engine_type }}" title="Show models matching '{{ p.model_name }}'">{{ p.model_name }}</a>{% else %}&mdash;{% endif %}</td>
+  <td>{{ gpu_device_badge(p.gpu_device) }}</td>
+  <td>{{ p.category }}</td>
+  <td class="age-cell" data-sort="{{ p.created_at or '' }}">{{ p.created_at or '-' }}</td>
+  <td style="white-space:nowrap;">
+     <a href="/webui/engine/{{ engine_type }}/presets/{{ p.id }}" class="btn btn-primary" style="font-size:0.75em;padding:2px 6px;margin-right:4px;text-decoration:none;">Edit</a>
+    <button class="btn btn-xs btn-success preset-clone-btn" data-preset-id="{{ p.id }}" data-engine="{{ engine_type }}" title="Clone this preset" style="padding:2px 6px;font-size:0.8em;margin-right:4px;">Clone</button>
+    <button class="btn btn-danger preset-delete-btn" data-preset-id="{{ p.id }}" data-engine="{{ engine_type }}" style="font-size:1.1em;padding:2px 5px;line-height:1;" title="Remove">&times;</button>
+   </td>
+</tr>
+{% else %}
+<tr><td colspan="7" style="text-align:center;color:#888;">No presets defined</td></tr>
+{% endfor %}
+</tbody>
+</table>
+
+<script>
+// Format ISO timestamp as relative time — uses global qrFmtRelative from base.html
+(function() {
+  document.querySelectorAll('.age-cell').forEach(function(cell) {
+    var raw = cell.getAttribute('data-sort') || cell.textContent.trim();
+    cell.textContent = qrFmtRelative(raw);
+  });
+})();
+
+// Column sorting: ID(0 num), Name(1 str), Model(2 str), GPU Device(3 str), Category(4 str), Age(5 timestamp str)
+var _sortCol = parseInt(qrSettings.get('engine_presets', 'sort_col', '-1'), 10);
+var _sortDir = qrSettings.get('engine_presets', 'sort_dir', '');
+var ths = document.querySelectorAll('.sortable');
+
+function engPresetsSortTable(col, dir) {
+  var table = ths[0] ? ths[0].closest('table') : null;
+  if (table) {
+    var tbody = table.querySelector('tbody');
+    if (tbody) {
+      var rows = Array.from(tbody.rows);
+      rows.sort(function(a, b) {
+        var cellA = a.cells[col] ? a.cells[col].getAttribute('data-sort') || a.cells[col].textContent.trim() : '';
+        var cellB = b.cells[col] ? b.cells[col].getAttribute('data-sort') || b.cells[col].textContent.trim() : '';
+        if (col === 0) {
+          return dir === 'asc' ? (parseInt(cellA, 10) || 0) - (parseInt(cellB, 10) || 0) : (parseInt(cellB, 10) || 0) - (parseInt(cellA, 10) || 0);
+        }
+        return dir === 'asc' ? cellA.localeCompare(cellB) : cellB.localeCompare(cellA);
+      });
+      rows.forEach(function(row) { tbody.appendChild(row); });
+    }
+  }
+}
+
+function engPresetsApplyArrows(col, dir) {
+  ths.forEach(function(t) {
+    t.textContent = t.textContent.replace(/\s*[\u2191\u2193]\s*$/, '').trim();
+  });
+  var arrow = dir === 'asc' ? ' \u2191' : ' \u2193';
+  ths[col].textContent = ths[col].textContent.trim() + arrow;
+}
+
+if (_sortCol >= 0 && _sortDir) {
+  engPresetsSortTable(_sortCol, _sortDir);
+  engPresetsApplyArrows(_sortCol, _sortDir);
+}
+
+ths.forEach(function(th) {
+  th.style.cursor = 'pointer';
+  th.addEventListener('click', function() {
+    var col = parseInt(this.getAttribute('data-col'), 10);
+    var dir = qrSettings.get('engine_presets', 'sort_dir', '') === 'desc' ? 'asc' : 'desc';
+    qrSettings.set('engine_presets', 'sort_col', col.toString());
+    qrSettings.set('engine_presets', 'sort_dir', dir);
+    engPresetsSortTable(col, dir);
+    engPresetsApplyArrows(col, dir);
+  });
+});
+
+(function() {
+  var buttons = document.querySelectorAll('.preset-delete-btn');
+  buttons.forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var id = this.getAttribute('data-preset-id');
+      var engine = this.getAttribute('data-engine');
+      if (!confirm('Delete preset ' + id + '? This cannot be undone.')) return;
+      qrApi('/engine/' + engine + '/presets/' + id, {method: 'DELETE'})
+      .then(function(data) {
+      if (data.status === 'ok') {
+      alert('Preset deleted');
+      window.location.href = '/webui/engine/' + engine + '/presets';
+      } else {
+      alert('Delete failed: ' + (data.message || 'Unknown'));
+      }
+      }).catch(function(e) { alert('Error: ' + e); });
+    });
+  });
+
+  var cloneBtns = document.querySelectorAll('.preset-clone-btn');
+  cloneBtns.forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var id = this.getAttribute('data-preset-id');
+      var engine = this.getAttribute('data-engine');
+      qrApi('/engine/' + engine + '/presets/' + id)
+      .then(function(data) {
+if (data.status !== 'ok' || !data.data) throw new Error('Failed to load preset');
+var srcName = data.data.name;
+var newName = srcName + '_cl1';
+if (!confirm('Clone "' + srcName + '" as "' + newName + '"?')) return;
+qrApi('/engine/' + engine + '/presets/' + id + '/clone', {method: 'POST'})
+.then(function(cdata) {
+  if (cdata.status === 'ok') {
+    window.location.href = '/webui/engine/' + engine + '/presets/' + cdata.data.id;
+  } else {
+    alert('Clone failed: ' + (cdata.message || 'Unknown'));
+  }
+}).catch(function(e) { alert('Error: ' + e); });
+        }).catch(function(e) { alert('Load failed: ' + e); });
+    });
+  });
+})();
+</script>

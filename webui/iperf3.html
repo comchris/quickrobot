@@ -1,0 +1,222 @@
+<!-- Panel A: Engine Configuration -->
+<h1 style="margin:0;font-size:1.3em;">Iperf3</h1>
+<table id="config-table">
+  <thead><tr><th>Key</th><th>Description</th><th>Value</th></tr></thead>
+  <tbody id="config-tbody">
+    <tr><td colspan="3" style="text-align:center;color:#888;">Loading config...</td></tr>
+  </tbody>
+</table>
+<div class="actions"><button class="btn btn-success" id="save-config-btn">Save All Changes</button></div>
+
+<!-- Panel B: Presets -->
+<h2 style="margin-top:16px;font-size:1.1em;">Presets</h2>
+<a class="btn btn-primary" href="/webui/iperf3/presets/create">Create New Preset</a>
+<table id="presets-table">
+  <thead><tr><th class="sortable" data-col="0">ID</th><th class="sortable" data-col="1">Name</th><th class="sortable" data-col="2">Age</th><th class="sortable" data-col="3">Category</th><th>Config Template</th><th>Actions</th></tr></thead>
+  <tbody id="presets-tbody">
+    <tr><td colspan="6" style="text-align:center;color:#888;">Loading presets...</td></tr>
+  </tbody>
+</table>
+
+<script>
+// Format ISO timestamp as relative time — uses global qrFmtRelative from base.html
+(function() {
+  // --- Panel A: Engine Config ---
+  var configOriginals = {};
+
+  function loadConfig() {
+    qrApi('/engine/iperf3/config')
+    .then(function(data) {
+    if (data.status !== 'ok') {
+    document.getElementById('config-tbody').innerHTML = '<tr><td colspan="3" style="text-align:center;color:#f44336;">Failed to load config</td></tr>';
+    return;
+    }
+    var configs = data.data || {};
+    if (!configs || Object.keys(configs).length === 0) {
+    document.getElementById('config-tbody').innerHTML = '<tr><td colspan="3" style="text-align:center;color:#888;">No config keys set</td></tr>';
+    return;
+    }
+
+    var rows = '';
+    for (var key in configs) {
+    if (!configs.hasOwnProperty(key)) continue;
+    var entry = configs[key];
+    var displayValue = typeof entry === 'object' ? (entry.value || '') : (entry || '');
+    var desc = entry.description || '';
+
+    configOriginals[key] = String(displayValue);
+
+    var inputHtml;
+    if (key === 'restart_policy') {
+    var opts = ['no','always','on-success','on-failure','on-abnormal','on-watchdog','on-failure:N'];
+    var optHtml = '';
+    for (var i = 0; i < opts.length; i++) {
+    var sel = opts[i] === displayValue ? ' selected' : '';
+    optHtml += '<option value="' + opts[i] + '"' + sel + '>' + opts[i] + '</option>';
+    }
+    inputHtml = '<select class="config-value" data-key="' + key + '">' + optHtml + '</select>';
+    } else {
+    inputHtml = '<input type="text" class="config-value" data-key="' + key + '" value="' + displayValue + '">';
+    }
+
+    rows += '<tr><td>' + key + '</td><td style="color:#888;">' + desc + '</td><td>' + inputHtml + '</td></tr>';
+    }
+
+    document.getElementById('config-tbody').innerHTML = rows;
+    }).catch(function(e) {
+        document.getElementById('config-tbody').innerHTML = '<tr><td colspan="3" style="text-align:center;color:#f44336;">Error: ' + e + '</td></tr>';
+      });
+  }
+
+  document.getElementById('save-config-btn').addEventListener('click', function() {
+    var inputs = document.querySelectorAll('.config-value');
+    var changes = {};
+    for (var i = 0; i < inputs.length; i++) {
+      var key = inputs[i].getAttribute('data-key');
+      var val = inputs[i].value;
+      if (String(val) !== configOriginals[key]) {
+        changes[key] = val;
+      }
+    }
+    if (Object.keys(changes).length === 0) { alert('No changes to save'); return; }
+
+    qrApi('/engine/iperf3/config/batch', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({configs: changes})}).then(function(data) {
+  if (data.status === 'ok') {
+    alert('Saved ' + (data.data.saved_keys || 0) + ' keys');
+    setTimeout(function() { window.location.reload(); }, 500);
+  } else {
+    alert('Error: ' + (data.message || 'Unknown'));
+  }
+}).catch(function(e) { alert('Request failed: ' + e); });
+  });
+
+  // --- Panel B: Presets ---
+  function loadPresets() {
+    qrApi('/engine/iperf3/presets')
+    .then(function(data) {
+if (data.status !== 'ok') {
+  document.getElementById('presets-tbody').innerHTML = '<tr><td colspan="6" style="text-align:center;color:#f44336;">Failed to load presets</td></tr>';
+  return;
+}
+var items = data.items || [];
+if (items.length === 0) {
+  document.getElementById('presets-tbody').innerHTML = '<tr><td colspan="6" style="text-align:center;color:#888;">No presets defined. Click "Create New Preset" above.</td></tr>';
+  return;
+}
+
+var rows = '';
+for (var i = 0; i < items.length; i++) {
+  var p = items[i];
+  var configPreview = '';
+  if (p.config_template) {
+    try {
+      var tpl = typeof p.config_template === 'string' ? JSON.parse(p.config_template) : p.config_template;
+      configPreview = JSON.stringify(tpl, null, 2);
+    } catch(e) { configPreview = String(p.config_template); }
+  }
+
+  // Truncate long config templates with title for hover
+  var tplCell = '';
+  if (configPreview.length > 120) {
+    tplCell = '<code title="' + configPreview.replace(/"/g, '&quot;') + '">' + configPreview.substring(0, 120) + '...</code>';
+  } else {
+    tplCell = '<code>' + (configPreview || '') + '</code>';
+  }
+
+       rows += '<td>' + p.id + '</td>' +
+               '<td><a class="row-link" href="/webui/iperf3/presets/' + p.id + '">' + p.name + '</a></td>' +
+               '<td class="age-cell" data-sort="' + (p.created_at || '') + '">' + (p.created_at || '-') + '</td>' +
+               '<td>' + (p.category || '-') + '</td>' +
+               '<td>' + tplCell + '</td>' +
+               '<td style="white-space:nowrap;"><button class="btn btn-danger preset-delete-btn" data-preset-id="' + p.id + '" style="font-size:1.1em;padding:2px 5px;line-height:1;" title="Remove">\u00d7</button></td></tr>';
+  }
+  document.getElementById('presets-tbody').innerHTML = rows;
+
+  // Format age cells to relative time
+  document.querySelectorAll('#presets-tbody .age-cell').forEach(function(cell) {
+    var raw = cell.getAttribute('data-sort') || cell.textContent.trim();
+    cell.textContent = qrFmtRelative(raw);
+  });
+
+  // Attach delete handlers
+  var delBtns = document.querySelectorAll('.preset-delete-btn');
+  for (var j = 0; j < delBtns.length; j++) {
+    delBtns[j].addEventListener('click', function() {
+      var id = this.getAttribute('data-preset-id');
+      if (!confirm('Delete preset ' + id + '? This cannot be undone.')) return;
+      qrApi('/engine/iperf3/presets/' + id, {method: 'DELETE'})
+      .then(function(data) {
+if (data.status === 'ok') {
+  alert('Preset deleted');
+  window.location.reload();
+} else {
+  alert('Delete failed: ' + (data.message || 'Unknown'));
+}
+      }).catch(function(e) { alert('Error: ' + e); });
+          });
+        }
+      }).catch(function(e) {
+        document.getElementById('presets-tbody').innerHTML = '<tr><td colspan="6" style="text-align:center;color:#f44336;">Error: ' + e + '</td></tr>';
+      });
+  }
+
+  loadConfig();
+  loadPresets();
+
+  // --- Column sorting for presets table (ID 0 numeric, Name 1 string, Age 2 timestamp, Category 3 string) ---
+  var ths = document.querySelectorAll('#presets-table .sortable');
+
+  // Auto-apply saved sort state on load
+  (function() {
+    var _sortCol = parseInt(qrSettings.get('iperf3', 'sort_col', '-1'), 10);
+    var _sortDir = qrSettings.get('iperf3', 'sort_dir', '');
+    if (_sortCol >= 0 && _sortDir) {
+      sortTable(_sortCol, _sortDir);
+      applyArrows(_sortCol, _sortDir);
+    }
+  })();
+
+  function sortTable(col, dir) {
+    var table = ths[0] ? ths[0].closest('table') : null;
+    if (table) {
+      var tbody = table.querySelector('tbody');
+      if (tbody) {
+        var rows = Array.from(tbody.rows);
+        rows.sort(function(a, b) {
+          var cellA = a.cells[col] ? (a.cells[col].getAttribute('data-sort') || a.cells[col].textContent.trim()) : '';
+          var cellB = b.cells[col] ? (b.cells[col].getAttribute('data-sort') || b.cells[col].textContent.trim()) : '';
+          // Numeric sort: ID (col 0)
+          if (col === 0) {
+            return dir === 'asc' ? (parseInt(cellA, 10) || 0) - (parseInt(cellB, 10) || 0) : (parseInt(cellB, 10) || 0) - (parseInt(cellA, 10) || 0);
+          }
+          return dir === 'asc' ? cellA.localeCompare(cellB) : cellB.localeCompare(cellA);
+        });
+        rows.forEach(function(row) { tbody.appendChild(row); });
+      }
+    }
+  }
+
+  function applyArrows(col, dir) {
+    ths.forEach(function(t) {
+      t.textContent = t.textContent.replace(/\s*[\u2191\u2193]\s*$/, '').trim();
+    });
+    var arrow = dir === 'asc' ? ' \u2191' : ' \u2193';
+    ths[col].textContent = ths[col].textContent.trim() + arrow;
+  }
+
+  ths.forEach(function(th) {
+    th.style.cursor = 'pointer';
+    th.addEventListener('click', function() {
+      var col = parseInt(this.getAttribute('data-col'), 10);
+      var dir = qrSettings.get('iperf3', 'sort_dir', '') === 'desc' ? 'asc' : 'desc';
+      qrSettings.set('iperf3', 'sort_col', col.toString());
+      qrSettings.set('iperf3', 'sort_dir', dir);
+      sortTable(col, dir);
+      applyArrows(col, dir);
+    });
+  });
+})();
+</script>

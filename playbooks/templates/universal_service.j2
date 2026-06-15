@@ -1,0 +1,19 @@
+# systemd service unit for universal engine instance
+# QR_UUID={{ instance_uuid }}
+[Unit]
+Description=quickrobot universal service {{ instance_name }}
+After=network.target
+
+[Service]
+Type=simple
+User={{ user }}
+WorkingDirectory={{ install_dir }}
+EnvironmentFile={{ env_file }}
+{% if start_command %}ExecStart=bash -c "source {{ venv_path }}/bin/activate && {{ start_command | replace('{host}', host | default('127.0.0.1')) | replace('{port}', (deploy_port | default(0))|string) }}"{% else %}ExecStart={{ binary_path }} {% endif %}{{ cli_args | join(' ') }}
+Restart={{ restart_policy | default('no') }}
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

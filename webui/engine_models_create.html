@@ -1,0 +1,64 @@
+<a class="back-link" href="/webui/engines">Back to engines</a>
+<h1>Create Model -- {{ engine_type }}</h1>
+<form id="model-form" style="max-width:600px;">
+  <div style="margin-bottom:12px;">
+    <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Model Name</label>
+    <input type="text" name="name" required placeholder="e.g., Gemma-4-E2B-it" style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+  </div>
+  <div style="margin-bottom:12px;">
+    <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Model Path (GGUF) *</label>
+    <input type="text" name="model_path" required placeholder="/mnt/llama/gguf/models/.../model-Q4_K_M.gguf" style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+    <small style="color:#888;">LLAMA_ARG_MODEL — the primary GGUF model file</small>
+  </div>
+  <div style="margin-bottom:12px;">
+    <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">MMPROJ Path</label>
+    <input type="text" name="mmproj_path" placeholder="/mnt/llama/gguf/models/.../mmproj-BF16.gguf" style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+    <small style="color:#888;">LLAMA_ARG_MMPROJ — multimodal projector (optional)</small>
+  </div>
+  <div style="margin-bottom:12px;">
+    <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Draft Model Path</label>
+    <input type="text" name="draft_model_path" placeholder="/path/to/draft-model.gguf" style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+    <small style="color:#888;">LLAMA_ARG_SPEC_DRAFT_MODEL — Draft model for speculative decoding (optional)</small>
+  </div>
+  <div class="form-row">
+    <div class="form-group">
+      <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Quantization</label>
+      <input type="text" name="quantization" placeholder="e.g., Q4_K_M, Q8_0, F16" style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+    </div>
+    <div class="form-group">
+      <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">File Size (bytes)</label>
+      <input type="number" name="size_bytes" placeholder="e.g., 4294967296" style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+    </div>
+  </div>
+  <button type="submit" class="btn btn-success">Create Model</button>
+  <a href="/webui/engine/{{ engine_type }}/models" class="btn" style="text-decoration:none;">Cancel</a>
+</form>
+
+<script>
+(function() {
+  document.querySelector('#model-form').addEventListener('submit', function(e) {
+    e.preventDefault();
+    var fd = {};
+    fd.name = this.querySelector('[name="name"]').value;
+    fd.model_path = this.querySelector('[name="model_path"]').value;
+    fd.mmproj_path = this.querySelector('[name="mmproj_path"]').value || null;
+    fd.draft_model_path = this.querySelector('[name="draft_model_path"]').value || null;
+    fd.quantization = this.querySelector('[name="quantization"]').value || null;
+    var sizeVal = this.querySelector('[name="size_bytes"]').value;
+    fd.size_bytes = sizeVal ? parseInt(sizeVal, 10) : null;
+    qrApi('/engine/{{ engine_type }}/models', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(fd)
+    })
+     .then(function(data) {
+       if (data.status === 'ok') {
+         alert('Model created');
+         window.location.href = '/webui/engine/{{ engine_type }}/models';
+       } else {
+         alert('Error: ' + (data.message || 'Unknown'));
+       }
+     }).catch(function(e) { alert('Request failed: ' + e); });
+  });
+})();
+</script>

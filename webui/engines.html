@@ -1,0 +1,60 @@
+<style>
+  table th { cursor: pointer; }
+  table th:hover { background: #f0f0f0; }
+</style>
+<h1>Engines</h1>
+<table>
+<thead><tr><th class="sortable" data-col="0">ID</th><th class="sortable" data-col="1">Display Name</th><th class="sortable" data-col="2">Engine Type</th><th class="sortable" data-col="3">Instances</th></tr></thead>
+<tbody>
+{% for e in engines %}
+<tr>
+  <td data-sort="{{ e.id }}">{{ e.id }}</td>
+  <td>{{ e.display_name or e.name }}</td>
+  <td>{{ e.name }}</td>
+  {% set raw_caps = e.capabilities or {} %}
+  {% set caps = raw_caps | fromjson if raw_caps is string else (raw_caps if raw_caps is mapping else {}) %}
+  <td>{{ e.instance_count | default(0) }} / {{ caps.get('max_instances', 'unlimited') }}</td>
+</tr>
+{% else %}
+<tr><td colspan="4" style="text-align:center;color:#888;">No engine types registered</td></tr>
+{% endfor %}
+</tbody>
+</table>
+<script>
+(function() {
+  var ths = document.querySelectorAll('.sortable');
+  if (!ths.length) return;
+  var table = ths[0].closest('table');
+  var tbody = table.querySelector('tbody');
+  var rows = Array.from(tbody.rows);
+  function sortTable(col, dir) {
+    rows.sort(function(a, b) {
+      var cellA = a.cells[col] ? (a.cells[col].getAttribute('data-sort') || a.cells[col].textContent.trim()) : '';
+      var cellB = b.cells[col] ? (b.cells[col].getAttribute('data-sort') || b.cells[col].textContent.trim()) : '';
+      if (col === 0) return dir === 'asc' ? (parseInt(cellA,10)||0) - (parseInt(cellB,10)||0) : (parseInt(cellB,10)||0) - (parseInt(cellA,10)||0);
+      return dir === 'asc' ? cellA.localeCompare(cellB) : cellB.localeCompare(cellA);
+    });
+    rows.forEach(function(r) { tbody.appendChild(r); });
+  }
+  function applyArrows(col, dir) {
+    ths.forEach(function(t) { t.textContent = t.textContent.replace(/\s*[\u2191\u2193]\s*$/, '').trim(); });
+    ths[col].textContent = ths[col].textContent.trim() + (dir === 'asc' ? ' \u2191' : ' \u2193');
+  }
+  var sortCol = parseInt(qrSettings.get('engines', 'sort_col', '0'), 10);
+  var sortDir = qrSettings.get('engines', 'sort_dir', 'asc');
+  if (sortCol < 0 || !sortDir) { sortCol = 0; sortDir = 'asc'; }
+  sortTable(sortCol, sortDir);
+  applyArrows(sortCol, sortDir);
+  ths.forEach(function(th) {
+    th.addEventListener('click', function() {
+      var col = parseInt(this.getAttribute('data-col'), 10);
+      var dir = qrSettings.get('engines', 'sort_dir', 'asc') === 'desc' ? 'asc' : 'desc';
+      qrSettings.set('engines', 'sort_col', col.toString());
+      qrSettings.set('engines', 'sort_dir', dir);
+      sortTable(col, dir);
+      applyArrows(col, dir);
+    });
+  });
+})();
+</script>
+<!-- MARKER_20260531_0430 -->

@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>quickrobot — {{ title }}</title>
+<link rel="icon" type="image/svg+xml" href="/_static/favicon.svg">
+<script>window._qr_tz_name = "{{ tz_name or 'Europe/Berlin' }}";</script>
+<!-- Inline color vars: applied before paint to prevent flash on auto-refresh -->
+<script>var _QR_PALETTE={"bg-body":{"h":0,"s":0,"l":96},"bg-nav":{"h":240,"s":18,"l":12},"bg-card":{"h":240,"s":0,"l":100},"bg-table-hdr":{"h":0,"s":0,"l":97},"bg-table-row-hover":{"h":205,"s":65,"l":96},"bg-input":{"h":0,"s":0,"l":100},"bg-select":{"h":0,"s":0,"l":100},"fg-body":{"h":0,"s":0,"l":20},"fg-heading":{"h":240,"s":18,"l":12},"fg-muted":{"h":0,"s":0,"l":40},"fg-nav-link":{"h":0,"s":0,"l":73},"fg-nav-active":{"h":195,"s":85,"l":64},"fg-nav-chevron":{"h":0,"s":0,"l":40},"link":{"h":205,"s":65,"l":56},"link-hover":{"h":205,"s":70,"l":48},"accent":{"h":195,"s":85,"l":64},"accent-active":{"h":195,"s":85,"l":64},"nav-brand":{"h":195,"s":85,"l":64},"btn-primary":{"h":195,"s":85,"l":64},"btn-danger":{"h":2,"s":89,"l":56},"btn-success":{"h":144,"s":54,"l":47},"btn-warning":{"h":30,"s":80,"l":50},"btn-secondary":{"h":0,"s":0,"l":60},"badge-running":{"h":130,"s":50,"l":85},"badge-success":{"h":144,"s":54,"l":42},"badge-loading":{"h":210,"s":70,"l":85},"badge-stopped":{"h":355,"s":55,"l":87},"badge-error":{"h":45,"s":75,"l":90},"badge-other":{"h":0,"s":0,"l":89},"badge-system":{"h":210,"s":70,"l":85},"badge-active":{"h":130,"s":50,"l":85},"badge-unknown":{"h":45,"s":75,"l":90},"badge-failed":{"h":355,"s":55,"l":87},"log-bg":{"h":240,"s":18,"l":12},"log-text":{"h":0,"s":0,"l":83},"log-success":{"h":120,"s":54,"l":47},"log-failed":{"h":2,"s":89,"l":56},"log-processing":{"h":30,"s":80,"l":50},"log-received":{"h":0,"s":0,"l":62},"preview-bg":{"h":240,"s":18,"l":12},"preview-text":{"h":0,"s":0,"l":83},"form-border":{"h":0,"s":0,"l":80},"form-focus":{"h":195,"s":85,"l":64},"form-label":{"h":0,"s":0,"l":40},"card-border":{"h":0,"s":0,"l":88},"card-hover-border":{"h":195,"s":85,"l":64},"card-selected-border":{"h":195,"s":85,"l":64},"card-selected-bg":{"h":205,"s":65,"l":96},"table-border":{"h":0,"s":0,"l":87},"table-row-hover":{"h":205,"s":65,"l":96},"table-header-bottom":{"h":0,"s":0,"l":86},"nav-border":{"h":0,"s":0,"l":20},"nav-active-border":{"h":195,"s":85,"l":64},"nav-footer-border":{"h":0,"s":0,"l":17},"back-link":{"h":195,"s":85,"l":64},"row-link":{"h":205,"s":65,"l":56},"orphan-warn":{"h":30,"s":74,"l":57},"dev-badge":{"h":2,"s":89,"l":56}};</script>
+<script>(function(){try{var s=localStorage.getItem('qr_color_engine'),p=100,m=50;if(s){var d=JSON.parse(s);if(typeof d.power==='number')p=d.power;if(typeof d.mood==='number')m=d.mood;}if(p!==100||m!==50){var t=p/200,e=t<0.5?2*t*t:1-Math.pow(-2*t+2,2)/2,lm=0.15+e*2.05,al=0.7+t*0.3,hs=((m-50)/50)*40,sf=m<=60?0.3+(m/60)*0.7:1.0-((m-60)/40)*0.15,r=document.documentElement,hue=(195+hs+360)%360,sh=Math.min(40,sf*100),sn=Math.min(30,sf*100),tlight=90+lm*3;for(var k in _QR_PALETTE){if(!_QR_PALETTE.hasOwnProperty(k))continue;var b=_QR_PALETTE[k],h=(b.h+hs+360)%360,s2=Math.min(100,b.s*sf),l2=Math.max(5,Math.min(92,b.l*lm));var v=h+'%,'+s2+'%,'+l2+'%';if(k.indexOf('log-')===0||k==='bg-nav'||k==='preview-bg')v='hsla('+v+', '+al.toFixed(2)+')';else v='hsl('+v+')';r.style.setProperty('--'+k,v);}if(p<50){r.style.setProperty('--link','hsl('+hue+', '+sh+'%,'+tlight+'%)');r.style.setProperty('--link-hover','hsl('+hue+', '+Math.min(60,sf*120)+'%,'+Math.min(70,tlight-10)+'%)');r.style.setProperty('--row-link','hsl('+hue+', '+sh+'%,'+tlight+'%)');r.style.setProperty('--fg-nav-link','hsl('+hue+', '+Math.min(40,sf*100)+'%,'+tlight+'%)');r.style.setProperty('--fg-nav-active','hsl('+hue+', '+Math.min(50,sf*120)+'%,'+Math.min(80,tlight)+'%)');r.style.setProperty('--fg-nav-chevron','hsl('+hue+', '+Math.min(25,sf*90)+'%,'+(tlight-8)+'%)');}}}catch(x){}})();</script>
+<!-- Nav width: set before paint to prevent FOUC on page nav -->
+<script>(function(){try{var w=localStorage.getItem('nav_width_px');if(w){w=parseInt(w,10);if(!isNaN(w)&&w>=50&&w<=500)document.documentElement.style.setProperty('--nav-width',w+'px');}}catch(x){}})();</script>
+<!-- Centralized WebUI settings store — must load before any page JS -->
+<script>
+(function() {
+  var QR_SETTINGS_KEY = 'qr_webui_settings';
+
+  window.qrSettings = {
+    _data: null,
+    _key: QR_SETTINGS_KEY,
+    _lastSet: null,
+
+    load: function() {
+      try {
+        var raw = localStorage.getItem(this._key);
+        this._data = raw ? JSON.parse(raw) : {};
+      } catch(e) {
+        this._data = {};
+      }
+      return this;
+    },
+
+    get: function(page, key, defaultVal) {
+      this.load();
+      var val = (this._data[page] || {})[key];
+      return (val !== undefined) ? val : defaultVal;
+    },
+
+    set: function(page, key, value) {
+      this.load();
+      if (!this._data[page]) this._data[page] = {};
+      this._data[page][key] = value;
+      this._lastSet = { page: page, key: key, value: value };
+      this.save();
+    },
+
+    save: function() {
+      localStorage.setItem(this._key, JSON.stringify(this._data));
+      if (this._lastSet) {
+        window.dispatchEvent(new CustomEvent('qrSettingsChange', { detail: this._lastSet }));
+      }
+    },
+
+    getAll: function(page) {
+      this.load();
+      return this._data[page] || {};
+    }
+  };
+
+  // Cross-tab sync via storage event
+  window.addEventListener('storage', function(e) {
+    if (e.key === QR_SETTINGS_KEY) {
+      qrSettings.load();
+    }
+  });
+
+  // Listen for same-tab setting changes from other methods
+  window.addEventListener('qrSettingsChange', function(e) {
+    qrSettings.load();
+  });
+
+  // Auto-load on init
+  qrSettings.load();
+})();
+
+// Centralized API base path and utility functions
+window.QR_API_BASE = "/api/v1";
+
+// Timestamp formatting utilities — UTC-aware, consistent across all pages
+(function() {
+    /** Format ISO timestamp to relative time string (no "ago" suffix). */
+    window.qrFmtRelative = function(iso) {
+        if (!iso || iso === '-') return '-';
+        try {
+            var ts = new Date(iso.replace('Z', '+00:00').replace(' ', 'T'));
+            if (isNaN(ts.getTime())) return iso;
+            var diff = Math.floor((new Date() - ts) / 1000);
+            if (diff < 0) return iso;
+            var d = Math.floor(diff / 86400);
+            diff %= 86400;
+            var h = Math.floor(diff / 3600);
+            diff %= 3600;
+            var m = Math.floor(diff / 60);
+            var s = diff % 60;
+            if (d >= 7) return d + 'd';
+            if (d > 0) return d + 'd ' + h + 'h';
+            if (h > 0) return h + 'h ' + m + 'm';
+            if (m > 0) return m + 'm ' + s + 's';
+            return s + 's';
+        } catch(e) { return iso; }
+    };
+
+    /** Format ISO timestamp to localized display string — UTC-aware, uses window._qr_tz_name. */
+    window.qrFmtTimestamp = function(iso) {
+        if (!iso || iso === '-') return '-';
+        try {
+            var ts = new Date(iso.replace('Z', '+00:00').replace(' ', 'T'));
+            if (isNaN(ts.getTime())) return iso;
+            var now = new Date();
+            var diffHrs = Math.floor((now - ts) / 3600000);
+            var tzName = typeof window._qr_tz_name !== 'undefined' ? window._qr_tz_name : null;
+            // <24h: relative-only (e.g. "2h 30m"), >=24h: full datetime + relative (e.g. "Jun 7, 14:30 (2d)")
+            if (diffHrs < 24) {
+                return qrFmtRelative(iso);
+            }
+            var dateStr = ts.toLocaleString(undefined, {
+                month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+                timeZone: tzName || undefined
+            });
+            return dateStr + ' (' + qrFmtRelative(iso) + ')';
+        } catch(e) { return iso; }
+    };
+
+    /** Lightweight table loader scaffolding for future dynamic table pages. */
+    window.qrLoadTable = function(containerId, fetchUrl) {
+        var container = document.getElementById(containerId);
+        if (!container) return Promise.reject('Container not found: ' + containerId);
+        container.innerHTML = '<p>Loading...</p>';
+        return qrApi(fetchUrl).then(function(data) {
+            return data; // caller handles rendering
+        }).catch(function(e) {
+            container.innerHTML = '<p class="error">Load failed: ' + (e && e.message || e) + '</p>';
+            throw e;
+        });
+    };
+
+    /** Format ISO timestamp to compact date string. */
+    window.qrFmtCompact = function(iso) {
+        if (!iso) return "N/A";
+        try {
+            var d = new Date(iso.replace('Z', '+00:00').replace(' ', 'T'));
+            return d.toLocaleDateString(undefined, { month: '2-digit', day: '2-digit', year: 'numeric' }) +
+                   ' ' + d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+        } catch(e) { return iso; }
+    };
+
+    /** Format ISO timestamp to UTC-relative (for log viewer). */
+    window.qrFmtLogTime = function(iso) {
+        if (!iso) return "N/A";
+        try {
+            var d = new Date(iso.replace('Z', '+00:00').replace(' ', 'T'));
+            return d.toLocaleTimeString(undefined, { hour12: false });
+        } catch(e) { return iso; }
+    };
+
+    /** Make a fetch call to the API with auth token. */
+    window.qrApi = function(path, opts) {
+        opts = opts || {};
+        var headers = opts.headers || {};
+        // Inject bearer token if available
+        if (window._qr_bearer_token) {
+            headers["Authorization"] = "Bearer " + window._qr_bearer_token;
+        }
+        return fetch(QR_API_BASE + path, Object.assign({}, opts, { headers: headers }))
+            .then(function(r) {
+                var ct = r.headers.get('content-type') || '';
+                if (ct.indexOf('application/json') !== -1) return r.json().catch(function(e) { return {}; });
+                return r.text().then(function(t) { throw new Error(t); });
+            })
+            .catch(function(e) { return Promise.reject(new Error(e && e.message || 'Request failed')); });
+    };
+})();
+</script>
+<style>
+  /* Default values — overridden by color_engine.js at runtime */
+  :root {
+    --bg-body: #f5f5f5; --bg-nav: #1a1a2e; --bg-card: #fff;
+    --bg-table-hdr: #f8f9fa; --bg-table-row-hover: #f0f7ff; --bg-input: #fff;
+    --bg-select: #fff;
+    --fg-body: #333; --fg-heading: #1a1a2e; --fg-muted: #666;
+    --fg-nav-link: #bbb; --fg-nav-active: #4fc3f7;
+    --link: #3a9fd7; --link-hover: #3a9fd7;    --accent: #4fc3f7; --accent-active: #4fc3f7;
+    --nav-brand: #4fc3f7; --nav-text: #ddd;
+    --btn-primary: #4fc3f7; --btn-danger: #f44336; --btn-success: #4caf50;
+    --btn-warning: #ff9800; --btn-secondary: #999;
+    --badge-running: #d4edda; --badge-success: #28a745; --badge-loading: #cce5ff;
+    --badge-stopped: #f8d7da; --badge-error: #fff3cd; --badge-other: #e2e3e5;
+    --badge-system: #cce5ff; --badge-active: #d4edda; --badge-unknown: #fff3cd;
+    --badge-failed: #f8d7da;
+    --log-bg: #1a1a2e; --log-text: #d4d4d4; --log-success: #4caf50;
+    --log-failed: #f44336; --log-processing: #ff9800; --log-received: #9e9e9e;
+    --form-border: #ccc; --form-focus: #4fc3f7; --form-label: #666;
+    --card-border: #e0e0e0; --card-hover-border: #4fc3f7; --card-selected-border: #4fc3f7;
+    --card-selected-bg: #e8f4fd; --row-link: #3a9fd7;
+    --back-link: #4fc3f7; --dev-badge: #f44336;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+          display: flex; min-height: 100vh; background: var(--bg-body); color: var(--fg-body); }
+
+ /* Global links in main content */
+main a { color: var(--link); text-decoration: none; }
+    main a:hover { text-decoration: underline; }
+    main a:visited { color: var(--link); }
+    /* Button links should not inherit the blue link color */
+    main a.btn, main .btn a, .btn a, .btn-link { color: inherit !important; }
+
+  /* Nav sidebar — resizable via drag handle on right edge */
+    :root { --nav-width: 200px; }
+    nav { width: var(--nav-width); min-width: 50px; max-width: 500px; background: var(--bg-nav); color: var(--nav-text); padding: 0; flex-shrink: 0; position: sticky; top: 0; height: 100vh; overflow-y: auto; transition: width 0.15s ease; }
+   nav .nav-header { padding: 20px 16px; border-bottom: 1px solid var(--fg-muted); font-size: 1.3em; font-weight: bold; }
+     nav .nav-header a { color: inherit; text-decoration: none; }
+     nav .nav-header span { color: var(--nav-brand); }
+     nav .nav-header a:hover { opacity: 0.85; }
+     nav .nav-footer a { color: inherit; text-decoration: none; }
+     nav .nav-footer a:hover { opacity: 0.85; }
+     nav .nav-footer { padding: 8px 16px; font-size: 0.7em; color: var(--fg-muted); border-top: 1px solid var(--nav-footer-border, #2a2a3e); text-align: center; margin-top: auto; }
+   nav ul { list-style: none; padding: 8px 0; }
+   nav li a { display: block; padding: 10px 16px; color: var(--fg-nav-link); text-decoration: none;
+                border-left: 3px solid transparent; transition: all 0.2s; }
+   nav li a:hover { background: var(--bg-nav-hover, #16213e); color: #fff; }
+   nav li a.active { background: var(--bg-nav-hover, #16213e); color: var(--accent); border-left-color: var(--accent-active); }
+nav .nav-section-header { padding: 12px 16px 4px; font-size: 0.75em; text-transform: uppercase;
+                 color: var(--fg-muted); letter-spacing: 1px; font-weight: 600; cursor: pointer; user-select: none; }
+    nav .nav-section-header:hover { color: var(--accent); }
+    nav .nav-chevron { display: inline-block; margin-left: 4px; font-size: 0.85em; transition: transform 0.2s; }
+    nav .nav-section[data-collapsed="true"] > .nav-section-header .nav-chevron { transform: rotate(-90deg); }
+    nav .nav-section-items { list-style: none; padding-left: 8px; margin: 0; }
+    nav .nav-section[data-collapsed="true"] > .nav-section-items { display: none; }
+
+  /* Main content */
+  main { flex: 1; padding: 12px 22px; overflow-y: auto; }
+
+  /* Resize handle — drag to adjust nav width (persisted in qrSettings) */
+  .nav-resize-handle { width: 6px; height: 100%; cursor: col-resize; flex-shrink: 0; background: transparent; transition: background 0.15s; }
+  .nav-resize-handle:hover, .nav-resize-handle.active { background: var(--accent-active); opacity: 0.25; }
+  .layout-wrap { display: flex; min-height: 100vh; width: 100%; }
+  main h1 { font-size: 1.5em; margin-bottom: 16px; color: var(--fg-heading); }
+  main h2 { font-size: 1.2em; margin: 16px 0 8px; color: var(--fg-body); }
+
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; background: var(--bg-card);
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 16px; }
+  th { text-align: left; padding: 8px 10px; background: var(--bg-table-hdr);
+         border-bottom: 2px solid var(--table-header-bottom, #dee2e6); font-size: 0.85em; color: var(--fg-muted);
+         text-transform: uppercase; letter-spacing: 0.5px; }
+   td { padding: 8px 10px; border-bottom: 1px solid var(--table-border, #eee); font-size: 0.9em; }
+  tr:hover td { background: var(--bg-table-row-hover); }
+ a.row-link { color: var(--row-link); text-decoration: none; cursor: pointer; }
+   a.row-link:hover { text-decoration: underline; }
+   a.row-link:visited { color: var(--row-link); }
+
+  /* Status badges */
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px;
+            font-size: 0.8em; font-weight: 600; }
+  .badge-running { background: var(--badge-running); color: var(--fg-body); }
+  .badge-success { background: var(--badge-success); color: #fff; }
+  .badge-loading { background: var(--badge-loading); color: var(--fg-body); }
+  .badge-stopped { background: var(--badge-stopped); color: var(--fg-body); }
+  .badge-error { background: var(--badge-error); color: var(--fg-body); }
+  .badge-other { background: var(--badge-other); color: var(--fg-body); }
+  .badge-system { background: var(--badge-system); color: var(--fg-body); }
+  .badge-active { background: var(--badge-active); color: var(--fg-body); }
+  .badge-unknown { background: var(--badge-unknown); color: var(--fg-body); }
+  .badge-failed { background: var(--badge-failed); color: var(--fg-body); }
+
+  /* Detail cards */
+  .detail-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .detail-card { background: var(--bg-card); border-radius: 6px; padding: 14px;
+                  box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+  .detail-card label { font-size: 0.8em; color: var(--fg-muted); text-transform: uppercase; display: block; margin-bottom: 4px; }
+  .detail-card value { font-size: 1.1em; font-weight: 600; color: var(--fg-heading); }
+
+  /* Log output */
+  .log-output { background: var(--log-bg); color: var(--log-text); padding: 10px; border-radius: 6px;
+                  font-family: 'Consolas', 'Monaco', monospace; font-size: 0.85em;
+                  max-height: 400px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
+  .log-line { line-height: 1.6; }
+  .log-success { color: var(--log-success); }
+  .log-failed { color: var(--log-failed); }
+  .log-processing { color: var(--log-processing); }
+  .log-received { color: var(--log-received); }
+  .ansible-log-deploy { color: var(--log-success); }
+  .ansible-log-failed { color: var(--log-failed); }
+  .ansible-log-validate { color: #2196f3; }
+  .ansible-log-scan { color: var(--log-processing); }
+
+  /* Action buttons */
+.actions { margin: 10px 0; }
+   .btn { display: inline-block; padding: 5px 14px; border: none; border-radius: 4px;
+          cursor: pointer; font-size: 0.85em; text-decoration: none; color: #fff; }
+  .btn-primary { background: var(--btn-primary); color: var(--fg-heading); }
+  .btn-danger { background: var(--btn-danger); }
+  .btn-success { background: var(--btn-success); }
+  .btn-warning { background: var(--btn-warning); }
+  .btn-secondary { background: var(--btn-secondary); }
+  .btn:hover { opacity: 0.85; }
+
+   /* Instance detail page — system options grid, preset model info, journal control */
+   .sys-options-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+   .sys-options-grid select { padding:4px 8px; border:1px solid #ccc; border-radius:3px; font-size:0.85em; width:100%; background:#fff; color:#333; }
+   .preset-model-info { margin-top:6px; font-size:0.85em; color:#666; display:flex; gap:12px; flex-wrap:wrap; }
+   .journal-control { display:inline-flex; align-items:center; gap:6px; margin-left:12px; }
+
+  /* Create instance form */
+.form-group { margin-bottom: 12px; }
+   .form-group label { display: block; font-size: 0.85em; color: var(--form-label); margin-bottom: 4px; font-weight: 500; }
+   .form-group input[type="text"], .form-group input[type="number"], .form-group select { width: 100%; padding: 6px 8px; border: 1px solid var(--form-border); border-radius: 4px; font-size: 0.9em; background: var(--bg-input, #fff); }
+  .form-group select:focus, .form-group input:focus { outline: none; border-color: var(--form-focus); box-shadow: 0 0 0 2px rgba(79,195,247,0.15); }
+  .form-group small { display: block; color: var(--fg-muted); font-size: 0.8em; margin-top: 3px; }
+  .form-row { display: flex; gap: 16px; }
+  .form-row .form-group { flex: 1; }
+  .form-actions { margin-top: 16px; display: flex; gap: 8px; }
+  .engine-card { border: 2px solid var(--card-border); border-radius: 6px; padding: 12px; cursor: pointer; transition: all 0.2s; margin-bottom: 6px; }
+  .engine-card:hover { border-color: var(--card-hover-border); background: var(--bg-table-row-hover); }
+  .engine-card.selected { border-color: var(--card-selected-border); background: var(--card-selected-bg); }
+  .engine-card-name { font-weight: 600; color: var(--fg-heading); }
+  .engine-card-desc { font-size: 0.85em; color: var(--fg-muted); margin-top: 2px; }
+  .preview-panel { background: var(--preview-bg, var(--log-bg)); color: var(--preview-text, var(--log-text)); padding: 10px; border-radius: 6px; font-family: 'Consolas', 'Monaco', monospace; font-size: 0.85em; max-height: 300px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
+  .engine-fields { display: none; }
+  .engine-fields.visible { display: block; }
+
+  /* Back link */
+  .back-link { display: inline-block; margin-bottom: 16px; color: var(--back-link);
+                 text-decoration: none; font-size: 0.9em; }
+   .back-link:hover { text-decoration: underline; }
+
+  /* Color Engine slider UI layout */
+    .color-controls { padding: 6px 12px; font-size: 0.75em; }
+    .slider-label { display: flex; align-items: center; gap: 4px; margin-bottom: 6px; color: var(--fg-muted, #666); }
+    .slider-label input[type="range"] { flex: 1; margin: 2px 0; cursor: pointer; }
+    .slider-label output { min-width: 48px; text-align: right; font-size: 70%; color: var(--fg-muted, #888); font-family: monospace; display: none; }
+    .color-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 4px; }
+    .nav-pi { cursor: pointer; color: var(--fg-muted, #888); font-size: 0.5em; user-select: none; opacity: 0.4; line-height: 1; }
+    .nav-pi:hover { opacity: 1; }
+    .nav-pi.disco-active { opacity: 1; color: var(--accent, #4fc3f7); }
+    .ctrl-reset { cursor: pointer; color: var(--accent, #4fc3f7); font-size: 60%; user-select: none; padding: 2px 8px; }
+    .ctrl-reset:hover { opacity: 0.7; text-decoration: underline; }
+
+   /* Global status indicator dot — immune to color engine transforms */
+    :root { --status-dot-color: #ffffff; }
+    .qr-status-dot {
+      display: inline-block; width: 8px; height: 8px;
+      border-radius: 50%; background: var(--status-dot-color);
+      margin-right: 6px; vertical-align: middle; opacity: 0.85;
+      transition: background 0.3s ease;
+    }
+    .qr-status-dot:hover { opacity: 1; }
+</style>
+</head>
+<body>
+<div class="layout-wrap">
+<nav>
+  <div class="nav-header"><a href="/webui/" style="color:inherit;text-decoration:none;"><span class="qr-status-dot" id="qr-status-dot" title="{{ qr_status_tooltip }}"></span><span>quick</span>robot</a>{% if qr_is_dev %} <a href="https://www.quickrobot.de" target="_blank" style="color:#f44336;font-size:0.6em;font-weight:bold;margin-left:4px;text-decoration:none;">DEV</a>{% endif %}</div>
+  <ul>
+    <li><a href="/webui/hosts" {{ hosts }}>Hosts</a></li>
+    <li><a href="/webui/instances" {{ instances }}>Instances</a></li>
+    <li><a href="/webui/models" {{ models }}>Models</a></li>
+    <li><a href="/webui/ansible-logs" {{ logs }}>Logs</a></li>
+    {% for section in engines_nav %}
+    <li class="nav-section" data-section="{{ section.header | lower | replace(' ', '-') }}">
+      <div class="nav-section-header">{{ section.header }} <span class="nav-chevron">&#9660;</span></div>
+      <ul class="nav-section-items">
+      {% for item in section['items'] %}{{ item | safe }}{% endfor %}
+      </ul>
+    </li>
+    {% endfor %}
+    <!-- Skin sliders — always visible, lazy-loads color_engine.js on first change -->
+    <li class="nav-section" data-section="skins">
+      <div class="nav-section-header">Skins <span class="nav-chevron">&#9660;</span></div>
+      <ul class="nav-section-items">
+      <li class="color-controls">
+        <label class="slider-label ctrl-power">
+          <input type="range" id="ctrl-power" min="1" max="200" value="100" step="1">
+          <output id="out-power" for="ctrl-power"></output>
+        </label>
+        <label class="slider-label ctrl-mood">
+          <input type="range" id="ctrl-mood" min="1" max="100" value="50" step="1">
+          <output id="out-mood" for="ctrl-mood"></output>
+        </label>
+        <div class="color-footer">
+          <span id="disco-pi" class="disco-pi nav-pi" title="Disco mode">&#960;</span>
+          <span class="ctrl-reset" id="btn-reset-colors">noskin</span>
+        </div>
+      </li>
+      </ul>
+    </li>
+  </ul>
+  <div class="nav-footer"><a href="https://www.quickrobot.de" target="_blank" style="color:inherit;text-decoration:none;">{{ version }}</a></div>
+<script>
+(function() {
+  // Event delegation: handle clicks on nav-section-header via parent <ul>
+  var navUl = document.querySelector('nav > ul');
+  if (navUl) {
+    navUl.addEventListener('click', function(e) {
+      var header = e.target.closest('.nav-section-header');
+      if (!header) return;
+      var section = header.parentElement;
+      var items = section.querySelector('.nav-section-items');
+      var chevron = header.querySelector('.nav-chevron');
+      var isCollapsed = section.getAttribute('data-collapsed') === 'true';
+      section.setAttribute('data-collapsed', isCollapsed ? 'false' : 'true');
+      if (isCollapsed) {
+        items.style.display = 'block';
+        chevron.innerHTML = '&#9660;';
+      } else {
+        items.style.display = 'none';
+        chevron.innerHTML = '&#9654;';
+      }
+      var key = 'nav_' + section.getAttribute('data-section');
+      try {
+        var newState = section.getAttribute('data-collapsed');
+        sessionStorage.setItem(key, newState);
+        console.log('saved:', key, '->', newState);
+      } catch(ex) { console.log('save error:', ex); }
+    });
+  }
+
+ // Restore collapsed state on load — engines_nav sections
+   {% for section in engines_nav %}
+   (function() {
+     var key = 'nav_{{ section.header | lower | replace(" ", "-") }}';
+     try {
+       var saved = sessionStorage.getItem(key);
+       if (saved === 'true') {
+         var sectionKey = key.substring(4); // strip "nav_" prefix to match data-section
+         var sectionEl = document.querySelector('.nav-section[data-section="' + sectionKey + '"]');
+         if (sectionEl) {
+           sectionEl.setAttribute('data-collapsed', 'true');
+           var items = sectionEl.querySelector('.nav-section-items');
+           if (items) items.style.display = 'none';
+           var chevron = sectionEl.querySelector('.nav-chevron');
+           if (chevron) chevron.innerHTML = '&#9654;';
+         }
+       }
+     } catch(ex) { console.log('restore error:', ex); }
+   })();
+   {% endfor %}
+   // Restore collapsed state for Skins section (added in base.html, not in engines_nav)
+    (function() {
+      try {
+        var saved = sessionStorage.getItem('nav_skins');
+        if (saved === 'true') {
+         var sectionEl = document.querySelector('.nav-section[data-section="skins"]');
+         if (sectionEl) {
+           sectionEl.setAttribute('data-collapsed', 'true');
+           var items = sectionEl.querySelector('.nav-section-items');
+           if (items) items.style.display = 'none';
+           var chevron = sectionEl.querySelector('.nav-chevron');
+           if (chevron) chevron.innerHTML = '&#9654;';
+         }
+       }
+     } catch(ex) { console.log('restore error:', ex); }
+   })();
+ })();
+</script>
+</nav>
+ <div class="nav-resize-handle" id="nav-resize-handle" title="Drag to resize sidebar"></div>
+ <main>
+ {{ content }}
+ </main>
+ </div><!-- .layout-wrap -->
+ <script>
+(function(){
+  // Unified color engine lazy-load + settings management (base.html only)
+  // Once color_engine.js loads, it takes over all slider/disco/reset logic.
+  var _defaultP = 100, _defaultM = 50;
+  var _savedP = _defaultP, _savedM = _defaultM;
+
+  try {
+    var raw = localStorage.getItem('qr_color_engine');
+    if (raw) { var p = JSON.parse(raw); if (typeof p.power === 'number') _savedP = p.power; if (typeof p.mood === 'number') _savedM = p.mood; }
+  } catch(e) {}
+
+  // Load engine: idempotent, sets _qr_color_engine_loaded flag
+  function loadEngine() {
+    if (window._qr_color_engine_loaded) return;
+    window._qr_color_engine_loaded = true;
+    var el = document.createElement('script');
+    el.src = '/_static/color_engine.js';
+    document.head.appendChild(el);
+  }
+
+  // Pre-set slider values from saved settings so UI shows current state immediately
+  var powerSlider = document.getElementById('ctrl-power');
+  var moodSlider = document.getElementById('ctrl-mood');
+  if (powerSlider) powerSlider.value = _savedP;
+  if (moodSlider) moodSlider.value = _savedM;
+
+  // Wire lazy-load triggers: slider change, disco toggle
+  if (powerSlider) powerSlider.addEventListener('input', function() { loadEngine(); });
+  if (moodSlider) moodSlider.addEventListener('input', function() { loadEngine(); });
+
+  // Disco toggle: delegate to ColorEngine if loaded, otherwise manage localStorage directly
+  var discoPi = document.getElementById('disco-pi');
+  if (discoPi) {
+    discoPi.addEventListener('click', function() {
+      // If engine already loaded, delegate to its disco methods (single handler)
+      if (window._qr_color_engine_loaded && window.ColorEngine) {
+        var isDisco = ColorEngine.discoGetState();
+        if (isDisco) {
+          ColorEngine.discoStop();
+        } else {
+          var moodSlider = document.getElementById('ctrl-mood');
+          var m = parseInt(moodSlider ? moodSlider.value : 50, 10);
+          ColorEngine.discoStart(m);
+        }
+      } else {
+        // Engine not yet loaded — toggle localStorage directly
+        loadEngine();
+        try {
+          var isActive = localStorage.getItem('qr_disco_active') === 'true';
+          if (isActive) {
+            localStorage.removeItem('qr_disco_active');
+            localStorage.removeItem('qr_disco_startTime');
+            localStorage.removeItem('qr_disco_duration');
+          } else {
+            localStorage.setItem('qr_disco_active', 'true');
+            localStorage.setItem('qr_disco_startTime', String(performance.now()));
+            localStorage.setItem('qr_disco_duration', '4000');
+          }
+        } catch(e) {}
+      }
+    });
+  }
+
+  // Reset to defaults: write to localStorage, reset sliders, reload to apply CSS
+  var resetBtn = document.getElementById('btn-reset-colors');
+  if (resetBtn) {
+    resetBtn.addEventListener('click', function() {
+      // Write defaults to settings (inline script reads this on load)
+      try { localStorage.setItem('qr_color_engine', JSON.stringify({power: _defaultP, mood: _defaultM})); } catch(e) {}
+      // Reset slider DOM values
+      if (powerSlider) powerSlider.value = _defaultP;
+      if (moodSlider) moodSlider.value = _defaultM;
+      // Clear disco state
+      try { localStorage.removeItem('qr_disco_active'); localStorage.removeItem('qr_disco_startTime'); localStorage.removeItem('qr_disco_duration'); } catch(e) {}
+      // Reload to re-apply default colors from inline palette script
+      window.location.reload();
+    });
+  }
+
+  // If saved values are non-default OR disco mode is active, load engine immediately
+  try {
+    var _discoActive = localStorage.getItem('qr_disco_active') === 'true';
+  } catch(e) { var _discoActive = false; }
+  if (_savedP !== _defaultP || _savedM !== _defaultM || _discoActive) {
+    loadEngine();
+  }
+})();
+
+// Resizable nav sidebar — persisted in qrSettings, min 50px
+(function() {
+  var handle = document.getElementById('nav-resize-handle');
+  if (!handle) return;
+  var WRAPPER_PAGE = 'layout';
+  var WIDTH_KEY = 'nav_width_px';
+  var MIN_W = 50, MAX_W = 500, DEFAULT_W = 200;
+
+  // Apply saved width on load
+  var savedW = qrSettings.get(WRAPPER_PAGE, WIDTH_KEY, DEFAULT_W);
+  if (typeof savedW !== 'number') savedW = DEFAULT_W;
+  savedW = Math.max(MIN_W, Math.min(MAX_W, savedW));
+  document.documentElement.style.setProperty('--nav-width', savedW + 'px');
+
+  // Drag-to-resize
+  var dragging = false;
+  var startX = 0;
+  var startW = 0;
+
+  handle.addEventListener('mousedown', function(e) {
+    if (e.button !== 0) return;
+    dragging = true;
+    startX = e.clientX;
+    startW = savedW;
+    handle.classList.add('active');
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  });
+
+  document.addEventListener('mousemove', function(e) {
+    if (!dragging) return;
+    var delta = e.clientX - startX;
+    var newW = Math.max(MIN_W, Math.min(MAX_W, startW + delta));
+    document.documentElement.style.setProperty('--nav-width', newW + 'px');
+  });
+
+  document.addEventListener('mouseup', function(e) {
+    if (!dragging) return;
+    dragging = false;
+    var finalW = parseInt(document.documentElement.style.getPropertyValue('--nav-width'), 10);
+    if (isNaN(finalW)) finalW = DEFAULT_W;
+    finalW = Math.max(MIN_W, Math.min(MAX_W, finalW));
+    qrSettings.set(WRAPPER_PAGE, WIDTH_KEY, finalW);
+    handle.classList.remove('active');
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  });
+
+  // Cross-tab sync
+  window.addEventListener('qrSettingsChange', function(e) {
+    if (e.detail.page === WRAPPER_PAGE && e.detail.key === WIDTH_KEY) {
+      var w = Math.max(MIN_W, Math.min(MAX_W, e.detail.value));
+      document.documentElement.style.setProperty('--nav-width', w + 'px');
+    }
+  });
+})();
+</script>
+<script>
+(function() {
+  // Global status indicator — color set from Jinja template variable
+  // No polling: color is computed server-side in api_app_status() via QR_STATUS_COLORS
+  var dot = document.getElementById('qr-status-dot');
+  if (dot) {
+  {% if qr_status_rgb %}
+  dot.style.background = '{{ qr_status_rgb }}';
+  {% endif %}
+  }
+})();
+</script>
+</body>
+</html>

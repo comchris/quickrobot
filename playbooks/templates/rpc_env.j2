@@ -1,0 +1,2 @@
+{% for k, v in (merged_env | default({})).items() %}{% if v is not none and v != '' %}{{ k }}="{{ v | replace('"', '\\"') }}"
+{% endif %}{% endfor %}

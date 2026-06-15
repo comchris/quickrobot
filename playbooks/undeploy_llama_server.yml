@@ -1,0 +1,14 @@
+# @name: Undeploy Llama Server
+# @playbook_id: UNDEPLOY_LLAMA_SERVER_V1
+# @version: 1
+# @timeout: 300
+# undeploy_llama_server.yml — Undeploy llama.cpp server instance from target node
+- hosts: "{{ inventory_host }}"
+  become: yes
+  vars:
+    instance_id: "{{ instance_id }}"
+    engine_type: "llama_server"
+    unit_name: "qr-{{ instance_id }}-{{ engine_type }}"
+    pkill_pattern: "{{ unit_name }}"
+  tasks:
+    - import_tasks: "{{ playbook_dir }}/common/undeploy_base.yml"

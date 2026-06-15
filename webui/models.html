@@ -1,0 +1,441 @@
+<!-- Single row header with controls -->
+<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
+  <h1 style="margin:0;font-size:1.3em;">Models</h1>
+  <a href="/webui/models/create" class="btn btn-primary" style="display:inline-block;padding:4px 12px;font-size:0.85em;">+ Add Model</a>
+  <button id="clear-all-btn" class="btn btn-danger" style="padding:4px 10px;font-size:0.85em;">Wipe DB</button>
+  <form method="get" action="/webui/models" id="filter-form" style="display:flex;gap:8px;align-items:center;margin:0;">
+    <input type="hidden" name="engine" value="{{ request.args.get('engine', '') }}" />
+    <input type="text" name="q" placeholder="Search..." value="{{ request.args.get('q', '') }}"
+            style="padding:4px 10px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;" />
+    <button type="submit" class="btn btn-primary" style="padding:4px 10px;font-size:0.85em;">Search</button>
+   {% if request.args.get('q') or request.args.get('engine') or request.args.get('draft_filter') %}
+     <button id="clear-filter-btn" class="btn btn-secondary" style="padding:4px 10px;font-size:0.85em;">Clear</button>
+     {% endif %}
+  </form>
+  <div style="display:flex;gap:6px;align-items:center;">
+    <label style="font-size:0.8em;color:#666;">Show:</label>
+    <select id="filter-inactive" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+       <option value="false">Active only</option>
+       <option value="true">Show inactive</option>
+     </select>
+    <span id="model-count" style="font-size:0.8em;color:#666;"></span>
+  </div>
+   <div style="display:flex;gap:6px;align-items:center;margin-left:auto;">
+    <label style="font-size:0.8em;color:#666;">Scan host:</label>
+    <select id="scan-node" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+      {% for n in nodes %}<option value="{{ n.id }}">{{ n.name }}</option>{% endfor %}
+    </select>
+    <button class="btn btn-success" id="scan-btn" style="padding:4px 10px;font-size:0.85em;">Scan</button>
+  </div>
+</div>
+<div id='scan-result' style='margin:8px 0;padding:8px;'></div>
+<input type="hidden" name="draft_filter" value="{{ request.args.get('draft_filter', '') }}" />
+
+<table>
+<thead><tr>
+  <th class="sortable" data-col="0">ID</th>
+  <th class="sortable" data-col="1">Name</th>
+  <th class="sortable" data-col="2">Quant</th>
+  <th class="sortable" data-col="3">Params</th>
+  <th class="sortable" data-col="4">Use</th>
+  <th class="sortable" data-col="5">Size</th>
+  <th class="sortable" data-col="6">Model Path</th>
+  <th class="sortable" data-col="7">MMProj</th>
+  <th class="sortable" data-col="8">Draft</th>
+  <th class="sortable" data-col="9">Active</th>
+  <th class="sortable" data-col="10">Age</th>
+  <th>Actions</th>
+</tr></thead>
+<tbody id="models-tbody">
+  <tr><td colspan="12" style="text-align:center;color:#888;">Loading models...</td></tr>
+</tbody>
+</table>
+
+<script>
+// Format bytes to human-readable: "87.3 GB", "1.5 GB", "512 MB", "128 KB"
+function fmtSize(bytes) {
+    if (!bytes || isNaN(bytes)) return 'N/A';
+    bytes = parseFloat(bytes);
+    if (bytes >= 1024**3) return (bytes / (1024**3)).toFixed(1) + ' GB';
+    if (bytes >= 1024**2) return (bytes / (1024**2)).toFixed(0) + ' MB';
+    if (bytes >= 1024) return (bytes / 1024).toFixed(0) + ' KB';
+    return bytes + ' B';
+}
+
+// Format ISO timestamp as relative time — uses global qrFmtRelative from base.html
+
+// Format compact params string from model_params object
+function fmtParams(mp) {
+    if (!mp || Object.keys(mp).length === 0) return '\u2014';
+    // Map LLAMA_ARG_* keys to short labels for display
+    var _shortLabels = {
+        'LLAMA_ARG_TEMP': 'temp', 'LLAMA_ARG_TOP_P': 'top_p',
+        'LLAMA_ARG_TOP_K': 'top_k', 'LLAMA_ARG_MIN_P': 'min_p',
+        'LLAMA_ARG_BATCH_SIZE': 'batch', 'LLAMA_ARG_CTX_SIZE': 'ctx',
+        'LLAMA_ARG_N_GPU_LAYERS': 'gpu_layers', 'LLAMA_ARG_FLASH_ATTN': 'flash_attn',
+        'LLAMA_ARG_MMAP': 'mmap', 'LLAMA_ARG_MODEL': 'model',
+        'LLAMA_ARG_MMPROJ': 'mmproj', 'LLAMA_ARG_DRAFT': 'draft',
+        'LLAMA_ARG_DEVICE': 'device', 'LLAMA_ARG_SPLIT_MODE': 'split_mode',
+    };
+    // Standard order of important params
+    var _order = ['LLAMA_ARG_TEMP', 'LLAMA_ARG_TOP_P', 'LLAMA_ARG_TOP_K', 'LLAMA_ARG_MIN_P',
+                  'LLAMA_ARG_BATCH_SIZE', 'LLAMA_ARG_CTX_SIZE', 'LLAMA_ARG_N_GPU_LAYERS', 'LLAMA_ARG_FLASH_ATTN'];
+    var parts = [];
+    // Show params in standard order
+    for (var i = 0; i < _order.length; i++) {
+        var k = _order[i];
+        if (mp[k] && mp[k] !== '') {
+            var label = _shortLabels[k] || k;
+            parts.push(label + '=' + mp[k]);
+        }
+    }
+    // Show any non-standard keys
+    for (var key in mp) {
+        if (_order.indexOf(key) === -1 && _shortLabels[key] === undefined && mp[key]) {
+            parts.push(key + '=' + mp[key]);
+        }
+    }
+    return parts.length > 0 ? parts.join(' ') : '\u2014';
+}
+
+function _fmtDraft(val) {
+    if (!val) return '\u2014';
+    // Cross-reference: ..ID..NNN → clickable link
+    if (typeof val === 'string' && val.startsWith('..ID..')) {
+        var parts = val.split('..');
+        if (parts.length >= 3) {
+            var id = parts[2];
+            return '<a class="row-link" href="?draft_filter=' + encodeURIComponent(id) + '" title="Filter by this draft model">' + val + '</a>';
+        }
+    }
+    // Regular file path — truncate for display
+    var display = val.length > 50 ? val.substring(0, 50) + '...' : val;
+    return '<code style="font-size:0.8em;word-break:break-all;">' + display + '</code>';
+}
+
+(function() {
+   // Restore filter from URL query param or qrSettings on page load
+    var _urlParams = new URLSearchParams(window.location.search);
+    var _filterVal = _urlParams.get('include_inactive');
+    if (!_filterVal) _filterVal = qrSettings.get('models', 'filter_inactive', 'false');
+    if (_filterVal) {
+      var _initSel = document.getElementById('filter-inactive');
+      if (_initSel) _initSel.value = _filterVal;
+    }
+    // Restore draft_filter from URL or qrSettings
+    var _dfVal = _urlParams.get('draft_filter');
+    if (!_dfVal) _dfVal = qrSettings.get('models', 'draft_filter', '');
+    var _dfInput = document.querySelector('[name="draft_filter"]');
+    if (_dfInput && _dfVal) _dfInput.value = _dfVal;
+   function loadModels() {
+     // Persist filter to qrSettings before each fetch
+       var _sel = document.getElementById('filter-inactive');
+       if (_sel) qrSettings.set('models', 'filter_inactive', _sel.value);
+       var q = document.querySelector('[name="q"]');
+       var engineField = document.querySelector('[name="engine"]');
+       var draftFilter = document.querySelector('[name="draft_filter"]');
+       var inactiveParam = document.getElementById('filter-inactive');
+       var parts = [];
+        if (engineField && engineField.value) parts.push('engine=' + encodeURIComponent(engineField.value));
+        if (q && q.value) parts.push('q=' + encodeURIComponent(q.value));
+        if (draftFilter && draftFilter.value) {
+          qrSettings.set('models', 'draft_filter', draftFilter.value);
+          parts.push('draft_filter=' + encodeURIComponent(draftFilter.value));
+        }
+        if (inactiveParam) parts.push('include_inactive=' + encodeURIComponent(inactiveParam.value));
+       var path = 'models' + (parts.length ? '?' + parts.join('&') : '');
+    fetch(QR_API_BASE + '/' + path).then(function(r) {
+        return r.json();
+      })
+      .then(function(data) {
+        if (data.status !== 'ok') {
+          document.getElementById('models-tbody').innerHTML =
+            '<tr><td colspan="12" style="text-align:center;color:#f44336;">Failed: ' +
+            (data.message || '') + '</td></tr>';
+          return;
+        }
+        var items = data.items || [];
+        var meta = data.meta || {};
+        var activeCount = meta.active_count || 0;
+        var inactiveCount = meta.inactive_count || 0;
+        var isShowingInactive = (document.getElementById('filter-inactive').value === 'true');
+        // Update counter - show only what's NOT currently visible
+        var countEl = document.getElementById('model-count');
+        if (countEl) {
+          countEl.textContent = isShowingInactive ? '(' + activeCount + ' active)' : '(' + inactiveCount + ' inactive)';
+        }
+        // Update dropdown option texts (preserve selected value across text changes)
+        var sel = document.getElementById('filter-inactive');
+        if (sel) {
+          var savedVal = sel.value;
+          if (isShowingInactive) {
+            sel.options[0].textContent = 'Active only (' + activeCount + ')';
+            sel.options[1].textContent = 'Show inactive';
+          } else {
+            sel.options[0].textContent = 'Active only';
+            sel.options[1].textContent = 'Show inactive (' + inactiveCount + ')';
+          }
+          sel.value = savedVal;
+        }
+        if (items.length === 0) {
+          document.getElementById('models-tbody').innerHTML =
+            '<tr><td colspan="12" style="text-align:center;color:#888;">No models found. Create one or scan nodes.</td></tr>';
+          return;
+        }
+
+        var rows = '';
+        for (var i = 0; i < items.length; i++) {
+            var m = items[i], mp = m.model_params || {};
+            if (typeof mp === 'string') try { mp = JSON.parse(mp); } catch(e) { mp = {}; }
+            // Use engine_type_name from API
+            var etName = m.engine_type_name || m.engine_display_name || 'unknown';
+           rows += '<tr data-id="' + m.id + '">' +
+             '<td>' + m.id + '</td>' +
+             '<td><a class="row-link" href="/webui/models/' + m.id + '/edit">' + m.name + '</a></td>' +
+             '<td><code>' + (m.quantization || '\u2014') + '</code></td>' +
+             '<td style="font-size:0.85em;color:#666;">' + fmtParams(mp) + '</td>' +
+             '<td style="color:#888;"><a class="row-link" href="/webui/engine/' + encodeURIComponent(etName) + '/presets?model=' + m.id + '" title="Show presets using this model">' + (m.preset_count || 0) + '</a></td>' +
+             '<td style="color:#888;" data-sort="' + (m.size_bytes || 0) + '">' + fmtSize(m.size_bytes) + '</td>' +
+             '<td><code style="font-size:0.8em;word-break:break-all;">' + m.model_path + '</code></td>' +
+             '<td title="' + (m.mmproj_path || '') + '">' + (m.mmproj_path ? 'Yes' : '\u2014') + '</td>' +
+            '<td>' + _fmtDraft(m.draft_model_path) + '</td>' +
+             '<td style="text-align:center;">' +
+               (m.is_active ?
+                 '<button class="btn btn-sm model-toggle-btn" data-id="' + m.id + '" data-engine="' + encodeURIComponent(etName) + '" style="font-size:0.8em;padding:1px 4px;background:#4caf50;color:#fff;border:none;border-radius:3px;cursor:pointer;" title="Deactivate">Active</button>' :
+                 '<button class="btn btn-sm model-toggle-btn" data-id="' + m.id + '" data-engine="' + encodeURIComponent(etName) + '" style="font-size:0.8em;padding:1px 4px;background:#666;color:#fff;border:none;border-radius:3px;cursor:pointer;" title="Activate">Inactive</button>'
+               ) +
+             '</td>' +
+              '<td class="age-cell" data-sort="' + (m.created_at || '') + '">' + qrFmtRelative(m.created_at) + '</td>' +
+'<td style="white-space:nowrap;">' +
+                '<a href="/webui/models/' + m.id + '/edit" class="btn btn-sm" style="font-size:0.8em;padding:1px 6px;" title="Edit">Edit</a> ' +
+                '<button class="btn btn-danger model-delete-btn" data-id="' + m.id + '" data-engine="' + encodeURIComponent(etName) + '" style="font-size:1.1em;padding:2px 5px;line-height:1;" title="Remove">\u00d7</button>' +
+             '</td></tr>';
+         }
+         document.getElementById('models-tbody').innerHTML = rows;
+
+          // Apply saved sort state (after tbody populated)
+          var _sortCol = parseInt(qrSettings.get('models', 'sort_col', '-1'), 10);
+          var _sortDir = qrSettings.get('models', 'sort_dir', '');
+          if (_sortCol >= 0 && _sortDir) {
+            modelsSortTable(_sortCol, _sortDir);
+            modelsApplyArrows(_sortCol, _sortDir);
+          }
+
+  // Attach delete handlers
+            var delBtns = document.querySelectorAll('.model-delete-btn');
+            for (var j = 0; j < delBtns.length; j++) {
+              delBtns[j].addEventListener('click', function() {
+                var id = this.getAttribute('data-id');
+                var engine = this.getAttribute('data-engine');
+                if (!confirm('Remove model ' + id + '? This only removes the DB entry.')) return;
+                qrApi('/engine/' + encodeURIComponent(engine) + '/models/' + id, {method: 'DELETE'})
+                   .then(function(data) {
+                     if (data.status === 'ok') {
+                       location.reload();
+                     } else {
+                       alert('Remove failed: ' + (data.message || 'Unknown'));
+                     }
+                   }).catch(function(e) { alert('Error: ' + e.message); });
+              });
+            }
+
+           // Attach active/inactive toggle handlers
+            var toggleBtns = document.querySelectorAll('.model-toggle-btn');
+            for (var j = 0; j < toggleBtns.length; j++) {
+              toggleBtns[j].addEventListener('click', function() {
+                var id = this.getAttribute('data-id');
+                var engine = this.getAttribute('data-engine');
+                var isNowActive = this.textContent.trim() === 'Active';
+                var newVal = isNowActive ? 0 : 1;
+                var btn = this;
+                btn.disabled = true;
+                btn.textContent = isNowActive ? 'Inactive' : 'Active';
+                qrApi('/models/' + id + '/active', {method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({is_active: newVal})})
+                   .then(function(data) {
+                     if (data.status === 'ok') {
+                       btn.textContent = newVal === 1 ? 'Active' : 'Inactive';
+                       btn.style.background = newVal === 1 ? '#4caf50' : '#666';
+                       btn.disabled = false;
+                     } else {
+                       btn.textContent = isNowActive ? 'Active' : 'Inactive';
+                       btn.style.background = isNowActive ? '#4caf50' : '#666';
+                       btn.disabled = false;
+                       alert('Toggle failed: ' + (data.message || 'Unknown'));
+                     }
+                   }).catch(function(e) {
+                     btn.textContent = isNowActive ? 'Active' : 'Inactive';
+                     btn.style.background = isNowActive ? '#4caf50' : '#666';
+                     btn.disabled = false;
+                     alert('Error: ' + e.message);
+                   });
+              });
+            }
+
+
+        }).catch(function(e) {
+          document.getElementById('models-tbody').innerHTML =
+            '<tr><td colspan="12" style="text-align:center;color:#f44336;">Error: ' + e + '</td></tr>';
+        });
+  }
+
+  loadModels();
+
+  // Clear draft_filter when search query is empty (on form submit)
+  var _ff = document.getElementById('filter-form');
+  if (_ff) {
+    _ff.addEventListener('submit', function(e) {
+      var qInput = document.querySelector('[name="q"]');
+      var dfInput = document.querySelector('[name="draft_filter"]');
+      if (qInput && (!qInput.value || !qInput.value.trim())) {
+        if (dfInput) dfInput.value = '';
+      }
+    });
+  }
+
+  // Attach change handler for active/inactive filter select
+   var _filterSel = document.getElementById('filter-inactive');
+  if (_filterSel) {
+    _filterSel.addEventListener('change', function() {
+      qrSettings.set('models', 'filter_inactive', this.value);
+      loadModels();
+    });
+  }
+
+   var ths = document.querySelectorAll('.sortable');
+
+  function modelsSortTable(col, dir) {
+      var table = ths[0] ? ths[0].closest('table') : null;
+      if (table) {
+        var tbody = table.querySelector('tbody');
+        if (tbody) {
+          var rows = Array.from(tbody.rows);
+          rows.sort(function(a, b) {
+            var cellA = a.cells[col] ? (a.cells[col].getAttribute('data-sort') || a.cells[col].textContent.trim()) : '';
+            var cellB = b.cells[col] ? (b.cells[col].getAttribute('data-sort') || b.cells[col].textContent.trim()) : '';
+            // Numeric sort: ID(0), Use(4), Size(5)
+            if (col === 0 || col === 4 || col === 5 || col === 9) {
+             var numA = parseFloat(cellA);
+             var numB = parseFloat(cellB);
+             if (!isNaN(numA) && !isNaN(numB)) {
+               return dir === 'asc' ? numA - numB : numB - numA;
+             }
+             return dir === 'asc' ? cellA.localeCompare(cellB) : cellB.localeCompare(cellA);
+           }
+           return dir === 'asc' ? cellA.localeCompare(cellB) : cellB.localeCompare(cellA);
+         });
+         rows.forEach(function(row) { tbody.appendChild(row); });
+       }
+     }
+   }
+
+   function modelsApplyArrows(col, dir) {
+     ths.forEach(function(t) {
+       t.textContent = t.textContent.replace(/\s*[\u2191\u2193]\s*$/, '').trim();
+     });
+     var arrow = dir === 'asc' ? ' \u2191' : ' \u2193';
+     ths[col].textContent = ths[col].textContent.trim() + arrow;
+   }
+
+   // Set up click handlers (sort will be applied in loadModels .then() after rows populated)
+   ths.forEach(function(th) {
+    th.style.cursor = 'pointer';
+    th.addEventListener('click', function() {
+      var col = parseInt(this.getAttribute('data-col'), 10);
+      var dir = qrSettings.get('models', 'sort_dir', '') === 'desc' ? 'asc' : 'desc';
+      qrSettings.set('models', 'sort_col', col.toString());
+      qrSettings.set('models', 'sort_dir', dir);
+      modelsSortTable(col, dir);
+      modelsApplyArrows(col, dir);
+    });
+  });
+
+  // Clear All button handler
+ var _cab = document.getElementById('clear-all-btn');
+  if (_cab) {
+  _cab.addEventListener('click', function() {
+    if (!confirm('Clear ALL models? This removes every model from the database. This cannot be undone.')) return;
+    var btn = this;
+    btn.disabled = true;
+    btn.textContent = 'Clearing...';
+qrApi('/models/clear-all', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({})})
+       .then(function(data) {
+        if (data.status === 'ok') {
+          alert('Cleared ' + (data.data.deleted_count || 0) + ' models.');
+          setTimeout(function() { location.reload(); }, 800);
+        } else {
+          btn.disabled = false;
+          btn.textContent = 'Wipe DB';
+          alert('Clear failed: ' + (data.message || 'Unknown'));
+        }
+      }).catch(function(e) {
+        btn.disabled = false;
+        btn.textContent = 'Wipe DB';
+        alert('Clear failed: ' + e.message);
+      });
+  });
+  }
+
+  // Scan button handler
+ var _sbn = document.getElementById('scan-btn');
+  if (_sbn) {
+  _sbn.addEventListener('click', function() {
+    var resultDiv = document.getElementById('scan-result');
+    var nodeSelect = document.getElementById('scan-node');
+    var nodeId = nodeSelect.value;
+    if (!nodeId) { alert('Please select a host to scan.'); return; }
+    resultDiv.innerHTML = '<span class="badge badge-other">Scanning...</span>';
+qrApi('/models/scan?node=' + encodeURIComponent(nodeId), {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({})})
+       .then(function(data) {
+        if (data.status === 'ok') {
+          var d = data.data || {};
+          resultDiv.innerHTML = '<p>New: ' + (d.new_models || 0) + '</p>' +
+            '<p>Existing: ' + (d.existing_models || 0) + '</p>' +
+            '<p>Files found: ' + (d.total_files_found || 0) + '</p>';
+          setTimeout(function() { location.reload(); }, 1500);
+        } else {
+          resultDiv.innerHTML = '<p style="color:#f44336;">Scan failed: ' +
+            (data.message || 'Unknown') + '</p>';
+        }
+      }).catch(function(e) {
+       resultDiv.innerHTML = '<p style="color:#f44336;">Error: ' + e.message + '</p>';
+      });
+  });
+  }
+
+  // Clear filter button handler — clears q, engine, draft_filter, and inactive filter
+   var _cfb = document.getElementById('clear-filter-btn');
+   if (_cfb) {
+   _cfb.addEventListener('click', function() {
+     var qInput = document.querySelector('[name="q"]');
+     if (qInput) qInput.value = '';
+     var engineInput = document.querySelector('[name="engine"]');
+     if (engineInput) engineInput.value = '';
+     var draftInput = document.querySelector('[name="draft_filter"]');
+     if (draftInput) {
+       draftInput.value = '';
+       qrSettings.set('models', 'draft_filter', '');
+     }
+    var _sel = document.getElementById('filter-inactive');
+     if (_sel) _sel.value = 'false';
+     qrSettings.set('models', 'filter_inactive', 'false');
+     // Update URL to reflect cleared state (no draft_filter, no q, no engine)
+     var cleanUrl = window.location.pathname;
+     if (window.location.search) {
+       var params = new URLSearchParams(window.location.search);
+       params.delete('draft_filter');
+       params.delete('q');
+       params.delete('engine');
+       // Keep include_inactive if explicitly set to true, but default is false
+       params.set('include_inactive', 'false');
+       var qs = params.toString();
+       cleanUrl = qs ? cleanUrl + '?' + qs : cleanUrl;
+     }
+     history.replaceState(null, '', cleanUrl);
+     loadModels();
+   });
+   }
+
+  // Expose loadModels globally for other scripts
+   window.loadModels = loadModels;
+  })();
+ </script>

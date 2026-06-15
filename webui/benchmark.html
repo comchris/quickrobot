@@ -1,0 +1,150 @@
+<!-- Benchmark page - B3 redesign -->
+<!-- Single row header + controls (matches instances.html pattern) -->
+<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px;">
+  <h1 style="margin:0;font-size:1.3em;">Benchmarks</h1>
+  <label style="font-size:0.85em;color:#666;font-weight:600;">View:</label>
+  <select id="bench-filter" style="padding:4px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+    <option value="all">All Instances</option>
+    <!-- Populated dynamically from instances list -->
+  </select>
+  <label style="font-size:0.85em;color:#666;font-weight:600;">Results:</label>
+  <select id="result-limit" style="padding:4px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+    <option value="5">5</option>
+    <option value="10" selected>10</option>
+    <option value="25">25</option>
+    <option value="50">50</option>
+    <option value="100">100</option>
+  </select>
+  <button id="refresh-results-btn" class="btn btn-primary" style="padding:4px 10px;font-size:0.85em;" title="Refresh results">Refresh</button>
+  <button id="clear-results-btn" class="btn btn-danger" style="padding:4px 10px;font-size:0.85em;" title="Clear all benchmark results">Clear Results</button>
+</div>
+
+
+
+<!-- Area 1: Instance + Preset selection -->
+<div class="detail-card" style="padding:10px;margin-bottom:10px;">
+  <h2 style="font-size:0.95em;margin:0 0 8px 0;">Run Benchmark</h2>
+  <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
+    <div style="flex:0 0 260px;">
+      <label style="display:block;font-size:0.8em;color:#666;margin-bottom:2px;">Instance</label>
+      <select id="instance-select" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+        <option value="">-- Select running instance --</option>
+        {% for inst in instances %}
+        {% if inst.state == 'running' and (inst.engine_type_name == 'llama_server' or inst.engine_type_name == 'llama.cpp') %}
+        <option value="{{ inst.id }}">{{ inst.name }} ({{ inst.node_hostname or inst.node_name }}:{{ inst.port_assigned }})</option>
+        {% endif %}
+        {% endfor %}
+      </select>
+    </div>
+    <div style="flex:1;min-width:250px;">
+      <label style="display:block;font-size:0.8em;color:#666;margin-bottom:2px;">Preset</label>
+      <div style="display:flex;gap:6px;align-items:center;">
+        <select id="preset-select" style="flex:1;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+          <option value="">-- Select preset (or leave for current) --</option>
+          {% for p in llama_presets %}
+          <option value="{{ p.id }}">{{ p.name }}</option>
+          {% endfor %}
+        </select>
+        <button id="apply-preset-btn" class="btn btn-primary" style="padding:5px 10px;font-size:0.85em;" disabled>Apply</button>
+      </div>
+      <small id="preset-info" style="margin-top:3px;display:block;"></small>
+    </div>
+  </div>
+</div>
+
+<!-- Area 2: Prompt selection, name, content, max tokens, save -->
+<div class="detail-card" style="padding:10px;margin-bottom:10px;">
+  <h2 style="font-size:0.95em;margin:0 0 8px 0;">Prompt</h2>
+  <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
+    <div style="flex:0 0 220px;">
+      <label style="display:block;font-size:0.8em;color:#666;margin-bottom:2px;">Load Prompt</label>
+      <select id="prompt-select" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+        <option value="">-- Select existing prompt --</option>
+        {% for prompt in prompts %}
+        <option value="{{ prompt.id }}">{{ prompt.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div style="flex:1;min-width:250px;">
+      <label style="display:block;font-size:0.8em;color:#666;margin-bottom:2px;">Prompt Name</label>
+      <input type="text" id="prompt-name" placeholder="New prompt..." style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+    </div>
+    <div style="flex:1;min-width:300px;">
+      <label style="display:block;font-size:0.8em;color:#666;margin-bottom:2px;">Prompt Content</label>
+      <textarea id="prompt-content" rows="2" placeholder="Enter benchmark prompt..." style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;resize:vertical;"></textarea>
+    </div>
+    <div style="flex:0 0 100px;">
+      <label style="display:block;font-size:0.8em;color:#666;margin-bottom:2px;">Max Tokens</label>
+      <input type="number" id="prompt-max-tokens" value="20" min="1" max="8192" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+    </div>
+    <div style="flex:0 0 auto;display:flex;gap:4px;align-items:center;">
+      <button id="save-prompt-btn" class="btn btn-primary" style="padding:4px 12px;font-size:0.85em;">Save</button>
+      <button id="edit-prompt-btn" class="btn btn-primary" style="padding:4px 10px;font-size:0.85em;display:none;">Edit</button>
+      <button id="delete-prompt-btn" class="btn btn-danger" style="padding:4px 10px;font-size:0.85em;display:none;">Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- Full-width row: Start benchmark + Output window -->
+<div style="display:flex;gap:12px;margin-bottom:10px;">
+  <div style="flex:0 0 200px;">
+    <div class="detail-card" style="padding:10px;">
+      <h2 style="font-size:1em;margin-bottom:8px;">Start Benchmark</h2>
+      <button id="start-benchmark-btn" class="btn btn-success" style="width:100%;padding:8px;font-size:0.9em;">Start Benchmark</button>
+      <div id="bench-status" style="margin-top:6px;font-size:0.85em;color:#666;"></div>
+    </div>
+  </div>
+  <div style="flex:1;min-width:0;">
+    <div id="output-window" style="min-height:120px;padding:10px;background:#f5f5f5;border:1px solid #ddd;border-radius:4px;font-family:'Consolas','Monaco',monospace;font-size:0.85em;max-height:350px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;color:#333;">
+      Select an instance and start a benchmark to see output here.
+    </div>
+  </div>
+</div>
+
+<!-- Full-width results table -->
+<div class="detail-card" style="padding:10px;">
+  <h2 style="font-size:1em;margin-bottom:6px;">Results</h2>
+  <table id="results-table" style="width:100%;border-collapse:collapse;font-size:0.85em;">
+    <thead><tr>
+      <th class="sortable" data-col="0" style="padding:5px 6px;border-bottom:1px solid #ddd;text-align:left;cursor:pointer;background:#f5f5f5;min-width:80px;">ID</th>
+      <th class="sortable" data-col="1" style="padding:5px 6px;border-bottom:1px solid #ddd;text-align:left;cursor:pointer;background:#f5f5f5;min-width:130px;">Time</th>
+      <th class="sortable" data-col="2" style="padding:5px 6px;border-bottom:1px solid #ddd;text-align:left;cursor:pointer;background:#f5f5f5;">Instance</th>
+      <th class="sortable" data-col="3" style="padding:5px 6px;border-bottom:1px solid #ddd;text-align:left;cursor:pointer;background:#f5f5f5;">Prompt</th>
+      <th class="sortable" data-col="4" style="padding:5px 6px;border-bottom:1px solid #ddd;text-align:left;cursor:pointer;background:#f5f5f5;">Model</th>
+      <th class="sortable" data-col="5" style="padding:5px 6px;border-bottom:1px solid #ddd;text-align:right;cursor:pointer;background:#f5f5f5;">Duration</th>
+      <th class="sortable" data-col="6" style="padding:5px 6px;border-bottom:1px solid #ddd;text-align:right;cursor:pointer;background:#f5f5f5;">Prompt/s</th>
+      <th class="sortable" data-col="7" style="padding:5px 6px;border-bottom:1px solid #ddd;text-align:right;cursor:pointer;background:#f5f5f5;">Pred/s</th>
+      <th style="padding:5px 6px;border-bottom:1px solid #ddd;text-align:left;">Status</th>
+      <th style="padding:5px 6px;border-bottom:1px solid #ddd;text-align:left;">Actions</th>
+    </tr></thead>
+    <tbody id="results-body">
+      <tr><td colspan="10" style="text-align:center;color:#888;padding:12px;">No benchmarks run yet.</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- Result detail modal -->
+<div id="result-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:10000;align-items:center;justify-content:center;">
+  <div style="background:#fff;border-radius:6px;padding:16px;max-width:700px;width:90%;max-height:80vh;overflow-y:auto;box-shadow:0 2px 12px rgba(0,0,0,0.25);">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+      <h2 id="modal-title" style="font-size:1em;margin:0;">Benchmark Result</h2>
+      <button id="modal-close" class="btn btn-danger" style="padding:3px 8px;font-size:0.85em;">Close</button>
+    </div>
+    <div id="modal-metrics" class="detail-grid" style="margin-bottom:12px;"></div>
+    <h3 style="font-size:0.9em;margin-bottom:4px;">Full Output</h3>
+    <pre id="modal-output" style="max-height:250px;overflow-y:auto;margin-bottom:12px;white-space:pre-wrap;background:#f5f5f5;border:1px solid #ddd;border-radius:3px;padding:6px;font-size:0.8em;color:#333;"></pre>
+    <h3 style="font-size:0.9em;margin-bottom:4px;">Raw Response JSON</h3>
+    <pre id="modal-json" style="max-height:180px;overflow:auto;font-size:0.75em;white-space:pre-wrap;background:#f5f5f5;border:1px solid #ddd;border-radius:3px;padding:6px;color:#333;"></pre>
+  </div>
+</div>
+
+
+<!-- Config block: pass server-rendered data to external JS module -->
+<script>
+window.__BENCH_CONFIG__ = {
+  prompts: {{ prompts | tojson }},
+  llama_presets: {{ llama_presets | default('{}') | tojson }},
+  instances: {{ instances | tojson }}
+};
+</script>
+<script src="/_static/benchmark.js"></script>

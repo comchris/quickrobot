@@ -1,0 +1,126 @@
+# @name: Deploy Universal Service
+# @playbook_id: DEPLOY_UNIVERSAL_V1
+# @version: 1
+# @timeout: 600
+# deploy_universal.yml — Deploy universal engine instance (git clone + venv + systemd)
+- hosts: "{{ inventory_host }}"
+  vars:
+    instance_id: "{{ instance_id }}"
+    instance_name: "{{ instance_name | default('universal-' + instance_id|string) }}"
+    engine_type: "universal"
+    unit_name: "qr-{{ instance_id }}-universal"
+    env_file: "/etc/quickrobot/{{ unit_name }}.env"
+    install_dir: "{{ install_dir | default('/opt/quickrobot/' + instance_name) }}"
+    venv_path: "{{ install_dir }}/venv"
+    user: "{{ user }}"
+    start_command: "{{ start_command | default('') }}"
+    binary_path: "{{ binary_path | default(install_dir + '/venv/bin/python') }}"
+    cli_args: "{{ cli_args | default([]) }}"
+    env_vars: "{{ env_vars | default({}) }}"
+    git_url: "{{ git_url | default('') }}"
+    requirements_file: "{{ requirements_file | default('requirements.txt') }}"
+    start_after_deploy: "{{ start_after_deploy | default(false) }}"
+    restart_policy: "{{ restart_policy | default('no') }}"
+    start_on_boot: "{{ start_on_boot | default(false) }}"
+    host: "{{ host | default('127.0.0.1') }}"
+    deploy_port: "{{ deploy_port | default(0) }}"
+    log_dir: "/var/log/quickrobot"
+
+  tasks:
+    # ------------------------------------------------------------------ Preflight (run as root for df/stat on system dirs)
+    - name: Preflight — verify host is reachable
+      ansible.builtin.ping:
+
+    - name: Preflight — verify user can write to install directory
+      stat:
+        path: "{{ install_dir }}"
+      register: install_dir_stat
+
+    - name: Preflight — check available disk space on root filesystem
+      shell: df -BG / | tail -1 | awk '{print $4}' | tr -d 'G'
+      register: disk_free_gb
+      changed_when: false
+
+    - name: Fail if insufficient disk space (< 2 GB free)
+      fail:
+        msg: "Insufficient disk space on root filesystem. Free: {{ disk_free_gb.stdout }} GB (need >= 2 GB)"
+      when: disk_free_gb.stdout | int < 2
+
+    # ------------------------------------------------------------------ User workspace (git clone + venv + pip) — run as target user
+    - block:
+        - name: Clone git repository
+          ansible.builtin.git:
+            repo: "{{ git_url }}"
+            dest: "{{ install_dir }}"
+            version: main
+          when: git_url | length > 0 and not install_dir_stat.stat.exists | default(false)
+
+        - name: Create Python virtual environment
+          shell: python3 -m venv {{ venv_path }}
+          args:
+            creates: "{{ venv_path }}/bin/python"
+
+        - name: Verify venv python exists
+          stat:
+            path: "{{ venv_path }}/bin/python"
+          register: venv_python
+
+        - name: Fail if venv creation failed
+          fail:
+            msg: "Virtual environment not found at {{ venv_path }}. Check git clone and venv creation logs."
+          when: not venv_python.stat.exists | default(false) and git_url | length > 0
+
+        - name: Install Python dependencies (verbose)
+          shell: "{{ venv_path }}/bin/pip install -v -r {{ requirements_file }}"
+          args:
+            chdir: "{{ install_dir }}"
+          register: pip_result
+          changed_when: "'Successfully installed' in pip_result.stdout"
+          when: git_url | length > 0 and install_dir is defined
+      become_user: "{{ user }}"
+
+    # ------------------------------------------------------------------ Systemd setup (run as root)
+    - block:
+        - name: Create /etc/quickrobot directory
+          file:
+            path: "/etc/quickrobot"
+            state: directory
+            mode: '0755'
+
+        - name: Create per-instance unit directory
+          file:
+            path: "/opt/quickrobot/{{ unit_name }}"
+            state: directory
+            mode: '0755'
+
+        - name: Write environment file from template
+          template:
+            src: universal_env.j2
+            dest: "{{ env_file }}"
+            mode: '0644'
+
+        - name: Generate systemd service unit from template
+          template:
+            src: universal_service.j2
+            dest: "/etc/systemd/system/{{ unit_name }}.service"
+
+        - name: Reload systemd daemon
+          systemd:
+            daemon_reload: yes
+
+        - name: Log systemd config (boot + restart)
+          debug:
+            msg: "[qr] {{ inventory_hostname }}: {{ unit_name }} enabled={{ start_on_boot | default(false) }}, restart={{ restart_policy | default('no') }}"
+
+        - name: Set service boot state (start_on_boot)
+          systemd:
+            name: "{{ unit_name }}"
+            enabled: "{{ start_on_boot | default(false) | bool }}"
+
+        - name: Start service after deploy (start_after_deploy)
+          systemd:
+            name: "{{ unit_name }}"
+            state: started
+            enabled: yes
+          when: start_after_deploy | default(false)
+      become: yes

@@ -1,0 +1,26 @@
+# @name: Clean Shared Llamacpp Build Clean Shared Build
+# @playbook_id: CLEAN_SHARED_LLAMACPP_BUILD_V1
+# @version: 1
+# @timeout: 300
+# clean_shared_build.yml — Remove shared llama.cpp source + build dirs from node
+# Variables required: inventory_host, engine_type (llama_server or rpc)
+
+- hosts: "{{ inventory_host }}"
+  become: yes
+
+  tasks:
+    - name: Verify no other keeper instances running on this host
+      shell: |
+        systemctl list-units --no-pager --plain 'qr-*-llama_server.service' 'qr-*-rpc.service' 2>/dev/null || true
+      register: remaining_units
+      changed_when: false
+
+    - name: Remove shared llama.cpp source + build dirs
+      file:
+        path: "/opt/quickrobot/llama.cpp"
+        state: absent
+      when: remaining_units.stdout | trim | length == 0
+
+    - name: Report cleanup result
+      debug:
+        msg: "Shared build cleanup: {{ 'removed' if remaining_units.stdout | trim | length == 0 else 'skipped — other instances still on node' }}"
