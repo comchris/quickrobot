@@ -1,0 +1,5 @@
+# Hide all .db files (includes quickrobot.db and any others)
+*.db
+
+# Hide all backup files
+_backups/*

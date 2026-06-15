@@ -1,0 +1,35 @@
+# Python build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+
+# Database files (all .db in data/)
+data/*.db
+
+# Opencode managed
+.opencode/node_modules/
+
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+
+# Editor configs
+.vscode/
+.idea/
+
+# Runtime logs
+logs/*
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Old backup files
+*_backup_*
+
+# Archived items
+OLD_ignore/
