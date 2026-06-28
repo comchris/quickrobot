@@ -36,8 +36,8 @@ def _row_to_dict(row):
 
 
 def add_node(db_path, name, hostname, transport="ansible", ansible_user=None,
-             ansible_port=22, ansible_key_path=None, ansible_inventory_host=None,
-             model_base_path=None):
+             ssh_port=22, ansible_key_path=None, ansible_inventory_host=None,
+             model_base_path=None, ipv4_address=None, ipv6_address=None):
     """Create a new node entry.
 
     Args:
@@ -46,10 +46,12 @@ def add_node(db_path, name, hostname, transport="ansible", ansible_user=None,
         hostname: DNS name or IP for connection.
         transport: 'ansible' or 'ssh' (default 'ansible').
         ansible_user: SSH/Ansible user (defaults to DEFAULT_ANSIBLE_USER).
-        ansible_port: SSH port (default 22).
+        ssh_port: SSH port (default 22).
         ansible_key_path: Optional path to private key.
         ansible_inventory_host: Override for Ansible inventory hostname.
         model_base_path: Default model root path for this node.
+        ipv4_address: IPv4 address of the node.
+        ipv6_address: IPv6 address of the node.
 
     Returns:
         dict with the new node's data including assigned id.
@@ -63,11 +65,13 @@ def add_node(db_path, name, hostname, transport="ansible", ansible_user=None,
         with pool(db_path) as conn:
             cursor = conn.execute(
                 """INSERT INTO nodes
-                   (name, hostname, transport, ansible_user, ansible_port,
-                    ansible_key_path, ansible_inventory_host, model_base_path)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (name, hostname, transport, effective_user, ansible_port,
-                 ansible_key_path, ansible_inventory_host, model_base_path),
+                   (name, hostname, transport, ansible_user, ssh_port,
+                    ansible_key_path, ansible_inventory_host, model_base_path,
+                    ipv4_address, ipv6_address)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (name, hostname, transport, effective_user, ssh_port,
+                 ansible_key_path, ansible_inventory_host, model_base_path,
+                 ipv4_address, ipv6_address),
             )
             node_id = cursor.lastrowid
             row = conn.execute(
@@ -76,6 +80,61 @@ def add_node(db_path, name, hostname, transport="ansible", ansible_user=None,
             return _row_to_dict(row)
     except Exception as exc:
         raise NodeError(f"Failed to add node '{name}': {exc}") from exc
+
+
+def check_duplicate_name_or_hostname(db_path, name, hostname, exclude_node_id=None):
+    """Check if a name or hostname already exists in the nodes table.
+    
+    NO FALLBACK RULE: returns specific error details for each conflict found.
+    
+    Args:
+        db_path: Path to the SQLite database.
+        name: The display name to check.
+        hostname: The hostname to check.
+        exclude_node_id: Optional node id to exclude (for updates).
+        
+    Returns:
+        list of dicts, each with keys: 'column', 'value', 'existing_node_id', 'existing_name'
+        Empty list means no conflicts.
+    """
+    from db.sqlite import pool
+    conflicts = []
+    
+    if not name and not hostname:
+        return conflicts
+    
+    with pool(db_path) as conn:
+        if name:
+            query = "SELECT id, name FROM nodes WHERE LOWER(name) = LOWER(?)"
+            params = [name]
+            if exclude_node_id:
+                query += " AND id != ?"
+                params.append(exclude_node_id)
+            row = conn.execute(query, params).fetchone()
+            if row:
+                conflicts.append({
+                    "column": "name",
+                    "value": name,
+                    "existing_node_id": row["id"],
+                    "existing_name": row["name"],
+                })
+        
+        if hostname:
+            query = "SELECT id, name FROM nodes WHERE LOWER(hostname) = LOWER(?)"
+            params = [hostname]
+            if exclude_node_id:
+                query += " AND id != ?"
+                params.append(exclude_node_id)
+            row = conn.execute(query, params).fetchone()
+            if row:
+                conflicts.append({
+                    "column": "hostname",
+                    "value": hostname,
+                    "existing_node_id": row["id"],
+                    "existing_name": row["name"],
+                })
+    
+    return conflicts
 
 
 def get_node(db_path, node_id):
@@ -131,11 +190,13 @@ def update_node(db_path, node_id, **fields):
     """
     from db.sqlite import pool
     allowed = {"name", "hostname", "transport", "ansible_user",
-               "ansible_port", "ansible_key_path", "ansible_inventory_host",
+               "ssh_port", "ansible_key_path", "ansible_inventory_host",
                "status", "status_reason", "capabilities", "available_devices",
                "cpu_cores", "ram_mb", "os", "node_build_state",
-               "gpu_name", "gpu_type", "gpu_memory_mb"}
+               "gpu_name", "gpu_type", "gpu_memory_mb",
+               "ipv4_address", "ipv6_address"}
     updates = {k: v for k, v in fields.items() if k in allowed}
+    dropped = {k: v for k, v in fields.items() if k not in allowed}
     if not updates:
         raise NodeError("No valid fields to update")
 
@@ -149,7 +210,10 @@ def update_node(db_path, node_id, **fields):
         ).fetchone()
         if row is None:
             raise NodeError(f"Node {node_id} not found")
-        return _row_to_dict(row)
+        result = _row_to_dict(row)
+        if dropped:
+            result["_dropped_fields"] = dropped  # A2: visible to caller, never stored in DB
+        return result
 
 
 def delete_node(db_path, node_id, stop_running=False):

@@ -1,6 +1,7 @@
 <!-- Single row header with controls -->
 <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
   <h1 style="margin:0;font-size:1.3em;">Models</h1>
+  <span id="model-count" style="display:inline-block;padding:2px 8px;background:#555;color:#fff;border-radius:10px;font-size:0.75em;font-weight:normal;"></span>
   <a href="/webui/models/create" class="btn btn-primary" style="display:inline-block;padding:4px 12px;font-size:0.85em;">+ Add Model</a>
   <button id="clear-all-btn" class="btn btn-danger" style="padding:4px 10px;font-size:0.85em;">Wipe DB</button>
   <form method="get" action="/webui/models" id="filter-form" style="display:flex;gap:8px;align-items:center;margin:0;">
@@ -14,21 +15,25 @@
   </form>
   <div style="display:flex;gap:6px;align-items:center;">
     <label style="font-size:0.8em;color:#666;">Show:</label>
-    <select id="filter-inactive" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+   <select id="filter-inactive" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
        <option value="false">Active only</option>
        <option value="true">Show inactive</option>
      </select>
-    <span id="model-count" style="font-size:0.8em;color:#666;"></span>
-  </div>
+   </div>
    <div style="display:flex;gap:6px;align-items:center;margin-left:auto;">
     <label style="font-size:0.8em;color:#666;">Scan host:</label>
     <select id="scan-node" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
       {% for n in nodes %}<option value="{{ n.id }}">{{ n.name }}</option>{% endfor %}
     </select>
     <button class="btn btn-success" id="scan-btn" style="padding:4px 10px;font-size:0.85em;">Scan</button>
+   <button class="btn btn-secondary" id="clear-highlight-btn" style="padding:4px 10px;font-size:0.85em;display:none;">Clear highlights</button>
   </div>
 </div>
 <div id='scan-result' style='margin:8px 0;padding:8px;'></div>
+<div id='scan-countdown'>
+  <span class='countdown-timer'>Reloading in <span id='cd-count'>5</span>s — </span>
+  <button class='btn-skip' onclick='qrCancelReload()'>Skip reload</button>
+</div>
 <input type="hidden" name="draft_filter" value="{{ request.args.get('draft_filter', '') }}" />
 
 <table>
@@ -50,6 +55,56 @@
   <tr><td colspan="12" style="text-align:center;color:#888;">Loading models...</td></tr>
 </tbody>
 </table>
+
+<style>
+/* MODEL-SCAN-1: highlight newly discovered model rows */
+.scan-new-row {
+    background-color: #c8e6c9 !important;  /* light green */
+}
+.scan-new-row.fading {
+    background-color: transparent !important;
+}
+.scan-missing-row {
+    background-color: #ffcdd2 !important;  /* light red */
+}
+/* SCAN-AGE-1: modified file highlight */
+.scan-modified-row {
+    background-color: #bbdefb !important;  /* light blue */
+}
+.scan-modified-row.fading {
+    background-color: transparent !important;
+}
+/* SCAN-AGE-1: unresolved draft reference highlight */
+.scan-unresolved-draft-row {
+    background-color: #ffe0b2 !important;  /* light orange */
+}
+.scan-unresolved-draft-row.fading {
+    background-color: transparent !important;
+}
+#scan-countdown {
+    display: none;
+    margin: 6px 0;
+    padding: 6px 12px;
+    background: #fff3e0;
+    border: 1px solid #ffb74d;
+    border-radius: 4px;
+    font-size: 0.85em;
+    color: #e65100;
+}
+#scan-countdown .countdown-timer {
+    font-weight: bold;
+    margin-right: 8px;
+}
+#scan-countdown .btn-skip {
+    background: #1976d2;
+    color: #fff;
+    border: none;
+    border-radius: 3px;
+    padding: 2px 10px;
+    font-size: 0.85em;
+    cursor: pointer;
+}
+</style>
 
 <script>
 // Format bytes to human-readable: "87.3 GB", "1.5 GB", "512 MB", "128 KB"
@@ -143,27 +198,20 @@ function _fmtDraft(val) {
           parts.push('draft_filter=' + encodeURIComponent(draftFilter.value));
         }
         if (inactiveParam) parts.push('include_inactive=' + encodeURIComponent(inactiveParam.value));
-       var path = 'models' + (parts.length ? '?' + parts.join('&') : '');
-    fetch(QR_API_BASE + '/' + path).then(function(r) {
-        return r.json();
-      })
-      .then(function(data) {
-        if (data.status !== 'ok') {
-          document.getElementById('models-tbody').innerHTML =
-            '<tr><td colspan="12" style="text-align:center;color:#f44336;">Failed: ' +
-            (data.message || '') + '</td></tr>';
-          return;
-        }
-        var items = data.items || [];
-        var meta = data.meta || {};
+        var path = '/models' + (parts.length ? '?' + parts.join('&') : '');
+    // qrApi() already parses JSON internally — no need for extra .json() call
+    qrApi(path).then(function(r) {
+      if (r.status !== 'ok') {
+        document.getElementById('models-tbody').innerHTML =
+          '<tr><td colspan="12" style="text-align:center;color:#f44336;">Failed: ' +
+          (r.message || '') + '</td></tr>';
+        return;
+      }
+      var items = r.items || [];
+      var meta = r.meta || {};
         var activeCount = meta.active_count || 0;
         var inactiveCount = meta.inactive_count || 0;
         var isShowingInactive = (document.getElementById('filter-inactive').value === 'true');
-        // Update counter - show only what's NOT currently visible
-        var countEl = document.getElementById('model-count');
-        if (countEl) {
-          countEl.textContent = isShowingInactive ? '(' + activeCount + ' active)' : '(' + inactiveCount + ' inactive)';
-        }
         // Update dropdown option texts (preserve selected value across text changes)
         var sel = document.getElementById('filter-inactive');
         if (sel) {
@@ -213,15 +261,62 @@ function _fmtDraft(val) {
          }
          document.getElementById('models-tbody').innerHTML = rows;
 
-          // Apply saved sort state (after tbody populated)
-          var _sortCol = parseInt(qrSettings.get('models', 'sort_col', '-1'), 10);
-          var _sortDir = qrSettings.get('models', 'sort_dir', '');
-          if (_sortCol >= 0 && _sortDir) {
-            modelsSortTable(_sortCol, _sortDir);
-            modelsApplyArrows(_sortCol, _sortDir);
-          }
+           // Update counter
+           qrUpdateTableCount(document.getElementById('model-count'), items.length);
 
-  // Attach delete handlers
+           // Apply saved sort state (after tbody populated)
+           var _sortCol = parseInt(qrSettings.get('models', 'sort_col', '-1'), 10);
+           var _sortDir = qrSettings.get('models', 'sort_dir', '');
+            if (_sortCol >= 0 && _sortDir) {
+              modelsSortTable(_sortCol, _sortDir);
+              modelsApplyArrows(_sortCol, _sortDir);
+            }
+
+          // MODEL-SCAN-1 + SCAN-AGE-1: Highlight new, missing, modified, unresolved-draft rows
+              var _scanTsStr = localStorage.getItem('qr_scan_ts');
+              if (_scanTsStr) {
+                try {
+                  var _newIds = JSON.parse(localStorage.getItem('qr_scan_new_ids') || '[]');
+                  var _missIds = JSON.parse(localStorage.getItem('qr_scan_missing_ids') || '[]');
+                  var _modIds = JSON.parse(localStorage.getItem('qr_scan_modified_ids') || '[]');
+                  var _draftIds = JSON.parse(localStorage.getItem('qr_scan_unresolved_draft_ids') || '[]');
+                  var _scanTs = parseInt(_scanTsStr, 10);
+                  var _age = Date.now() - _scanTs;
+                  // Clear stale entries (>30 min)
+                  if (_age > 30 * 60 * 1000) {
+                    localStorage.removeItem('qr_scan_new_ids');
+                    localStorage.removeItem('qr_scan_missing_ids');
+                    localStorage.removeItem('qr_scan_modified_ids');
+                    localStorage.removeItem('qr_scan_unresolved_draft_ids');
+                    localStorage.removeItem('qr_scan_ts');
+                    var _ci = localStorage.getItem('qr_scan_interval');
+                    if (_ci) clearInterval(parseInt(_ci, 10));
+                    localStorage.removeItem('qr_scan_interval');
+                  } else {
+                    // Highlight matching rows
+                    var _rows = document.querySelectorAll('#models-tbody tr[data-id]');
+                    for (var i = 0; i < _rows.length; i++) {
+                      var rowId = parseInt(_rows[i].getAttribute('data-id'), 10);
+                      if (_newIds.indexOf(rowId) !== -1) {
+                        _rows[i].classList.add('scan-new-row');
+                      } else if (_missIds.indexOf(rowId) !== -1) {
+                        _rows[i].classList.add('scan-missing-row');
+                      } else if (_modIds.indexOf(rowId) !== -1) {
+                        _rows[i].classList.add('scan-modified-row');
+                      } else if (_draftIds.indexOf(rowId) !== -1) {
+                        _rows[i].classList.add('scan-unresolved-draft-row');
+                      }
+                    }
+                  }
+                  // Show clear button if there are highlights
+                  if (_newIds.length > 0 || _missIds.length > 0 || _modIds.length > 0 || _draftIds.length > 0) {
+                    var _chb = document.getElementById('clear-highlight-btn');
+                    if (_chb) _chb.style.display = '';
+                  }
+                } catch(e) { /* invalid data, ignore */ }
+              }
+
+   // Attach delete handlers
             var delBtns = document.querySelectorAll('.model-delete-btn');
             for (var j = 0; j < delBtns.length; j++) {
               delBtns[j].addEventListener('click', function() {
@@ -375,32 +470,94 @@ qrApi('/models/clear-all', {method: 'POST', headers: {'Content-Type': 'applicati
   });
   }
 
-  // Scan button handler
+ // Scan button handler — stores new_model_ids for WebUI highlighting
  var _sbn = document.getElementById('scan-btn');
-  if (_sbn) {
-  _sbn.addEventListener('click', function() {
-    var resultDiv = document.getElementById('scan-result');
-    var nodeSelect = document.getElementById('scan-node');
-    var nodeId = nodeSelect.value;
-    if (!nodeId) { alert('Please select a host to scan.'); return; }
-    resultDiv.innerHTML = '<span class="badge badge-other">Scanning...</span>';
-qrApi('/models/scan?node=' + encodeURIComponent(nodeId), {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({})})
-       .then(function(data) {
-        if (data.status === 'ok') {
-          var d = data.data || {};
-          resultDiv.innerHTML = '<p>New: ' + (d.new_models || 0) + '</p>' +
-            '<p>Existing: ' + (d.existing_models || 0) + '</p>' +
-            '<p>Files found: ' + (d.total_files_found || 0) + '</p>';
-          setTimeout(function() { location.reload(); }, 1500);
-        } else {
-          resultDiv.innerHTML = '<p style="color:#f44336;">Scan failed: ' +
-            (data.message || 'Unknown') + '</p>';
-        }
-      }).catch(function(e) {
-       resultDiv.innerHTML = '<p style="color:#f44336;">Error: ' + e.message + '</p>';
-      });
-  });
-  }
+   if (_sbn) {
+   _sbn.addEventListener('click', function() {
+     var resultDiv = document.getElementById('scan-result');
+      var countdownDiv = document.getElementById('scan-countdown');
+      var nodeSelect = document.getElementById('scan-node');
+      var nodeId = nodeSelect.value;
+      if (!nodeId) { alert('Please select a host to scan.'); return; }
+      resultDiv.innerHTML = '<span class="badge badge-other">Scanning...</span>';
+  qrApi('/models/scan?node=' + encodeURIComponent(nodeId), {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({})})
+          .then(function(data) {
+           if (data.status === 'ok') {
+             var d = data.data || {};
+             var newCount = d.new_models || 0;
+             var missingCount = d.missing_models || 0;
+             var existingCount = d.existing_models || 0;
+             var totalFiles = d.total_files_found || 0;
+             var modifiedCount = d.modified_model_ids ? d.modified_model_ids.length : 0;
+             var draftCount = d.unresolved_draft_ids ? d.unresolved_draft_ids.length : 0;
+             var html = '<p>New: ' + newCount + '</p>' +
+               '<p>Missing: ' + missingCount + '</p>' +
+               '<p>Existing: ' + existingCount + '</p>' +
+               (modifiedCount > 0 ? '<p class="scan-modified-row" style="padding:2px 4px;margin:0;display:inline-block;">Modified on disk: ' + modifiedCount + '</p>' : '') +
+               (draftCount > 0 ? '<p class="scan-unresolved-draft-row" style="padding:2px 4px;margin:0;display:inline-block;">Unresolved draft refs: ' + draftCount + '</p>' : '') +
+               '<p>Files found: ' + totalFiles + '</p>';
+             resultDiv.innerHTML = html;
+             // Store model IDs for highlighting after reload
+             if (d.new_model_ids && d.new_model_ids.length > 0) {
+               localStorage.setItem('qr_scan_new_ids', JSON.stringify(d.new_model_ids));
+             } else {
+               localStorage.removeItem('qr_scan_new_ids');
+             }
+             if (d.missing_model_ids && d.missing_model_ids.length > 0) {
+               localStorage.setItem('qr_scan_missing_ids', JSON.stringify(d.missing_model_ids));
+             } else {
+               localStorage.removeItem('qr_scan_missing_ids');
+             }
+             if (d.modified_model_ids && d.modified_model_ids.length > 0) {
+               localStorage.setItem('qr_scan_modified_ids', JSON.stringify(d.modified_model_ids));
+             } else {
+               localStorage.removeItem('qr_scan_modified_ids');
+             }
+             if (d.unresolved_draft_ids && d.unresolved_draft_ids.length > 0) {
+               localStorage.setItem('qr_scan_unresolved_draft_ids', JSON.stringify(d.unresolved_draft_ids));
+             } else {
+               localStorage.removeItem('qr_scan_unresolved_draft_ids');
+             }
+             var hasHighlights = (d.new_model_ids && d.new_model_ids.length > 0) ||
+                                 (d.missing_model_ids && d.missing_model_ids.length > 0) ||
+                                 (d.modified_model_ids && d.modified_model_ids.length > 0) ||
+                                 (d.unresolved_draft_ids && d.unresolved_draft_ids.length > 0);
+             if (hasHighlights) {
+               localStorage.setItem('qr_scan_ts', String(Date.now()));
+               // Show countdown banner
+               countdownDiv.style.display = 'block';
+               var bannerText = '';
+               if (newCount > 0) bannerText += newCount + ' new model(s). ';
+               if (missingCount > 0) bannerText += missingCount + ' missing. ';
+               if (modifiedCount > 0) bannerText += modifiedCount + ' modified on disk. ';
+               if (draftCount > 0) bannerText += draftCount + ' unresolved draft refs. ';
+               countdownDiv.innerHTML = '<span class="countdown-timer">Reloading in <span id="cd-count">5</span>s — </span>' +
+                 bannerText + '<button class="btn-skip" onclick="qrCancelReload()">Skip reload</button>';
+               // Countdown timer
+               var _cd = 5;
+               var _cdInterval = setInterval(function() {
+                 _cd--;
+                 var cdEl = document.getElementById('cd-count');
+                 if (cdEl) cdEl.textContent = _cd;
+                 if (_cd <= 0) {
+                   clearInterval(_cdInterval);
+                   location.reload();
+                 }
+               }, 1000);
+              // Store interval ID for skip button
+              localStorage.setItem('qr_scan_interval', String(_cdInterval));
+            } else {
+             setTimeout(function() { location.reload(); }, 1500);
+           }
+         } else {
+           resultDiv.innerHTML = '<p style="color:#f44336;">Scan failed: ' +
+             (data.message || 'Unknown') + '</p>';
+         }
+       }).catch(function(e) {
+        resultDiv.innerHTML = '<p style="color:#f44336;">Error: ' + e.message + '</p>';
+       });
+   });
+   }
 
   // Clear filter button handler — clears q, engine, draft_filter, and inactive filter
    var _cfb = document.getElementById('clear-filter-btn');
@@ -435,7 +592,37 @@ qrApi('/models/scan?node=' + encodeURIComponent(nodeId), {method: 'POST', header
    });
    }
 
-  // Expose loadModels globally for other scripts
-   window.loadModels = loadModels;
+// Expose loadModels globally for other scripts
+    window.loadModels = loadModels;
   })();
+
+// Clear highlights button handler — clears all highlight ID storage + DOM classes
+  var _chb = document.getElementById('clear-highlight-btn');
+  if (_chb) {
+    _chb.addEventListener('click', function() {
+      localStorage.removeItem('qr_scan_new_ids');
+      localStorage.removeItem('qr_scan_missing_ids');
+      localStorage.removeItem('qr_scan_modified_ids');
+      localStorage.removeItem('qr_scan_unresolved_draft_ids');
+      localStorage.removeItem('qr_scan_ts');
+      // Remove highlight classes from all rows
+      var _allRows = document.querySelectorAll('#models-tbody tr[data-id]');
+      for (var i = 0; i < _allRows.length; i++) {
+        _allRows[i].classList.remove('scan-new-row', 'scan-missing-row', 'scan-modified-row', 'scan-unresolved-draft-row');
+      }
+      // Hide button
+      this.style.display = 'none';
+    });
+  }
+
+// MODEL-SCAN-1: Cancel reload from scan button (global scope for onclick)
+function qrCancelReload() {
+  var _cdi = localStorage.getItem('qr_scan_interval');
+  if (_cdi) clearInterval(parseInt(_cdi, 10));
+  localStorage.removeItem('qr_scan_interval');
+  // Hide countdown banner
+  var _cd = document.getElementById('scan-countdown');
+  if (_cd) _cd.style.display = 'none';
+  // Don't clear new_ids — keep highlighting on the page
+}
  </script>

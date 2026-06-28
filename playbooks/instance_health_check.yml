@@ -1,6 +1,6 @@
 # @name: Instance Health Check
-# @playbook_id: INSTANCE_HEALTH_CHECK_V1
-# @version: 1
+# @playbook_id: instance_health_check
+# @version: 2
 # @timeout: 30
 # instance_health_check.yml — Unified health check for ANY qr-* service
 # Input variables: unit_name (e.g., qr-123-llama_server), engine_type, node_id, instance_id

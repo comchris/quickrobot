@@ -1,0 +1,13 @@
+# @name: Shutdown Node
+# @playbook_id: shutdown_node
+# @version: 2
+# @timeout: 180
+# shutdown_node.yml — Async fire-and-forget shutdown of a remote node
+- hosts: "{{ inventory_host }}"
+  become: yes
+  gather_facts: no
+  tasks:
+    - name: Shutdown node (async fire-and-forget)
+      ansible.builtin.command: /sbin/shutdown -h now "Shutdown initiated by quickrobot"
+      async: 10
+      poll: 0

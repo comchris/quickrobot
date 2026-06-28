@@ -5,10 +5,97 @@
   tr.task-failed td:first-child { color: #c62828; font-weight: 600; }
   tr.task-stuck { background-color: #fff3e0 !important; }
   tr.task-stuck td:first-child { color: #e65100; font-weight: 600; }
+  /* Tab navigation */
+  .task-tabs { display:flex;gap:4px;margin-bottom:12px; }
+  .task-tab { padding:6px 14px;border:1px solid #ccc;border-radius:4px 4px 0 0;background:#eee;cursor:pointer;font-size:0.9em;color:#666; }
+  .task-tab.active { background:#fff;color:#1565c0;font-weight:600;border-bottom-color:#fff; }
+  .tab-panel { display:none; }
+  .tab-panel.active { display:block; }
+  .job-detail-row { display:none; }
+  .job-detail-row.expanded { display:table-row; }
+  .job-detail-cell { padding:12px !important; }
+  .task-stage-bar { display:inline-block;height:6px;border-radius:3px;margin-right:8px;vertical-align:middle; }
+  .stage-queued { background:#ccc; }
+  .stage-running { background:#1565c0;animation:stagePulse 2s infinite; }
+  .stage-completed { background:#4caf50; }
+  .stage-failed { background:#f44336; }
+  .stage-stuck { background:#ff9800;animation:stagePulse 1.5s infinite; }
+  @keyframes stagePulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
 </style>
+<!-- Tab navigation -->
+<div class="task-tabs">
+  <div class="task-tab active" data-tab="staged" onclick="switchTab('staged')">Job Log{{ ' (' ~ jobs_running ~ ' running)' if jobs_running }}</div>
+  <div class="task-tab" data-tab="opslog" onclick="switchTab('opslog')">Task Log</div>
+</div>
+
+<!-- Tab 1: Job Log (RUNNER-1) -->
+<div id="tab-staged" class="tab-panel active">
 <!-- Single row header with controls and filters -->
 <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
-  <h1 style="margin:0;font-size:1.3em;">Running Tasks</h1>
+  <h1 style="margin:0;font-size:1.3em;">Job Log</h1>
+  {% if jobs_running %}
+  <span class="badge" style="background:#1565c0;color:#fff;padding:2px 8px;border-radius:10px;font-size:0.8em;">{{ jobs_running }} running</span>
+  {% endif %}
+  <form method="get" action="/webui/qr-tasks" id="filter-form-jobs" style="display:flex;gap:8px;align-items:center;margin:0;">
+    <label style="font-size:0.85em;color:#666;">Status:</label>
+     <select name="job_status" id="filter-job-status" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+      <option value="">All</option>
+      <option value="not_completed">All except completed</option>
+      <option value="running">Running</option>
+      <option value="completed">Completed</option>
+      <option value="failed">Failed</option>
+      <option value="error">Error</option>
+    </select>
+    <label style="font-size:0.85em;color:#666;">Job Type:</label>
+    <select name="job_type" id="filter-job-type" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+      <option value="">All types</option>
+      <option value="deploy">Deploy</option>
+      <option value="reconfigure">Reconfigure</option>
+      <option value="rebuild">Rebuild</option>
+    </select>
+    <button type="submit" class="btn btn-primary" style="padding:4px 10px;font-size:0.85em;">Apply &amp; Refresh</button>
+  </form>
+  <div style="display:flex;gap:6px;align-items:center;margin-left:auto;">
+    <select id="cleanup-minutes" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+      <option value="15">15m</option>
+      <option value="30" selected>30m</option>
+      <option value="60">1h</option>
+      <option value="180">3h</option>
+      <option value="0">All</option>
+    </select>
+    <select id="cleanup-job-status" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+      <option value="">All states</option>
+      <option value="completed">Completed</option>
+      <option value="failed">Failed</option>
+      <option value="error">Error</option>
+      <option value="running">Running</option>
+      <option value="queued">Queued</option>
+    </select>
+    <button id="cleanup-jobs-btn" class="btn btn-danger" style="font-size:0.85em;padding:4px 10px;">Remove Selected</button>
+    <span id="cleanup-status" style="font-size:0.8em;color:#666;"></span>
+    <label style="font-size:0.8em;color:#666;">Auto:</label>
+    <select id="auto-refresh-jobs" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+      <option value="0">Off</option>
+      <option value="10">10s</option>
+      <option value="30" selected>30s</option>
+    </select>
+    <span id="jobs-refresh-status" style="font-size:0.8em;color:#888;"></span>
+  </div>
+</div>
+
+<table id="jobs-table">
+<thead><tr><th class="sortable" data-col="0">Job ID</th><th class="sortable" data-col="1" data-sort="started">Started</th><th class="sortable" data-col="2">Type</th><th class="sortable" data-col="3">Instance</th><th class="sortable" data-col="4">Host</th><th class="sortable" data-col="5">Engine</th><th class="sortable" data-col="6">Status</th><th class="sortable" data-col="7" data-sort="duration">Duration</th><th></th></tr></thead>
+<tbody id="jobs-tbody">
+<tr><td colspan="8" style="text-align:center;color:#888;">Loading jobs...</td></tr>
+</tbody>
+</table>
+</div>
+
+<!-- Tab 2: Task Log (Legacy qr_actions) -->
+<div id="tab-opslog" class="tab-panel">
+<!-- Single row header with controls and filters -->
+<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
+  <h1 style="margin:0;font-size:1.3em;">Task Log</h1>
   {% if running_count %}
   <span class="badge" style="background:#1565c0;color:#fff;padding:2px 8px;border-radius:10px;font-size:0.8em;">{{ running_count }} running</span>
   {% endif %}
@@ -24,21 +111,28 @@
       <option value="failed" {% if filter_status == 'failed' %}selected="selected"{% endif %}>Failed</option>
       <option value="stuck" {% if filter_status == 'stuck' %}selected="selected"{% endif %}>Stuck</option>
     </select>
-
     <label style="font-size:0.85em;color:#666;">Limit:</label>
     <select name="limit" id="filter-limit" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
-      <option value="25" {% if not filter_status %}{% endif %}>25</option>
-      <option value="50" {% if filter_limit == 50 or not filter_status %}selected="selected"{% endif %}>50</option>
+      <option value="25">25</option>
+      <option value="50" {% if filter_limit == 50 %}selected="selected"{% endif %}>50</option>
       <option value="100" {% if filter_limit == 100 %}selected="selected"{% endif %}>100</option>
     </select>
-
     <button type="submit" class="btn btn-primary" style="padding:4px 10px;font-size:0.85em;">Apply &amp; Refresh</button>
     {% if filter_status %}
     <a href="/webui/qr-tasks" class="btn" style="padding:4px 10px;font-size:0.85em;text-decoration:none;background:#999;color:#fff;">Clear</a>
     {% endif %}
   </form>
-  <div style="margin-left:auto;display:flex;gap:6px;align-items:center;">
-    <label style="font-size:0.8em;color:#666;">Auto-refresh:</label>
+  <div style="display:flex;gap:6px;align-items:center;margin-left:auto;">
+    <select id="clear-days" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+      <option value="1" selected>1d</option>
+      <option value="7">7d</option>
+      <option value="14">14d</option>
+      <option value="30">30d</option>
+      <option value="0">All</option>
+    </select>
+    <button id="clear-tasks-btn" class="btn btn-danger" style="font-size:0.85em;padding:4px 10px;">Remove Selected</button>
+    <span id="clear-status" style="font-size:0.8em;color:#666;"></span>
+    <label style="font-size:0.8em;color:#666;">Auto:</label>
     <select id="auto-refresh" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
       <option value="0">Off</option>
       <option value="10">10s</option>
@@ -46,20 +140,6 @@
     </select>
     <span id="refresh-status" style="font-size:0.8em;color:#888;"></span>
   </div>
-</div>
-
-<!-- Clear logs controls -->
-<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
-  <label style="font-size:0.8em;color:#666;">Clear completed &gt;:</label>
-  <select id="clear-days" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
-    <option value="1" selected>1d</option>
-    <option value="7">7d</option>
-    <option value="14">14d</option>
-    <option value="30">30d</option>
-    <option value="0">All</option>
-  </select>
-  <button id="clear-tasks-btn" class="btn btn-danger" style="font-size:0.85em;padding:4px 10px;">Clear Selected</button>
-  <span id="clear-status" style="font-size:0.8em;color:#666;"></span>
 </div>
 
 <table>
@@ -81,12 +161,516 @@
 {% endfor %}
 </tbody>
 </table>
+</div>
+<!-- /tab-opslog -->
 
-<!-- Column sorting JS — sortable: 0(ID),1(Started),2(Action),3(Node),4(Instance),5(Status) -->
+<!-- Tab-switching and jobs loading JS -->
 <script>
+// Tab switching
+function switchTab(tab) {
+  document.querySelectorAll('.task-tab').forEach(function(t){ t.classList.remove('active'); });
+  document.querySelectorAll('.tab-panel').forEach(function(p){ p.classList.remove('active'); });
+  document.querySelector('.task-tab[data-tab="'+tab+'"]').classList.add('active');
+  var panel = document.getElementById('tab-'+tab);
+  if (panel) panel.classList.add('active');
+  qrSettings.set('qr_tasks', 'active_tab', tab);
+}
+
+// Load saved tab on page load
+(function() {
+  var saved = qrSettings.get('qr_tasks', 'active_tab', 'staged');
+  switchTab(saved);
+})();
+
+// Sync job filter selects with URL params (fixes: filter doesn't persist on nav)
+(function() {
+  var params = new URLSearchParams(window.location.search);
+  var statusSel = document.getElementById('filter-job-status');
+  var typeSel = document.getElementById('filter-job-type');
+  if (statusSel && params.get('job_status')) statusSel.value = params.get('job_status');
+  if (typeSel && params.get('job_type')) typeSel.value = params.get('job_type');
+})();
+
+// --- RUNNER-1 Jobs Loading ---
+var jobsRefreshInterval = null;
+var expandedJobIds = {};
+
+function loadJobs() {
+  var tbody = document.getElementById('jobs-tbody');
+  if (!tbody) return;
+
+  // Read filter params from URL (form submit) or defaults
+  var params = new URLSearchParams(window.location.search);
+  var jobStatus = params.get('job_status') || '';
+  var jobType = params.get('job_type') || '';
+
+  // Build query string
+  var qs = [];
+  if (jobStatus) {
+    if (jobStatus === 'not_completed') {
+      // Special: fetch all, filter client-side
+    } else {
+      qs.push('status=' + encodeURIComponent(jobStatus));
+    }
+  }
+  if (jobType) qs.push('job_type=' + encodeURIComponent(jobType));
+  var query = qs.length ? '?' + qs.join('&') : '';
+
+  // Fetch jobs list
+  qrApi('/jobs' + query)
+    .then(function(data) {
+      if (data.status !== 'ok') {
+        tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:#f44336;">Failed to load jobs</td></tr>';
+        return;
+      }
+      var jobs = data.items || [];
+
+      // Client-side filter for "not_completed" (API doesn't support compound filters)
+      if (jobStatus === 'not_completed') {
+        jobs = jobs.filter(function(j){ return j.status !== 'completed'; });
+      }
+
+      if (jobs.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:#888;">No jobs recorded</td></tr>';
+        updateJobsRefreshStatus(0, 0);
+        return;
+      }
+      // Sort by created_at desc (newest first)
+      jobs.sort(function(a,b){
+        var ta = a.created_at || '';
+        var tb = b.created_at || '';
+        return tb.localeCompare(ta);
+      });
+
+      var html = '';
+      jobs.forEach(function(job){
+        var statusClass = 'stage-' + job.status;
+        var dur = calcDuration(job.started_at, job.finished_at);
+        var started = fmtCompactDisplay(job.started_at);
+        html += renderJobRow(job, statusClass, dur, started);
+      });
+
+      // Check if any jobs are currently expanded (preserve detail rows)
+      var hasExpanded = Object.keys(expandedJobIds).some(function(id){ return expandedJobIds[id]; });
+
+      if (hasExpanded) {
+        // Rebuild parent rows only — detail rows stay in DOM for expanded jobs
+        var fragment = document.createDocumentFragment();
+        var tmp = document.createElement('tbody');
+        tmp.innerHTML = html;
+        while (tmp.firstChild) fragment.appendChild(tmp.firstChild);
+        tbody.innerHTML = '';
+        tbody.appendChild(fragment);
+        // Reattach event listeners on newly created rows
+        rebindJobClicks(tbody);
+        // Reload tasks for expanded jobs so status bars update
+        Object.keys(expandedJobIds).forEach(function(id) {
+          if (expandedJobIds[id]) loadJobTasks(parseInt(id, 10));
+        });
+      } else {
+        // No expanded jobs — safe to do full replacement
+        tbody.innerHTML = html;
+      }
+
+      // Re-apply sort if saved
+      var _sortCol = parseInt(qrSettings.get('qr_tasks_jobs', 'sort_col', '-1'), 10);
+      var _sortDir = qrSettings.get('qr_tasks_jobs', 'sort_dir', '');
+      if (_sortCol >= 0 && _sortDir) {
+        sortJobsTable(_sortCol, _sortDir);
+        applyJobsArrows(_sortCol, _sortDir);
+      }
+
+      // Count running/failed
+      var running = jobs.filter(function(j){ return j.status === 'running'; }).length;
+      var failed = jobs.filter(function(j){ return j.status === 'failed' || j.status === 'error'; }).length;
+      updateJobsRefreshStatus(running, failed);
+    })
+    .catch(function(e) {
+      tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:#f44336;">Load error: ' + e + '</td></tr>';
+    });
+}
+
+function renderJobRow(job, statusClass, dur, started) {
+  var instLink = job.instance_id ? '<a href="/webui/instances/' + job.instance_id + '">' + job.instance_id + '</a>' : '-';
+  var hostLink = job.node_id ? '<a href="/webui/hosts">' + (job.node_hostname || job.node_name || '-') + '</a>' : '-';
+  var statusHtml = '<span class="task-stage-bar ' + statusClass + '"></span>' + (job.status || 'unknown');
+  var expandIcon = expandedJobIds[job.id] ? '\u25B2' : '\u25BC';
+
+  var row = '<tr data-job-id="' + job.id + '" data-detail-row="job-detail-' + job.id + '" onclick="toggleJobDetail(' + job.id + ')">' +
+    '<td>' + job.id + '</td>' +
+    '<td data-sort="' + (job.started_at || '') + '">' + started + '</td>' +
+    '<td>' + (job.job_type || '-') + '</td>' +
+    '<td>' + instLink + '</td>' +
+    '<td>' + hostLink + '</td>' +
+    '<td>' + (job.engine_type_name || '-') + '</td>' +
+    '<td>' + statusHtml + '</td>' +
+    '<td data-sort="' + parseDurationToSeconds(dur) + '">' + dur + '</td>' +
+    '<td><span class="expand-arrow" style="font-size:0.8em;color:#888;margin-right:6px;cursor:pointer;" onclick="event.stopPropagation();toggleJobDetail(' + job.id + ')">' + expandIcon + ' tasks</span>' +
+    (job.status !== 'running' ? '<button class="btn-task-action" data-job-id="' + job.id + '" data-action="delete-job" style="font-size:0.75em;padding:1px 6px;margin-left:4px;background:#f44336;color:#fff;border:none;border-radius:2px;cursor:pointer;" title="Delete this job and all its tasks">Del Job</button>' : '') +
+    '</td>' +
+    '</tr>';
+
+  // Expanded detail row (tasks) — uses data-parent to stay with parent during sort
+  var detailRow = '<tr class="job-detail-row' + (expandedJobIds[job.id] ? ' expanded' : '') + '" data-parent="' + job.id + '" id="job-detail-' + job.id + '">' +
+    '<td colspan="9" class="job-detail-cell">' +
+    '<div style="font-size:0.85em;color:#666;margin-bottom:6px;">Stage Progress — click row to expand/collapse</div>' +
+    '<table style="width:100%;border-collapse:collapse;font-size:0.9em;">' +
+    '<thead><tr style="border-bottom:1px solid #ddd;"><th style="text-align:left;padding:2px 6px;width:30px;">Task</th>' +
+    '<th style="text-align:left;padding:2px 6px;">Stage</th>' +
+    '<th style="text-align:left;padding:2px 6px;">Playbook</th>' +
+    '<th style="text-align:left;padding:2px 6px;width:80px;">Status</th>' +
+    '<th style="text-align:left;padding:2px 6px;width:100px;">Started</th>' +
+    '<th style="text-align:left;padding:2px 6px;width:80px;">Duration</th>' +
+    '<th style="text-align:left;padding:2px 6px;width:90px;">Actions</th></tr></thead>' +
+    '<tbody id="job-tasks-' + job.id + '"><tr><td colspan="6" style="padding:4px 6px;color:#888;">Loading tasks...</td></tr></tbody></table></td></tr>';
+
+  return row + detailRow;
+}
+
+function toggleJobDetail(jobId) {
+  var detail = document.getElementById('job-detail-' + jobId);
+  if (!detail) return;
+
+  if (expandedJobIds[jobId]) {
+    // Collapse
+    expandedJobIds[jobId] = false;
+    detail.classList.remove('expanded');
+    updateExpandArrow(jobId, false);
+  } else {
+    // Expand — load tasks if not already loaded
+    expandedJobIds[jobId] = true;
+    detail.classList.add('expanded');
+    updateExpandArrow(jobId, true);
+    // Load tasks for this job
+    loadJobTasks(jobId);
+  }
+}
+
+function updateExpandArrow(jobId, show) {
+  var parentRow = document.querySelector('tr[data-job-id="' + jobId + '"]');
+  if (!parentRow) return;
+  var arrowCell = parentRow.querySelector('.expand-arrow');
+  if (arrowCell) {
+    arrowCell.innerHTML = (show ? '\u25B2' : '\u25BC') + ' tasks';
+  }
+}
+
+// Rebind onclick handlers after DOM replacement (innerHTML clears event listeners)
+function rebindJobClicks(tbody) {
+  var rows = tbody.querySelectorAll('tr[data-job-id]');
+  rows.forEach(function(row) {
+    var jobId = row.getAttribute('data-job-id');
+    // Remove existing inline handler by cloning, then re-add onclick
+    var clone = row.cloneNode(true);
+    row.parentNode.replaceChild(clone, row);
+    clone.setAttribute('onclick', 'toggleJobDetail(' + jobId + ')');
+  });
+}
+
+function loadJobTasks(jobId) {
+  var tbody = document.getElementById('job-tasks-' + jobId);
+  if (!tbody) return;
+
+  qrApi('/tasks?job_id=' + jobId)
+    .then(function(data) {
+      if (data.status !== 'ok') {
+        tbody.innerHTML = '<tr><td colspan="6" style="color:#f44336;">Failed to load tasks</td></tr>';
+        return;
+      }
+      var tasks = data.items || [];
+      if (tasks.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" style="color:#888;">No stages</td></tr>';
+        return;
+      }
+      // Sort by created_at asc (oldest first = execution order)
+      tasks.sort(function(a,b){ return (a.created_at||'').localeCompare(b.created_at||''); });
+
+      var html = '';
+      tasks.forEach(function(task){
+        var stageClass = 'stage-' + (task.status === 'running' ? 'running' : task.status);
+        var started = task.started_at ? fmtCompactDisplay(task.started_at) : '-';
+        var dur = calcDuration(task.started_at, task.finished_at);
+        var playbook = task.playbook || '-';
+
+        // Action buttons: cancel (for running tasks) and delete (for completed/failed)
+        var actionBtns = '';
+        if (task.status === 'running') {
+          actionBtns = '<button class="btn-task-action" data-task-id="' + task.id + '" data-action="cancel" style="font-size:0.75em;padding:1px 6px;margin-left:4px;background:#ff9800;color:#fff;border:none;border-radius:2px;cursor:pointer;" title="Cancel this task">Cancel</button>';
+        } else if (task.status === 'completed' || task.status === 'failed') {
+          actionBtns = '<button class="btn-task-action" data-task-id="' + task.id + '" data-action="delete" style="font-size:0.75em;padding:1px 6px;margin-left:4px;background:#f44336;color:#fff;border:none;border-radius:2px;cursor:pointer;" title="Delete this task">Delete</button>';
+        }
+
+        html += '<tr style="border-bottom:1px solid #eee;">' +
+          '<td style="padding:2px 6px;width:30px;font-weight:600;color:#666;">' + task.id + '</td>' +
+          '<td style="padding:2px 6px;"><span class="task-stage-bar ' + stageClass + '"></span><strong>' + (task.stage || '-') + '</strong></td>' +
+          '<td style="padding:2px 6px;color:#888;font-size:0.85em;">' + playbook + '</td>' +
+          '<td style="padding:2px 6px;color:' + taskColor(task.status) + '">' + (task.status || '-') + (task.status === 'failed' ? ' (' + (task.error_message||'') + ')' : '') + '</td>' +
+          '<td style="padding:2px 6px;font-size:0.85em;color:#888;">' + started + '</td>' +
+          '<td style="padding:2px 6px;font-size:0.85em;color:#888;">' + dur + '</td>' +
+          '<td style="padding:2px 6px;width:90px;text-align:right;">' + actionBtns + '</td>' +
+          '</tr>';
+      });
+      tbody.innerHTML = html;
+    })
+    .catch(function(e) {
+      tbody.innerHTML = '<tr><td colspan="6" style="color:#f44336;">Load error: ' + e + '</td></tr>';
+    });
+}
+
+// Delegated click handler for per-task cancel/delete buttons
+document.addEventListener('click', function(e) {
+  var btn = e.target.closest('.btn-task-action');
+  if (!btn) return;
+
+  var taskId = parseInt(btn.getAttribute('data-task-id'), 10);
+  var action = btn.getAttribute('data-action');
+
+  if (action === 'cancel') {
+    if (!confirm('Cancel this task? Status will be reset to queued for scheduler re-pickup.')) return;
+    qrApi('/tasks/' + taskId + '/cancel', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({})
+    }).then(function(data) {
+      if (data.status === 'ok') {
+        var jobId = btn.closest('table').id.replace('job-tasks-', '');
+        loadJobTasks(parseInt(jobId, 10));
+      } else {
+        alert('Cancel failed: ' + (data.message || JSON.stringify(data)));
+      }
+    }).catch(function(e) {
+      alert('Request failed: ' + e);
+    });
+  } else if (action === 'delete') {
+    if (!confirm('Delete this task and its playbook run data?')) return;
+    qrApi('/tasks/' + taskId + '/delete', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({})
+    }).then(function(data) {
+      if (data.status === 'ok') {
+        var jobId = btn.closest('table').id.replace('job-tasks-', '');
+        loadJobTasks(parseInt(jobId, 10));
+      } else {
+        alert('Delete failed: ' + (data.message || JSON.stringify(data)));
+      }
+    }).catch(function(e) {
+      alert('Request failed: ' + e);
+    });
+  } else if (action === 'delete-job') {
+    var jobId = parseInt(btn.getAttribute('data-job-id'), 10);
+    if (!confirm('Delete this job (ID ' + jobId + ') and all its tasks?')) return;
+    // Delete each task first, then delete the job itself
+    var deletePromise = qrApi('/jobs/' + jobId, {
+      method: 'DELETE',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({})
+    });
+    deletePromise.then(function(data) {
+      if (data.status === 'ok') {
+        loadJobs();
+      } else {
+        alert('Delete job failed: ' + (data.message || JSON.stringify(data)));
+      }
+    }).catch(function(e) {
+      alert('Request failed: ' + e);
+    });
+  }
+});
+
+function calcDuration(started, finished) {
+  if (!started) return '-';
+  // Normalize ISO: SQLite stores naive UTC ('2026-06-19T06:06:00'), JS treats as local.
+  // Replace with '+00:00' suffix so JS parses as UTC.
+  var s = qrNormIso(started);
+  var start = new Date(s);
+  if (isNaN(start.getTime())) return '-';
+  var end = finished ? new Date(qrNormIso(finished)) : null;
+  if (end && !isNaN(end.getTime())) {
+    var diff = Math.floor((end - start) / 1000);
+    return formatDuration(diff);
+  }
+  // Still running — compute since start
+  var diff = Math.floor((Date.now() - start.getTime()) / 1000);
+  return formatDuration(diff) + ' (active)';
+}
+
+function formatDuration(seconds) {
+  if (seconds < 0) return '-';
+  if (seconds < 60) return seconds + 's';
+  var m = Math.floor(seconds / 60);
+  var s = seconds % 60;
+  if (m < 60) return m + 'm ' + s + 's';
+  var h = Math.floor(m / 60);
+  var rm = m % 60;
+  return h + 'h ' + rm + 'm ' + s + 's';
+}
+
+function fmtCompactDisplay(iso) {
+  if (!iso || iso === '-') return '-';
+  // Normalize ISO: SQLite stores naive UTC, JS treats as local without suffix.
+  var normIso = qrNormIso(iso);
+  var ts = new Date(normIso);
+  if (isNaN(ts.getTime())) return iso;
+  var now = new Date();
+  var diff = Math.floor((now - ts) / 1000);
+  if (diff < 0) return iso;
+  var relStr = qrFmtRelative(iso);
+  // Use relative time for recent, absolute for older
+  if (diff < 86400) return relStr !== '-' ? relStr : iso;
+  var tzName = typeof window._qr_tz_name !== 'undefined' ? window._qr_tz_name : null;
+  var fmtOpts = { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false };
+  if (tzName) fmtOpts.timeZone = tzName;
+  return ts.toLocaleString(undefined, fmtOpts);
+}
+
+function taskColor(status) {
+  switch(status) {
+    case 'running': return '#1565c0';
+    case 'completed': return '#2e7d32';
+    case 'failed': case 'error': return '#c62828';
+    case 'stuck': return '#e65100';
+    default: return '#666';
+  }
+}
+
+function updateJobsRefreshStatus(running, failed) {
+  var el = document.getElementById('jobs-refresh-status');
+  if (!el) return;
+  var parts = [];
+  if (running > 0) parts.push(running + ' running');
+  if (failed > 0) parts.push(failed + ' failed');
+  el.textContent = parts.join(', ') || '';
+}
+
+// --- Jobs table sorting ---
+var jobsThs = document.querySelectorAll('#jobs-table .sortable');
+(function() {
+  jobsThs.forEach(function(th) {
+    th.style.cursor = 'pointer';
+    th.addEventListener('click', function() {
+      var col = parseInt(this.getAttribute('data-col'), 10);
+      var dir = qrSettings.get('qr_tasks_jobs', 'sort_dir', '') === 'desc' ? 'asc' : 'desc';
+      qrSettings.set('qr_tasks_jobs', 'sort_col', col.toString());
+      qrSettings.set('qr_tasks_jobs', 'sort_dir', dir);
+      sortJobsTable(col, dir);
+      applyJobsArrows(col, dir);
+    });
+  });
+})();
+
+function parseDurationToSeconds(durStr) {
+  if (!durStr || durStr === '-') return 0;
+  var total = 0;
+  var hMatch = durStr.match(/(\d+)h/); if (hMatch) total += parseInt(hMatch[1]) * 3600;
+  var mMatch = durStr.match(/(\d+)m/); if (mMatch) total += parseInt(mMatch[1]) * 60;
+  var sMatch = durStr.match(/(\d+)s$/); if (sMatch) total += parseInt(sMatch[1]);
+  return total;
+}
+
+function sortJobsTable(col, dir) {
+  var table = document.getElementById('jobs-table');
+  if (!table) return;
+  var tbody = document.getElementById('jobs-tbody');
+  if (!tbody) return;
+
+  // Collect pairs of [parentRow, detailRow] so they stay together during sort
+  var parentRows = Array.from(tbody.querySelectorAll('tr[data-job-id]'));
+  var pairs = [];
+  parentRows.forEach(function(parent) {
+    var detailId = parent.getAttribute('data-detail-row');
+    var detail = detailId ? document.getElementById(detailId) : null;
+    pairs.push([parent, detail]);
+  });
+
+  // Sort only the parent rows
+  pairs.sort(function(a, b) {
+    var pa = a[0], pb = b[0];
+    var cellA = pa.cells[col] ? (pa.cells[col].getAttribute('data-sort') || pa.cells[col].textContent.trim()) : '';
+    var cellB = pb.cells[col] ? (pb.cells[col].getAttribute('data-sort') || pb.cells[col].textContent.trim()) : '';
+    // Col 0: Job ID — numeric
+    if (col === 0) {
+      return dir === 'asc' ? (parseInt(cellA, 10)||0) - (parseInt(cellB,10)||0) : (parseInt(cellB,10)||0) - (parseInt(cellA,10)||0);
+    }
+    // Col 1: Started — ISO timestamp lexicographic sort
+    if (col === 1) {
+      return dir === 'asc' ? cellA.localeCompare(cellB) : cellB.localeCompare(cellA);
+    }
+    // Col 3: Instance ID — numeric
+    if (col === 3) {
+      var instA = parseInt(cellA, 10) || 0;
+      var instB = parseInt(cellB, 10) || 0;
+      return dir === 'asc' ? instA - instB : instB - instA;
+    }
+    // Col 4: Host — alphabetical
+    if (col === 4) {
+      return dir === 'asc' ? cellA.localeCompare(cellB) : cellB.localeCompare(cellA);
+    }
+    // Col 7: Duration — numeric via seconds
+    if (col === 7) {
+      var durA = parseDurationToSeconds(cellA);
+      var durB = parseDurationToSeconds(cellB);
+      return dir === 'asc' ? durA - durB : durB - durA;
+    }
+    // Other cols (2=Type, 5=Engine, 6=Status): alphabetical
+    return dir === 'asc' ? cellA.localeCompare(cellB) : cellB.localeCompare(cellA);
+  });
+
+  // Re-append in sorted order, parent then detail
+  pairs.forEach(function(pair) {
+    tbody.appendChild(pair[0]);
+    if (pair[1]) tbody.appendChild(pair[1]);
+  });
+}
+
+function applyJobsArrows(col, dir) {
+  jobsThs.forEach(function(t) {
+    t.textContent = t.textContent.replace(/\s*[\u2191\u2193]\s*$/, '').trim();
+  });
+  if (jobsThs[col]) {
+    var arrow = dir === 'asc' ? ' \u2191' : ' \u2193';
+    jobsThs[col].textContent = jobsThs[col].textContent.trim() + arrow;
+  }
+}
+
+// --- Jobs auto-refresh ---
+var jobsRefreshInterval = null;
+
+function startJobsAutoRefresh(secs) {
+  clearInterval(jobsRefreshInterval);
+  loadJobs(); // Always initial load
+  if (secs <= 0) {
+    jobsRefreshInterval = null;
+    var el = document.getElementById('jobs-refresh-status');
+    if (el) el.textContent = 'Auto-refresh OFF';
+    return;
+  }
+  jobsRefreshInterval = setInterval(loadJobs, secs * 1000);
+  var el = document.getElementById('jobs-refresh-status');
+  if (el) el.textContent = 'Auto-refresh ON (' + secs + 's)';
+}
+
+// Jobs auto-refresh init — run immediately (DOMContentLoaded already fired)
+(function() {
+  var sel = document.getElementById('auto-refresh-jobs');
+  if (sel) {
+    sel.addEventListener('change', function() {
+      var secs = parseInt(this.value, 10);
+      qrSettings.set('qr_tasks_jobs', 'refresh_sec', secs.toString());
+      startJobsAutoRefresh(secs);
+    });
+    var stored = qrSettings.get('qr_tasks_jobs', 'refresh_sec', '30');
+    if (stored) sel.value = stored;
+  }
+  startJobsAutoRefresh(parseInt(qrSettings.get('qr_tasks_jobs', 'refresh_sec', '30') || '30', 10));
+})();
+
+// --- Legacy Operation Log sorting & refresh ---
 function fmtCompact(iso) {
     if (!iso || iso === '-') return '-';
-    var ts = new Date(iso);
+    // Normalize ISO: SQLite stores naive UTC, JS treats as local without suffix.
+    var normIso = qrNormIso(iso);
+    var ts = new Date(normIso);
     if (isNaN(ts.getTime())) return iso;
     var now = new Date();
     var diff = Math.floor((now - ts) / 1000);
@@ -117,19 +701,19 @@ function fmtCompact(iso) {
   });
 })();
 
-var ths = document.querySelectorAll('.sortable');
-
+// Operation Log sorting — scoped to opslog tab only
+var opslogThs = document.querySelectorAll('#tab-opslog .sortable');
 (function() {
   var _sortCol = parseInt(qrSettings.get('qr_tasks', 'sort_col', '-1'), 10);
   var _sortDir = qrSettings.get('qr_tasks', 'sort_dir', '');
   if (_sortCol >= 0 && _sortDir) {
-    sortTable(_sortCol, _sortDir);
-    applyArrows(_sortCol, _sortDir);
+    sortOpslogTable(_sortCol, _sortDir);
+    applyOpslogArrows(_sortCol, _sortDir);
   }
 })();
 
-function sortTable(col, dir) {
-  var table = ths[0] ? ths[0].closest('table') : null;
+function sortOpslogTable(col, dir) {
+  var table = opslogThs[0] ? opslogThs[0].closest('table') : null;
   if (table) {
     var tbody = table.querySelector('tbody');
     if (tbody) {
@@ -147,23 +731,23 @@ function sortTable(col, dir) {
   }
 }
 
-function applyArrows(col, dir) {
-  ths.forEach(function(t) {
+function applyOpslogArrows(col, dir) {
+  opslogThs.forEach(function(t) {
     t.textContent = t.textContent.replace(/\s*[\u2191\u2193]\s*$/, '').trim();
   });
   var arrow = dir === 'asc' ? ' \u2191' : ' \u2193';
-  ths[col].textContent = ths[col].textContent.trim() + arrow;
+  opslogThs[col].textContent = opslogThs[col].textContent.trim() + arrow;
 }
 
-ths.forEach(function(th) {
+opslogThs.forEach(function(th) {
   th.style.cursor = 'pointer';
   th.addEventListener('click', function() {
     var col = parseInt(this.getAttribute('data-col'), 10);
     var dir = qrSettings.get('qr_tasks', 'sort_dir', '') === 'desc' ? 'asc' : 'desc';
     qrSettings.set('qr_tasks', 'sort_col', col.toString());
     qrSettings.set('qr_tasks', 'sort_dir', dir);
-    sortTable(col, dir);
-    applyArrows(col, dir);
+    sortOpslogTable(col, dir);
+    applyOpslogArrows(col, dir);
   });
 });
 
@@ -231,12 +815,55 @@ document.getElementById('clear-tasks-btn').addEventListener('click', function() 
         statusEl.textContent = 'Error: ' + (data.message || JSON.stringify(data));
       }
       btn.disabled = false;
-      btn.textContent = 'Clear Selected';
+      btn.textContent = 'Remove Selected';
     }).catch(function(e) {
       statusEl.style.color = '#f44336';
       statusEl.textContent = 'Request failed: ' + e;
       btn.disabled = false;
-      btn.textContent = 'Clear Selected';
+      btn.textContent = 'Remove Selected';
     });
 });
+
+// Clear selected jobs button — calls POST /jobs/cleanup?older_than_minutes=N&status=X
+(function() {
+  var btn = document.getElementById('cleanup-jobs-btn');
+  if (!btn) return;
+  btn.addEventListener('click', function() {
+    var mins = parseInt(document.getElementById('cleanup-minutes').value, 10);
+    var jobStatus = document.getElementById('cleanup-job-status').value;
+    var statusEl = document.getElementById('cleanup-status');
+    var self = this;
+    self.disabled = true;
+    self.textContent = 'Clearing...';
+    statusEl.textContent = '';
+
+    // Note: qrApi already prepends '/api/v1', so path is just '/jobs/cleanup'
+    var url = '/jobs/cleanup?older_than_minutes=' + mins;
+    if (jobStatus) url += '&status=' + encodeURIComponent(jobStatus);
+
+    qrApi(url, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({})
+    })
+      .then(function(data) {
+        if (data.status === 'ok') {
+          var count = data.deleted_jobs || 0;
+          statusEl.style.color = '#4caf50';
+          statusEl.textContent = 'Cleared ' + count + ' stale job(s).';
+          setTimeout(function() { loadJobs(); }, 800);
+        } else {
+          statusEl.style.color = '#f44336';
+          statusEl.textContent = 'Error: ' + (data.message || JSON.stringify(data));
+        }
+        self.disabled = false;
+        self.textContent = 'Remove Selected';
+      }).catch(function(e) {
+        statusEl.style.color = '#f44336';
+        statusEl.textContent = 'Request failed: ' + e;
+        self.disabled = false;
+        self.textContent = 'Remove Selected';
+      });
+  });
+})();
 </script>

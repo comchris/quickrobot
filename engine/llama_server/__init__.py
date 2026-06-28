@@ -20,6 +20,7 @@ discovery by the engine loader.
 
 from engine.base import BaseEngine
 
+from lib.qr_engine_ids import QR_DEFAULT_LOCALHOST, QR_ENGINE_PORT_DEFAULTS
 from lib.lib_constants import DEFAULT_ANSIBLE_USER
 
 
@@ -29,7 +30,7 @@ CAPABILITIES = {
     "supports_models": True,
     "supports_presets": True,
     "max_instances": 99,
-    "base_port": 8080,
+    "base_port": QR_ENGINE_PORT_DEFAULTS.get("llama_server", 8080),
     "sub_pages": [
         {"path": "/engines/llama_server/config", "label": "Config", "order": 1},
         {"path": "/engines/llama_server/presets", "label": "Presets", "order": 2},
@@ -67,6 +68,12 @@ class LlamaServerEngine(BaseEngine):
         sm["compiling"] = ["deployed", "error", "timeout"]
         # Allow recovery from build_error to running when health check confirms alive
         sm["build_error"].extend(["updating", "running"])
+        # Loading state: model load in progress after start/restart for llama_server.
+        sm["starting"].append("loading")
+        sm["loading"] = ["running", "error"]
+        # Allow recovery from deploying/configuring to running when health check confirms alive
+        sm["deploying"].append("running")
+        sm["configuring"].append("running")
         return sm
 
     def get_status(self, instance_id, db_path=None):
@@ -112,7 +119,7 @@ class LlamaServerEngine(BaseEngine):
                             "error": f"Instance {instance_id} not found"}
 
                 unit_name = f"qr-{instance_id}-{row['engine_type_name']}"
-                node_host = row["node_host"] or "127.0.0.1"
+                node_host = row["node_host"] or QR_DEFAULT_LOCALHOST
                 node_user = (row["node_user"] if row["node_user"] else None) or DEFAULT_ANSIBLE_USER
                 engine_type = row["engine_type_name"]
 
@@ -136,7 +143,7 @@ class LlamaServerEngine(BaseEngine):
     def _check_remote_service(self, node_host, unit_name, node_user=None):
         """Check remote systemd service and process stats via ansible playbook.
 
-        Uses INSTANCE_HEALTH_CHECK_V1 playbook for unified, interlock-aware health checks.
+        Uses instance_health_check playbook for unified, interlock-aware health checks.
 
         Args:
             node_host: Hostname or IP of the remote node.
@@ -150,8 +157,8 @@ class LlamaServerEngine(BaseEngine):
         import json as _json
 
         try:
-            from quickrobot import _execute_playbook as _ep
-            r = _ep("INSTANCE_HEALTH_CHECK_V1", resolver_type="playbook_id",
+            from qr_api import _execute_playbook as _ep
+            r = _ep("instance_health_check", resolver_type="playbook_id",
                     limit=node_host,
                     extra_vars={"inventory_host": node_host, "unit_name": unit_name},
                     action_type="health_check")
@@ -246,7 +253,7 @@ class LlamaServerEngine(BaseEngine):
                         "error": f"Instance {instance_id} not found"}
 
             port = row["port_assigned"]
-            node_host = row["node_host"] or "127.0.0.1"
+            node_host = row["node_host"] or QR_DEFAULT_LOCALHOST
             state = row["state"] or "unknown"
 
             if state not in ("running", "starting", "deployed", "stopped", "error",
@@ -270,25 +277,21 @@ class LlamaServerEngine(BaseEngine):
 
         except Exception as exc:
             # HTTP check failed — fall back to systemd service state.
-            # During model loading, /health may return different formats across hosts:
-            # some return JSON with "model is loading" message, others return plain text
-            # or error responses. If we can reach the HTTP port, the process IS running.
-            # Only if we can't reach HTTP at all do we check systemd.
+            # systemd check distinguishes "active" (server loading) from
+            # "inactive/failed" (crashed) — replaces old grace-period approach.
             unit_name = f"qr-{instance_id}-llama_server.service"
-            try:
-                from lib.lib_ssh import ssh_run as _ssh_run
-                rc, out, err = _ssh_run(node_host, f"systemctl is-active {unit_name} 2>&1", timeout=5)
-                if rc == 0 and out.strip() == "active":
-                    return {"alive": True, "latency_ms": None, "error": None,
-                            "note": "alive via systemd (HTTP not responding — model may be loading)"}
-            except Exception:
-                pass
-            # If HTTP check failed but we're in a state that expects the service to be
-            # running (loading, starting, updating, etc.), assume it's still loading.
-            # Don't mark as error unless we have evidence the process is actually dead.
-            if state in ("loading", "starting", "updating"):
+            svc = self._check_remote_service(node_host, unit_name)
+            if svc.get("service_state") == "active":
                 return {"alive": True, "latency_ms": None, "error": None,
-                        "note": "HTTP check failed but state indicates still loading (no crash)"}
+                        "note": "alive via systemd (HTTP not responding — model may be loading)"}
+            elif svc.get("service_state") in ("inactive", "failed", "deactivating"):
+                return {"alive": False, "latency_ms": None,
+                        "error": f"systemd {svc['service_state']} (HTTP: {exc})"}
+            elif svc.get("error"):
+                return {"alive": False, "latency_ms": None,
+                        "error": f"systemd check failed: {svc['error']} (HTTP: {exc})"}
+            # HTTP failed and systemd check inconclusive — assume dead.
+            # Grace period deprecated (2026-06-26): api_query_status() no longer applies timer.
             return {"alive": False, "latency_ms": None,
                     "error": str(exc)}
 
@@ -449,3 +452,107 @@ class LlamaServerEngine(BaseEngine):
         """
         return {"engine": self._name, "instance_id": instance_id,
                 "method": method, "params": params or {}, "result": None}
+
+    @classmethod
+    def get_instance_status(cls, db_path, instance_id):
+        """Unified status endpoint for llama_server instances (STATUS-1).
+
+        Returns a standardized dict with engine_data, available actions,
+        warnings, and meta info for WebUI rendering.
+
+        Args:
+            db_path: Path to the SQLite database.
+            instance_id: Integer primary key of the instance.
+
+        Returns:
+            dict with keys: id, state, engine_type_name, engine_data,
+                actions, warnings, _meta.
+        """
+        from db.sqlite import pool
+
+        with pool(db_path) as conn:
+            inst = conn.execute(
+                """SELECT i.id, i.name, i.state, i.port_assigned,
+                          i.node_id, i.config_override,
+                          e.name as engine_type_name,
+                          n.hostname as node_hostname
+                   FROM instances i
+                   JOIN engine_types e ON i.engine_type_id = e.id
+                   LEFT JOIN nodes n ON i.node_id = n.id
+                   WHERE i.id = ?""",
+                (instance_id,),
+            ).fetchone()
+
+            # Get recent job status for running builds
+            job = conn.execute(
+                "SELECT status FROM jobs WHERE instance_id=? AND status='running' ORDER BY created_at DESC LIMIT 1",
+                (instance_id,),
+            ).fetchone()
+
+        if not inst:
+            return None
+
+        engine_data = {
+            "port_assigned": inst["port_assigned"],
+            "node_hostname": inst["node_hostname"],
+        }
+
+        # Add model info if available
+
+        # Note about running job (build in progress)
+        if job:
+            engine_data["running_job"] = job["status"]
+
+        # Build available actions from state machine
+        actions = cls._get_available_actions(inst["state"])
+        warnings = []
+        if inst["node_hostname"] and inst["state"] in ("running", "deployed"):
+            warnings.append({"type": "info", "message": f"Running on {inst['node_hostname']}"})
+
+        state_machine = cls.get_state_machine()
+        valid_next = state_machine.get(inst["state"], [])
+
+        return {
+            "id": inst["id"],
+            "state": inst["state"],
+            "engine_type_name": inst["engine_type_name"],
+            "engine_data": engine_data,
+            "actions": actions,
+            "warnings": warnings,
+            "_meta": {
+                "valid_next_states": valid_next,
+                "is_transitioning": inst["state"] in ("configuring", "deploying", "updating", "compiling", "starting", "stopping"),
+            },
+        }
+
+    @classmethod
+    def _get_available_actions(cls, state):
+        """Map instance state to available actions."""
+        action_map = {
+            "unconfigured": [{"name": "deploy", "label": "Deploy"}, {"name": "undeploy", "label": "Undeploy"}, {"name": "delete", "label": "Delete"}],
+            "deployed": [{"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "reconfigure", "label": "Reconfigure"}, {"name": "delete", "label": "Delete"}],
+            "starting": [{"name": "stop", "label": "Stop"}],
+            "loading": [{"name": "stop", "label": "Stop"}],
+            "running": [{"name": "stop", "label": "Stop"}, {"name": "restart", "label": "Restart"}, {"name": "reconfigure", "label": "Reconfigure"}],
+            "stopping": [{"name": "start", "label": "Start"}],
+            "stopped": [{"name": "start", "label": "Start"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "reconfigure", "label": "Reconfigure"}, {"name": "deploy", "label": "Deploy"}, {"name": "delete", "label": "Delete"}],
+            "error": [{"name": "start", "label": "Start"}, {"name": "deploy", "label": "Deploy"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "stop", "label": "Stop"}, {"name": "delete", "label": "Delete"}],
+            "configuring": [{"name": "stop", "label": "Stop"}],
+            "deploying": [{"name": "stop", "label": "Stop"}],
+            "updating": [],
+            "compiling": [],
+            "build_error": [{"name": "deploy", "label": "Deploy"}, {"name": "start", "label": "Start"}, {"name": "delete", "label": "Delete"}],
+            "timeout": [{"name": "deploy", "label": "Deploy"}],
+            "test_mode": [{"name": "stop", "label": "Stop"}],
+        }
+        return action_map.get(state, [])
+
+    @classmethod
+    def _get_warnings(cls, instance, service_info):
+        """Generate warnings based on instance state and service info."""
+        warnings = []
+        if instance.get("node_hostname"):
+            # Check if service is reported as unknown (possible stale state)
+            if service_info and service_info.get("service_state") == "unknown":
+                warnings.append({"type": "warning", "message": f"Service state unknown on {instance['node_hostname']}"})
+        return warnings

@@ -1,11 +1,10 @@
 # @name: Undeploy Base
-# @playbook_id: COMMON_UNDEPLOY_V1
-# @version: 1
-# @timeout: 300
+# @playbook_id: common_undeploy
+# @version: 2
 # common/undeploy_base.yml — Shared undeploy tasks used by all engine playbooks
-# Variables required: unit_name, pkill_pattern
+# Variables required: unit_name (from playbook), instance_id, engine_type
 
-- name: Stop {{ engine_type }} service
+- name: Stop {{ unit_name }} service
   systemd:
     name: "{{ unit_name }}"
     state: stopped
@@ -15,15 +14,16 @@
   shell: sleep 5
   changed_when: false
 
-- name: Find remaining keeper process PID
-  shell: "ps -eo pid,comm,args --no-headers | grep '{{ pkill_pattern }}' | grep -v grep | awk '{print $1}'"
-  register: _keeper_pid
+- name: Find remaining process PID by pkill pattern
+  shell: "pgrep -f '{{ pkill_pattern }}' 2>/dev/null || true"
+  register: _pids
   changed_when: false
   failed_when: false
 
-- name: Force kill remaining process if still running
+- name: Force kill remaining processes if still running
   command: "kill -TERM {{ item }}"
-  loop: "{{ _keeper_pid.stdout_lines | default([]) }}"
+  loop: "{{ (_pids.stdout | default('') | trim).split() | map('int') | list }}"
+  when: (_pids.stdout | default('') | trim) | length > 0
   register: kill_result
   changed_when: true
   failed_when: false

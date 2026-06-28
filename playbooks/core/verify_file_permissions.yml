@@ -1,0 +1,76 @@
+# @name: Verify File Permissions
+# @playbook_id: verify_file_permissions
+# @version: 2
+# verify_file_permissions.yml — Reusable permission checks after config file creation
+# Include at end of deploy playbooks to verify ownership and permissions.
+#
+# Required variables (set in calling playbook):
+#   qr_verify_paths — list of dicts with path, expected_type, expected_mode, expected_owner, expected_group
+#   qr_verify_run_as_root — bool; when true, file owner is root (become: yes context)
+#                         ; when false, file owner is remote_node_user (no-become context)
+#
+# Default behavior uses the calling playbook's become context to set ownership expectations.
+# Override by passing explicit expected_owner/expected_group in each path entry.
+
+# --- Stat all target paths ---
+- name: Stat all target paths for permission verification
+  stat:
+    path: "{{ item.path }}"
+  loop: "{{ qr_verify_paths | default([]) }}"
+  register: _qr_stat_results
+
+# --- Verify type, permissions, ownership ---
+- name: Fail on type mismatch
+  fail:
+    msg: >-
+      Permission check FAILED for {{ item.item.path }}:
+      Expected type={{ item.item.expected_type }}, actual={{ (item.stat.mode | default('MISSING'))[:1] }}
+      (stat.exists={{ item.stat.exists if item.stat is defined else false }})
+  loop: "{{ _qr_stat_results.results }}"
+  when:
+    - item.stat is defined and item.stat.exists
+    - item.item.expected_type == 'directory' and (item.stat.mode | default(''))[:1] != 'd'
+    - item.item.expected_type == 'file' and (item.stat.mode | default(''))[:1] != '-'
+
+- name: Fail on mode mismatch
+  fail:
+    msg: >-
+      Permission check FAILED for {{ item.item.path }}:
+      Expected mode={{ item.item.expected_mode }}, actual={{ item.stat.mode | default('MISSING') }}
+  loop: "{{ _qr_stat_results.results }}"
+  when:
+    - item.stat is defined
+    - item.stat.exists
+    - item.stat.mode is defined
+    - item.item.expected_mode is defined
+    - (item.stat.mode | default('')) != item.item.expected_mode
+
+- name: Fail on owner mismatch
+  fail:
+    msg: >-
+      Ownership check FAILED for {{ item.item.path }}:
+      Expected owner={{ item.item.expected_owner }}, actual={{ item.stat.pw_name | default(item.stat.uid) }}
+  loop: "{{ _qr_stat_results.results }}"
+  when:
+    - item.stat is defined
+    - item.stat.exists
+    - item.stat.pw_name is defined
+    - item.item.expected_owner is defined
+    - (item.stat.pw_name | default('')) != item.item.expected_owner
+
+- name: Fail on group mismatch
+  fail:
+    msg: >-
+      Group check FAILED for {{ item.item.path }}:
+      Expected group={{ item.item.expected_group }}, actual={{ item.stat.gr_name | default(item.stat.gid) }}
+  loop: "{{ _qr_stat_results.results }}"
+  when:
+    - item.stat is defined
+    - item.stat.exists
+    - item.stat.gr_name is defined
+    - item.item.expected_group is defined
+    - (item.stat.gr_name | default('')) != item.item.expected_group
+
+- name: Report permission verification passed
+  debug:
+    msg: "Permission verification passed: {{ qr_verify_paths | default([]) | map(attribute='path') | join(', ') }}"

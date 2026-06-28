@@ -79,11 +79,27 @@ window.QR_API_BASE = "/api/v1";
 
 // Timestamp formatting utilities — UTC-aware, consistent across all pages
 (function() {
+    /** Normalize an ISO timestamp string for JavaScript Date parsing.
+     *  SQLite stores naive UTC ('YYYY-MM-DD HH:MM:SS') or UTC with Z suffix.
+     *  JS needs either a 'Z' suffix (UTC) or explicit timezone offset.
+     */
+    window.qrNormIso = function(iso) {
+         if (!iso || iso === '-') return '-';
+         var s = iso.replace(' ', 'T');
+         // Replace trailing Z with +00:00; if no timezone suffix, append +00:00
+         if (s.endsWith('Z')) {
+             s = s.slice(0, -1) + '+00:00';
+         } else if (!s.match(/[+-]\d{2}:?\d{2}$/)) {
+             s += '+00:00';
+         }
+         return s;
+     };
+
     /** Format ISO timestamp to relative time string (no "ago" suffix). */
     window.qrFmtRelative = function(iso) {
         if (!iso || iso === '-') return '-';
         try {
-            var ts = new Date(iso.replace('Z', '+00:00').replace(' ', 'T'));
+            var ts = new Date(qrNormIso(iso));
             if (isNaN(ts.getTime())) return iso;
             var diff = Math.floor((new Date() - ts) / 1000);
             if (diff < 0) return iso;
@@ -105,7 +121,7 @@ window.QR_API_BASE = "/api/v1";
     window.qrFmtTimestamp = function(iso) {
         if (!iso || iso === '-') return '-';
         try {
-            var ts = new Date(iso.replace('Z', '+00:00').replace(' ', 'T'));
+            var ts = new Date(qrNormIso(iso));
             if (isNaN(ts.getTime())) return iso;
             var now = new Date();
             var diffHrs = Math.floor((now - ts) / 3600000);
@@ -139,7 +155,7 @@ window.QR_API_BASE = "/api/v1";
     window.qrFmtCompact = function(iso) {
         if (!iso) return "N/A";
         try {
-            var d = new Date(iso.replace('Z', '+00:00').replace(' ', 'T'));
+            var d = new Date(qrNormIso(iso));
             return d.toLocaleDateString(undefined, { month: '2-digit', day: '2-digit', year: 'numeric' }) +
                    ' ' + d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
         } catch(e) { return iso; }
@@ -149,15 +165,37 @@ window.QR_API_BASE = "/api/v1";
     window.qrFmtLogTime = function(iso) {
         if (!iso) return "N/A";
         try {
-            var d = new Date(iso.replace('Z', '+00:00').replace(' ', 'T'));
+            var d = new Date(qrNormIso(iso));
             return d.toLocaleTimeString(undefined, { hour12: false });
         } catch(e) { return iso; }
+    };
+
+    /** Update table row count badge — sets text on an element to show visible row count. */
+    window.qrUpdateTableCount = function(el, count) {
+      if (!el) return;
+      if (typeof count === 'number') {
+        el.textContent = count + (count === 1 ? ' row' : ' rows');
+      } else {
+        // Auto mode: count visible tbody rows in the table closest to the element
+        var table = el.closest('table');
+        if (!table) return;
+        var tbody = table.querySelector('tbody') || table;
+        var c = 0;
+        for (var i = 0; i < tbody.rows.length; i++) {
+          if (tbody.rows[i].style.display !== 'none') c++;
+        }
+        el.textContent = c + (c === 1 ? ' row' : ' rows');
+      }
     };
 
     /** Make a fetch call to the API with auth token. */
     window.qrApi = function(path, opts) {
         opts = opts || {};
         var headers = opts.headers || {};
+        // Auto-inject Content-Type for POST/PUT/PATCH
+        if (['POST','PUT','PATCH','DELETE'].indexOf((opts.method||'').toUpperCase()) !== -1 && !headers['Content-Type']) {
+            headers['Content-Type'] = 'application/json';
+        }
         // Inject bearer token if available
         if (window._qr_bearer_token) {
             headers["Authorization"] = "Bearer " + window._qr_bearer_token;
@@ -170,6 +208,70 @@ window.QR_API_BASE = "/api/v1";
             })
             .catch(function(e) { return Promise.reject(new Error(e && e.message || 'Request failed')); });
     };
+
+    // Shared instance action button renderer — used across all pages
+    window.renderInstanceActions = function(id, statusData, containerSelector, options) {
+        
+        var container = typeof containerSelector === 'string' ? document.querySelector(containerSelector) : containerSelector;
+        if (!container) return;
+        container.innerHTML = '';
+
+        var actions = [];
+        if (statusData && statusData.data && statusData.data.actions) {
+            actions = statusData.data.actions;
+        } else if (statusData && statusData.actions) {
+            actions = statusData.actions;
+        } else if (statusData && statusData.items) {
+            actions = statusData.items;
+        }
+
+        var opt = options || {};
+        var confirmList = opt.confirmActions || ['undeploy','delete'];
+        var methodMap = opt.methodOverrides || {};
+        var classMap = opt.btnClassMap || {stop:'danger',undeploy:'danger',delete:'danger',restart:'primary',reconfigure:'primary',start:'success',deploy:'success',rebuild:'success'};
+
+        // SSOT help-text table for action button hover tooltips
+        var ACTION_HELP_TEXT = {
+            deploy:      'Deploy instance — full staged chain (preflight, deps, source, compile, config, start)',
+            undeploy:    'Undeploy instance — stop service, remove systemd unit and files',
+            start:       'Start the service using its existing configuration',
+            stop:        'Stop the running service gracefully',
+            restart:     'Stop and start with current config (no redeploy)',
+            reconfigure: 'Update env file only — fast config change without rebuilding',
+            rebuild:     'Rebuild from source — skip deps, recompile only',
+        };
+
+        actions.forEach(function(act) {
+            var name = act.name || '';
+            var label = act.label || name;
+            var disabled = act.disabled || false;
+            if (disabled) return;
+
+            var btn = document.createElement('button');
+            btn.className = 'btn ' + (classMap[name] || 'primary') + ' inst-action';
+            btn.setAttribute('data-inst-id', id);
+            btn.setAttribute('data-action', name);
+            btn.style.fontSize = '0.7em';
+            btn.style.padding = '2px 5px';
+            btn.style.height = '20px';
+            // Inline background/color — required for table-cell context reliability.
+            // ColorEngine.refreshButtons() re-applies these on slider change via CSS vars.
+            var colorKey = 'btn-' + (classMap[name] || 'primary');
+            try {
+                var cssBg = getComputedStyle(document.documentElement).getPropertyValue('--' + colorKey).trim();
+                btn.style.setProperty('background', cssBg || (_QR_PALETTE[colorKey] ? "hsl("+_QR_PALETTE[colorKey].h+","+_QR_PALETTE[colorKey].s+"%,"+_QR_PALETTE[colorKey].l+"%)" : ''), '');
+                if (classMap[name] === 'primary') {
+                    var fgH = _QR_PALETTE['fg-heading'] || {h: 240, s: 18, l: 12};
+                    btn.style.setProperty('color', "hsl("+fgH.h+","+fgH.s+"%,"+fgH.l+"%)", '');
+                }
+            } catch(e) {}
+            var help = ACTION_HELP_TEXT[name];
+            btn.title = act.title || help || null;
+            btn.textContent = label;
+            container.appendChild(btn);
+        });
+    };
+
 })();
 </script>
 <style>
@@ -193,8 +295,10 @@ window.QR_API_BASE = "/api/v1";
     --form-border: #ccc; --form-focus: #4fc3f7; --form-label: #666;
     --card-border: #e0e0e0; --card-hover-border: #4fc3f7; --card-selected-border: #4fc3f7;
     --card-selected-bg: #e8f4fd; --row-link: #3a9fd7;
-    --back-link: #4fc3f7; --dev-badge: #f44336;
-  }
+     --back-link: #4fc3f7; --dev-badge: #f44336;
+     --badge-over: #fdebd0; --fg-over: #873b00; /* per-instance config override */
+     --row-inactive: #f0f0f0; /* inactive host row background */
+   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
           display: flex; min-height: 100vh; background: var(--bg-body); color: var(--fg-body); }
@@ -263,7 +367,8 @@ nav .nav-section-header { padding: 12px 16px 4px; font-size: 0.75em; text-transf
   .badge-system { background: var(--badge-system); color: var(--fg-body); }
   .badge-active { background: var(--badge-active); color: var(--fg-body); }
   .badge-unknown { background: var(--badge-unknown); color: var(--fg-body); }
-  .badge-failed { background: var(--badge-failed); color: var(--fg-body); }
+   .badge-failed { background: var(--badge-failed); color: var(--fg-body); }
+   .badge-over   { background: var(--badge-over, #fdebd0); color: var(--fg-over, #873b00); }
 
   /* Detail cards */
   .detail-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; margin-bottom: 16px; }
@@ -295,9 +400,28 @@ nav .nav-section-header { padding: 12px 16px 4px; font-size: 0.75em; text-transf
   .btn-success { background: var(--btn-success); }
   .btn-warning { background: var(--btn-warning); }
   .btn-secondary { background: var(--btn-secondary); }
-  .btn:hover { opacity: 0.85; }
+   .btn:hover { opacity: 0.85; }
+  /* INST column action buttons — !important to override table-cell context bug */
+  .inst-action.btn-primary { background: var(--btn-primary) !important; color: var(--fg-heading) !important; }
+  .inst-action.btn-danger { background: var(--btn-danger) !important; color: #fff !important; }
+  .inst-action.btn-success { background: var(--btn-success) !important; color: #fff !important; }
+  .inst-action.btn-warning { background: var(--btn-warning) !important; color: #fff !important; }
+  .inst-action.btn-secondary { background: var(--btn-secondary) !important; color: #fff !important; }
+   /* INFO column refresh button — visible on white table background */
+    .refresh-inst { background: var(--bg-table-hdr, #f8f9fa) !important; color: var(--fg-muted, #666) !important; border-radius: 50%; width: 18px; height: 18px; text-align: center; line-height: 18px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+   /* Locked buttons on inactive host rows */
+    tr.row-inactive-host .inst-action { opacity: 0.45; cursor: not-allowed; }
+    tr.row-inactive-host .refresh-inst { opacity: 0.3; cursor: not-allowed; }
+   /* Model load progress bar (SSE) */
+    #model-load-progress { display:none; margin-top:8px; }
+    #model-load-progress .load-bar { background:#e0e0e0;border-radius:4px;height:8px;overflow:hidden; }
+    #model-load-progress .load-fill { height:100%;border-radius:4px;transition:width 0.3s,background 0.3s; }
+    #model-load-progress .load-fill.loading { background:#2196f3; }
+    #model-load-progress .load-fill.complete { background:#4caf50; }
 
-   /* Instance detail page — system options grid, preset model info, journal control */
+
+
+    /* Instance detail page — system options grid, preset model info, journal control */
    .sys-options-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
    .sys-options-grid select { padding:4px 8px; border:1px solid #ccc; border-radius:3px; font-size:0.85em; width:100%; background:#fff; color:#333; }
    .preset-model-info { margin-top:6px; font-size:0.85em; color:#666; display:flex; gap:12px; flex-wrap:wrap; }
@@ -329,7 +453,7 @@ nav .nav-section-header { padding: 12px 16px 4px; font-size: 0.75em; text-transf
   /* Color Engine slider UI layout */
     .color-controls { padding: 6px 12px; font-size: 0.75em; }
     .slider-label { display: flex; align-items: center; gap: 4px; margin-bottom: 6px; color: var(--fg-muted, #666); }
-    .slider-label input[type="range"] { flex: 1; margin: 2px 0; cursor: pointer; }
+    .slider-label input[type="range"] { flex: 1; min-width: 20px; margin: 2px 0; cursor: pointer; }
     .slider-label output { min-width: 48px; text-align: right; font-size: 70%; color: var(--fg-muted, #888); font-family: monospace; display: none; }
     .color-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 4px; }
     .nav-pi { cursor: pointer; color: var(--fg-muted, #888); font-size: 0.5em; user-select: none; opacity: 0.4; line-height: 1; }
@@ -618,6 +742,105 @@ nav .nav-section-header { padding: 12px 16px 4px; font-size: 0.75em; text-transf
   dot.style.background = '{{ qr_status_rgb }}';
   {% endif %}
   }
+})();
+
+(function() {
+  // Auto-count visible table rows and update matching counter badges.
+  // Each page defines <span id="<page>-count"> elements; this scans for them.
+  var counters = document.querySelectorAll('[id$="-count"]');
+  if (counters.length === 0) return;
+  function applyCounts() {
+    var tables = document.querySelectorAll('main table');
+    if (!tables.length) return;
+    // Use the first main table to count visible rows
+    var tbody = tables[0].querySelector('tbody') || tables[0];
+    var c = 0;
+    for (var i = 0; i < tbody.rows.length; i++) {
+      if (tbody.rows[i].style.display !== 'none') c++;
+    }
+    counters.forEach(function(el) { el.textContent = c + (c === 1 ? ' row' : ' rows'); });
+  }
+  // Run after DOM is fully ready — tables may be populated by page scripts
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', applyCounts);
+  } else {
+    applyCounts();
+  }
+  // Also run after a short delay for SPA-style dynamic tables
+  setTimeout(applyCounts, 100);
+})();
+
+// Document-level event delegation for inst-action buttons
+(function() {
+  document.addEventListener('click', function(e) {
+    var btn = e.target.closest('.inst-action');
+    if (!btn) return;
+    // Check if button is on an inactive host row — show message, don't execute
+    var row = btn.closest('tr');
+    if (row && row.classList.contains('row-inactive-host')) {
+      alert('Host is set inactive');
+      return;
+    }
+    var instId = btn.getAttribute('data-inst-id') || btn.getAttribute('data-id');
+    var action = btn.getAttribute('data-action');
+    if (!instId || !action) return;
+
+    // Check if this action needs confirmation
+    var confirmList = ['undeploy','delete'];
+    for (var i = 0; i < confirmList.length; i++) {
+      if (action === confirmList[i]) {
+        if (!confirm('Are you sure you want to ' + action + ' instance ' + instId + '?')) return;
+        break;
+      }
+    }
+
+    var method = action === 'delete' ? 'DELETE' : 'POST';
+    var endpoint = (action === 'delete') ? '/instances/' + instId : '/instances/' + instId + '/' + action;
+
+    // Show loading state: disable + spinner icon
+    var originalText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '\u231B'; // hourglass/loading spinner Unicode
+
+    qrApi(endpoint, {method: method}).then(function(resp) {
+      if (resp.status !== 'ok') {
+        btn.disabled = false;
+        btn.textContent = resp.message || 'Error';
+        setTimeout(function() {
+          btn.disabled = false;
+          btn.textContent = originalText;
+        }, 4000);
+      } else {
+        // Success: re-enable button and restore label
+        btn.disabled = false;
+        btn.textContent = originalText;
+        // For llama_server instances with model load progress row, start SSE monitoring
+        if ((action === 'restart' || action === 'start' || action === 'deploy')) {
+          var mlRow = document.querySelector('tr.model-load-row[data-inst-id="' + instId + '"]');
+          if (mlRow) {
+            // List view: connect SSE model load progress
+            if (typeof mlConnectSSE === 'function') {
+              mlConnectSSE(instId);
+            }
+          } else {
+            // Detail page / other: auto-refresh after state-changing actions
+            if (action !== 'stop') {
+              setTimeout(function() { location.reload(); }, 1500);
+            }
+          }
+        } else if (action === 'stop' && !mlRow) {
+          setTimeout(function() { location.reload(); }, 1500);
+        }
+      }
+    }).catch(function(err) {
+      btn.disabled = false;
+      btn.textContent = err || 'Error';
+      setTimeout(function() {
+        btn.disabled = false;
+        btn.textContent = originalText;
+      }, 4000);
+    });
+  });
 })();
 </script>
 </body>

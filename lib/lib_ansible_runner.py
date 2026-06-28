@@ -23,14 +23,19 @@ Functions: run_playbook, parse_ansible_json, check_port_available,
            log_ansible_action.
 """
 
+from datetime import datetime, timezone as _tz
 import ast
 import json
+import os
+import re
 import sys
+import time
 import logging
 import subprocess
 
 logger = logging.getLogger(__name__)
 
+from lib.qr_engine_ids import QR_DEFAULT_LOCALHOST
 from lib.lib_constants import DEFAULT_ANSIBLE_USER, QUICKROBOT_DEBUG_LEVEL, QUICKROBOT_PLAYBOOK_TIMEOUT
 
 # Pattern to match # @timeout: <seconds> comment at top of playbook YAML files.
@@ -55,7 +60,7 @@ def _parse_playbook_timeout(playbook_path, default=QUICKROBOT_PLAYBOOK_TIMEOUT):
     """
     import os as _os
     try:
-        if not _os.path.isfile(playbook_path):
+        if not os.path.isfile(playbook_path):
             return default
         with open(playbook_path, "r") as f:
             for _i in range(20):  # only check first 20 lines (header region)
@@ -101,8 +106,8 @@ def run_playbook(playbook_path, inventory_path=None, limit=None, extra_vars=None
     # Debug output: show exact playbook call details (QUICKROBOT_DEBUG_LEVEL >= 10)
     if QUICKROBOT_DEBUG_LEVEL >= 10:
         print(f"[qr] ANSIBLE RUN: playbook={playbook_path} limit={limit} extra_vars_keys={list(extra_vars.keys()) if extra_vars else '[]'}", flush=True)
-    import os as _os_env
-    env = _os_env.environ.copy()
+    import os as os
+    env = os.environ.copy()
     # Use JSON stdout callback (Ansible 2.10+ style, replaces --json)
     env["ANSIBLE_STDOUT_CALLBACK"] = "json"
     # Prevent Jinja2 from treating extra_vars as templates recursively
@@ -112,7 +117,7 @@ def run_playbook(playbook_path, inventory_path=None, limit=None, extra_vars=None
     # Disable fact caching to avoid recursive variable resolution
     env["ANSIBLE_GATHERING"] = "explicit"
     # Set PYTHONPATH to project root (not lib/) for playbook imports
-    _project_root = _os_env.path.dirname(_os_env.path.dirname(_os_env.path.abspath(__file__)))
+    _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     # Ensure lib modules can be found by dynamic inventory and playbook imports
     if "PYTHONPATH" in env:
         env["PYTHONPATH"] = _project_root + ":" + env["PYTHONPATH"]
@@ -128,8 +133,8 @@ def run_playbook(playbook_path, inventory_path=None, limit=None, extra_vars=None
         inv_source = inventory_path
     else:
         import os as _os
-        _script_dir = _os.path.dirname(_os.path.abspath(__file__))
-        inv_source = _os.path.join(_script_dir, "qr_dynamic_inventory.py")
+        _script_dir = os.path.dirname(os.path.abspath(__file__))
+        inv_source = os.path.join(_script_dir, "qr_dynamic_inventory.py")
 
     cmd = [
         "ansible-playbook", playbook_path,
@@ -159,9 +164,10 @@ def run_playbook(playbook_path, inventory_path=None, limit=None, extra_vars=None
         # On success with empty output, build a minimal valid structure
         stdout = result.stdout.strip()
         if not stdout:
+            host_hint = f" (target: {limit})" if limit else ""
             return {"changed": False, "failed": True,
                     "results": {"plays": []},
-                    "error": "Empty ansible output — no hosts matched or playbook produced no output"}
+                    "error": f"Empty ansible output — no hosts matched{host_hint} or playbook produced no output. The node may be offline."}
         try:
             parsed = parse_ansible_json(stdout)
             # Detect "0 hosts matched" — empty plays or all-play-empty-tasks means
@@ -170,7 +176,9 @@ def run_playbook(playbook_path, inventory_path=None, limit=None, extra_vars=None
             parsed["hosts_matched"] = _detect_hosts_match(parsed)
             if not parsed["hosts_matched"]:
                 parsed["failed"] = True
-                parsed["error"] = "No hosts matched the inventory limit — playbook ran against zero targets"
+                # Enhance error message with target hostname for better diagnostics
+                host_hint = f" ({limit})" if limit else ""
+                parsed["error"] = f"No hosts matched the inventory{host_hint} — playbook ran against zero targets. The node may be offline or unreachable."
             return parsed
         except RecursionError:
             return {"changed": True, "failed": False,
@@ -266,7 +274,7 @@ def parse_ansible_json(json_output):
                 for host_result in hosts.values():
                     if host_result.get("changed", False):
                         changed = True
-                    if host_result.get("failed", False):
+                    if host_result.get("failed", False) or host_result.get("unreachable", False):
                         failed = True
                 # Create flat 'results' list for backward compat
                 task["results"] = list(hosts.values())
@@ -276,18 +284,20 @@ def parse_ansible_json(json_output):
     return {"changed": changed, "failed": failed, "results": parsed}
 
 
-def check_port_available(port, host="127.0.0.1"):
+def check_port_available(port, host=None):
     """Check if a TCP port is available for binding on the local host.
 
     Opens a non-blocking socket to test port availability.
 
     Args:
         port: Integer port number to check.
-        host: Host address to check against (default '127.0.0.1').
+        host: Host address to check against (default QR_DEFAULT_LOCALHOST).
 
     Returns:
         True if the port is available (not in use), False otherwise.
     """
+    if host is None:
+        host = QR_DEFAULT_LOCALHOST
     import socket
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -332,8 +342,13 @@ def validate_node(db_path, node_id):
 
     try:
         # Use dynamic inventory (DB-backed) — node is already in DB at this point.
-        from quickrobot import _execute_playbook as _ep
-        r = _ep("NODE_VALIDATE_V1", resolver_type="playbook_id", inventory_data=None, limit=hostname, action_type="validate_node")
+        from qr_api import _execute_playbook as _ep
+        extra_vars = {
+            "ansible_user": node.get("ansible_user"),
+            "ssh_port": node.get("ssh_port"),
+        }
+        r = _ep("node_validate", resolver_type="playbook_id", inventory_data=None, limit=hostname,
+                extra_vars=extra_vars, action_type="validate_node")
         if r["error"]:
             result = {"failed": True, "error": r["error"]}
         else:
@@ -426,7 +441,7 @@ def validate_node(db_path, node_id):
         for play in result.get("results", {}).get("plays", []):
             for task in play.get("tasks", []):
                 task_name = task.get("task", {}).get("name", "")
-                if "Output inventory" not in task_name:
+                if "Output structured inventory" not in task_name:
                     continue
                 # Ansible 2.10+ stores host results under 'hosts' key,
                 # older versions used 'results' as a list
@@ -622,7 +637,7 @@ def get_instance_logs(db_path, instance_id, lines=100):
             pass
 
     # Remote execution: need _execute_playbook from quickrobot
-    from quickrobot import _execute_playbook as _ep
+    from qr_api import _execute_playbook as _ep
 
     try:
         r = _ep("NODE_GET_INSTANCE_LOGS_V1", resolver_type="playbook_id",
@@ -648,9 +663,8 @@ def get_instance_logs(db_path, instance_id, lines=100):
         return {"instance_name": instance_name, "node_name": node_name,
                 "logs": "", "error": str(exc)}
 
-
-def scan_models(playbook_id="NODE_SCAN_MODELS_V1", engine_type_id=None, limit=None,
-                db_path=None):
+def scan_models(playbook_id="scan_models_remote", engine_type_id=None, limit=None,
+                 db_path=None):
     """Scan remote nodes for GGUF model files using Ansible.
 
     Uses dynamic inventory (DB-backed) — no stale files possible (DI-7).
@@ -664,57 +678,97 @@ def scan_models(playbook_id="NODE_SCAN_MODELS_V1", engine_type_id=None, limit=No
       - Parses quantization from filename (e.g. Q4_K_M, Q8_0, Q6_K, etc.)
       - Uses actual file size from Ansible find module metadata
       - Groups sharded models (*.N-of-M.gguf) by their base model name
+      - Tracks last_modified_epoch from remote stat → converts to ISO for DB
+      - Detects models whose disk mtime changed since last scan
+      - Detects unresolved draft cross-references (..ID..NNN)
 
     Args:
-        playbook_id: Playbook ID string (default "NODE_SCAN_MODELS_V1").
+        playbook_id: Playbook ID string (default "scan_models_remote").
         engine_type_id: Foreign key to engine_types table for model registration.
         limit: Optional host limit string (e.g., 'dllama6.lan,dllama7.lan').
         db_path: Path to the SQLite database (for logging and model upsert).
 
-    Returns:
-        dict with keys: 'new_models' (int), 'existing_models' (int),
-        'hosts_scanned' (list), 'total_files_found' (int).
+   Returns:
+          dict with keys: 'new_models', 'new_model_ids',
+          'missing_models', 'missing_model_ids', 'existing_models',
+          'hosts_scanned', 'total_files_found',
+          'modified_model_ids' (list of IDs whose disk mtime changed),
+          'unresolved_draft_ids' (list of IDs with broken ..ID..NNN refs).
 
-    Raises:
-        RuntimeError: If playbook execution or DB upsert fails.
-    """
+     Raises:
+         RuntimeError: If playbook execution or DB upsert fails.
+     """
     import os as _os
-    import re as _re
     import time as _time
+    from datetime import datetime, timezone as _tz
 
     from db.sqlite import pool
-    from db.adapters.models import add_model as _am
-    from quickrobot import _execute_playbook as _ep
+    from db.adapters.models import add_model as _am, update_model as _um
+    from qr_api import _execute_playbook as _ep
 
-    # Pre-load existing model paths from DB for deduplication
-    existing_paths = set()
+    # Pre-load existing model paths and last_modified from DB for dedup + change detection
+    existing_data = {}  # model_path -> {id, last_modified}
     try:
         with pool(db_path) as conn:
             rows = conn.execute(
-                "SELECT model_path FROM engine_models WHERE engine_type_id = ?",
+                "SELECT id, model_path, last_modified FROM engine_models WHERE engine_type_id = ?",
                 (engine_type_id,),
             ).fetchall()
-            existing_paths = {r["model_path"] for r in rows}
+            existing_data = {r["model_path"]: {"id": r["id"], "last_modified": r["last_modified"]} for r in rows}
     except Exception:
         pass  # Non-critical — proceed even if DB read fails
 
     # Initialize counters outside try so they're always defined (for error path at bottom)
     new_count = 0
+    new_model_ids = []
+    missing_model_ids = []
     existing_count = 0
     total_files = 0
     hosts_scanned = []
     results = {"failed": True}
 
+    # Tracking for post-scan analysis
+    modified_model_ids = []
+    unresolved_draft_ids = []
+
+    # Resolve model_root_path using the full chain BEFORE playbook execution:
+    #   1. Per-node model_base_path override (nodes.model_base_path) — highest priority
+    #   2. Engine default (engine_configs.model_root_path)
+    model_root_path_used = None
+    host_ids = []
+    if limit:
+        host_ids = [h.strip() for h in limit.split(",") if h.strip()]
+
     try:
-        from quickrobot import _execute_playbook as _ep
+        from qr_api import _execute_playbook as _ep
         from db.adapters.configs import get_engine_config as _gec
+        from lib.lib_config_merge import _lookup_model_base_path
+
         extra_vars = {}
-        if engine_type_id is not None and db_path:
+
+        # Step 1: Check per-node overrides (highest priority)
+        for host in host_ids:
+            if engine_type_id is not None and db_path:
+                with pool(db_path) as conn:
+                    node_row = conn.execute(
+                        "SELECT id FROM nodes WHERE hostname = ?", (host,)
+                    ).fetchone()
+                if node_row:
+                    np = _lookup_model_base_path(node_row["id"], db_path, engine_type_id)
+                    if np and not model_root_path_used:
+                        model_root_path_used = np
+
+        # Step 2: Fall back to engine default
+        if not model_root_path_used and engine_type_id is not None and db_path:
             mrp_row = _gec(db_path, engine_type_id, "model_root_path")
             if mrp_row:
                 val = mrp_row.get("value", "") if isinstance(mrp_row, dict) else ""
                 if val:
-                    extra_vars["model_root_path"] = val
+                    model_root_path_used = val
+
+        if model_root_path_used:
+            extra_vars["model_root_path"] = model_root_path_used
+
         r = _ep(playbook_id, resolver_type="playbook_id", limit=limit, extra_vars=extra_vars or None, action_type="scan_models")
         if r["error"]:
             results = {"failed": True, "error": r["error"]}
@@ -727,9 +781,9 @@ def scan_models(playbook_id="NODE_SCAN_MODELS_V1", engine_type_id=None, limit=No
         # Parse quantization from filename
         # Order matters: more specific patterns first, less specific last
         _quant_patterns = [
-            _re.compile(r'Q([0-9])_(?:K_[MSLX]+|[MSLXP0])', _re.I),  # Q4_K_M, Q4_K_XL, Q8_0, etc.
-            _re.compile(r'Q([0-9])_K', _re.I),                        # Q4_K (bare K, no suffix)
-            _re.compile(r'(F16|F32|BF16|IF16)', _re.I),               # Float types
+            re.compile(r'Q([0-9])_(?:K_[MSLX]+|[MSLXP0])', re.I),  # Q4_K_M, Q4_K_XL, Q8_0, etc.
+            re.compile(r'Q([0-9])_K', re.I),                        # Q4_K (bare K, no suffix)
+            re.compile(r'(F16|F32|BF16|IF16)', re.I),               # Float types
         ]
 
         def parse_quantization(fname):
@@ -741,13 +795,24 @@ def scan_models(playbook_id="NODE_SCAN_MODELS_V1", engine_type_id=None, limit=No
             return None
 
         # Regex for sharded model filenames: name-00001-of-00003.gguf
-        _shard_pattern = _re.compile(r'^(.+)-\d{4,5}-of-\d{4,5}\.gguf$')
+        _shard_pattern = re.compile(r'^(.+)-\d{4,5}-of-\d{4,5}\.gguf$')
 
-       # Collect all new model files first, deduplicated by path
-        _seen_paths = set()  # track unique file paths across all hosts
-        all_new_files = []  # list of (fname, fp, file_size, quant, mmproj_path) tuples
+        # Epoch → ISO conversion helper
+        def epoch_to_iso(epoch_str):
+            """Convert epoch seconds (int/string) to ISO 8601 UTC string."""
+            try:
+                ep = int(epoch_str)
+                return datetime.fromtimestamp(ep, tz=_tz.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+            except (ValueError, TypeError, OSError):
+                return None
+
+        # Collect ALL file data (new + existing) for change detection
+        _seen_paths = set()
+        _all_discovered_paths = set()
+        all_new_files = []  # (fname, fp, file_size, quant, mmproj_path, last_modified_iso)
         total_files = 0
         new_count = 0
+        new_model_ids = []
         existing_count = 0
         hosts_scanned = []
 
@@ -780,16 +845,28 @@ def scan_models(playbook_id="NODE_SCAN_MODELS_V1", engine_type_id=None, limit=No
                                 continue
 
                             total_files += 1
-                            fname = _os.path.basename(fp)
+                            fname = os.path.basename(fp)
+                            _all_discovered_paths.add(fp)
 
-                            # Debug: log first 10 raw entries to trace mmproj data flow
-                            if total_files <= 10:
-                                mp = file_info.get("mmproj_path", "")
-                                print(f"[qr-scan-debug] #{total_files} path={fp} mmproj_path={repr(mp)}")
+                            # Parse last_modified_epoch from playbook output (new field)
+                            epoch_val = file_info.get("last_modified_epoch", "0")
+                            lm_iso = epoch_to_iso(epoch_val) if epoch_val else None
 
-                            # Skip already-registered paths
-                            if fp in existing_paths:
+                            # Track existing models for change detection
+                            if fp in existing_data:
                                 existing_count += 1
+                                row_id = existing_data[fp]["id"]
+                                old_lm = existing_data[fp]["last_modified"]
+                                # Detect mtime change: DB is NULL or different from disk
+                                if old_lm is None or (lm_iso and old_lm != lm_iso):
+                                    modified_model_ids.append(row_id)
+                                    # Update last_modified in DB
+                                    try:
+                                        _um(db_path, row_id, last_modified=lm_iso)
+                                    except Exception:
+                                        logging.warning("Failed to update last_modified for model %s", fname)
+                                # Check draft cross-ref validity
+                                _check_draft_refs_for_model(db_path, fp)
                                 continue
 
                             file_size = file_info.get("size", 0) or 0
@@ -799,7 +876,8 @@ def scan_models(playbook_id="NODE_SCAN_MODELS_V1", engine_type_id=None, limit=No
                             if fp in _seen_paths:
                                 continue
                             _seen_paths.add(fp)
-                            all_new_files.append((fname, fp, file_size, quant, mmproj_path))
+                            all_new_files.append((fname, fp, file_size, quant, mmproj_path, lm_iso))
+
                 elif isinstance(host_results, list):
                     # Legacy format (fallback)
                     for result_entry in host_results:
@@ -823,39 +901,49 @@ def scan_models(playbook_id="NODE_SCAN_MODELS_V1", engine_type_id=None, limit=No
                                 continue
 
                             total_files += 1
-                            fname = _os.path.basename(fp)
+                            fname = os.path.basename(fp)
+                            _all_discovered_paths.add(fp)
 
-                            if fp in existing_paths:
+                            epoch_val = file_info.get("last_modified_epoch", "0")
+                            lm_iso = epoch_to_iso(epoch_val) if epoch_val else None
+
+                            if fp in existing_data:
                                 existing_count += 1
+                                row_id = existing_data[fp]["id"]
+                                old_lm = existing_data[fp]["last_modified"]
+                                if old_lm is None or (lm_iso and old_lm != lm_iso):
+                                    modified_model_ids.append(row_id)
+                                    try:
+                                        _um(db_path, row_id, last_modified=lm_iso)
+                                    except Exception:
+                                        logging.warning("Failed to update last_modified for model %s", fname)
+                                _check_draft_refs_for_model(db_path, fp)
                                 continue
 
                             file_size = file_info.get("size", 0) or 0
                             quant = parse_quantization(fname)
                             mmproj_path = file_info.get("mmproj_path", "") or None
-                            # Deduplicate across hosts
                             if fp in _seen_paths:
                                 continue
                             _seen_paths.add(fp)
-                            all_new_files.append((fname, fp, file_size, quant, mmproj_path))
+                            all_new_files.append((fname, fp, file_size, quant, mmproj_path, lm_iso))
+
         # Group sharded models and insert
         _shard_groups = {}
         _individual_files = []
 
-        for fname, fp, file_size, quant, mmproj_path in all_new_files:
+        for fname, fp, file_size, quant, mmproj_path, lm_iso in all_new_files:
             m = _shard_pattern.match(fname)
             if m:
-                # Sharded file — group by base name
                 base_name = m.group(1) + '.gguf'
                 if base_name not in _shard_groups:
                     _shard_groups[base_name] = {"files": [], "total_size": 0, "quant": quant, "mmproj_path": mmproj_path}
                 _shard_groups[base_name]["files"].append((fname, fp, file_size))
                 _shard_groups[base_name]["total_size"] += file_size
-                # Keep the first non-empty mmproj_path found in the group
                 if not _shard_groups[base_name]["mmproj_path"] and mmproj_path:
                     _shard_groups[base_name]["mmproj_path"] = mmproj_path
             else:
-                # Individual file — keep as-is
-                _individual_files.append((fname, fp, file_size, quant, mmproj_path))
+                _individual_files.append((fname, fp, file_size, quant, mmproj_path, lm_iso))
 
         target_db = db_path
 
@@ -863,67 +951,125 @@ def scan_models(playbook_id="NODE_SCAN_MODELS_V1", engine_type_id=None, limit=No
         for base_name, group in _shard_groups.items():
             shards = len(group["files"])
             if shards < 2:
-                # Single shard — treat as individual
                 fname, fp, file_size = group["files"][0]
                 quant = group["quant"]
                 mmproj_path = group["mmproj_path"] or None
+                lm_iso = None
                 try:
                     model = _am(target_db, engine_type_id, name=fname, model_path=fp,
                                 size_bytes=file_size if file_size else None, quantization=quant,
-                                is_sharded=0, total_shards=None, mmproj_path=mmproj_path)
+                                is_sharded=0, total_shards=None, mmproj_path=mmproj_path,
+                                last_modified=lm_iso)
                     if model is not None and model.get("_new"):
                         new_count += 1
+                        new_model_ids.append(model.get("id"))
                 except Exception:
                     logging.warning("Failed to insert single-shard model %s", fname)
                     pass
             else:
-                # Multi-shard — sort by shard number and pick -00001-of- as primary
                 def shard_sort_key(item):
-                    """Extract shard number for sorting (e.g., 00001 from filename)."""
                     fname = item[0]
-                    sm = _re.match(r'.*-(\d+)-of-\d+', fname)
+                    sm = re.match(r'.*-(\d+)-of-\d+', fname)
                     return int(sm.group(1)) if sm else 99999
                 sorted_files = sorted(group["files"], key=shard_sort_key)
                 fname_primary, fp_primary, _ = sorted_files[0]
                 mmproj_path = group["mmproj_path"] or None
+                lm_iso = None
                 try:
                     model = _am(target_db, engine_type_id, name=base_name, model_path=fp_primary,
                                 size_bytes=group["total_size"] if group["total_size"] else None,
                                 quantization=group["quant"], is_sharded=1, total_shards=shards,
-                                mmproj_path=mmproj_path)
+                                mmproj_path=mmproj_path, last_modified=lm_iso)
                     if model is not None and model.get("_new"):
                         new_count += 1
+                        new_model_ids.append(model.get("id"))
                 except Exception:
                     pass
 
       # Insert individual files
-        for fname, fp, file_size, quant, mmproj_path in _individual_files:
+        for fname, fp, file_size, quant, mmproj_path, lm_iso in _individual_files:
             try:
                 model = _am(target_db, engine_type_id, name=fname, model_path=fp,
                             size_bytes=file_size if file_size else None, quantization=quant,
-                            is_sharded=0, total_shards=None, mmproj_path=mmproj_path)
+                            is_sharded=0, total_shards=None, mmproj_path=mmproj_path,
+                            last_modified=lm_iso)
                 if model is not None and model.get("_new"):
                     new_count += 1
+                    new_model_ids.append(model.get("id"))
             except Exception:
                 logging.warning("Failed to insert individual model %s", fname)
                 pass
 
+        # Detect missing models: DB entries not found on any scanned host
+        if engine_type_id is not None and db_path and _all_discovered_paths:
+            try:
+                with pool(db_path) as conn:
+                    db_rows = conn.execute(
+                        "SELECT id, model_path FROM engine_models WHERE engine_type_id = ?",
+                        (engine_type_id,),
+                    ).fetchall()
+                    for row in db_rows:
+                        if row["model_path"] not in _all_discovered_paths:
+                            missing_model_ids.append(row["id"])
+            except Exception as exc:
+                logging.warning("Missing model detection failed: %s", str(exc))
+
     except Exception as exc:
-        # If processing fails, still try to log (best effort)
         logging.warning("Non-critical failure in model scan: %s", str(exc))
         pass
 
     # Log the scan execution (outside try — always runs)
     log_ansible_action(db_path, "scan_models", None, None,
-                       "node/scan_models.yml",
+                       "playbooks/node/scan_models_remote.yml",
                        {"limit": limit}, results)
 
     return {
-        "new_models": new_count,
-        "existing_models": existing_count,
-        "hosts_scanned": hosts_scanned,
-        "total_files_found": total_files,
-    }
+         "model_root_path_used": model_root_path_used,
+         "new_models": new_count,
+         "new_model_ids": new_model_ids,
+         "missing_models": len(missing_model_ids),
+         "missing_model_ids": missing_model_ids,
+         "existing_models": existing_count,
+         "hosts_scanned": hosts_scanned,
+         "total_files_found": total_files,
+         "modified_model_ids": modified_model_ids,
+         "unresolved_draft_ids": unresolved_draft_ids,
+     }
+
+
+def _check_draft_refs_for_model(db_path, model_path):
+    """Check if a model's draft_model_path references exist in DB.
+
+    Scans all models for the same engine type and checks each one's
+    draft_model_path for unresolved ..ID..NNN cross-references.
+    Appends unresolved IDs to the module-level unresolved_draft_ids list.
+
+    Args:
+        db_path: Path to the SQLite database.
+        model_path: The model whose engine_type_id we look up.
+    """
+    from db.sqlite import pool
+    _draft_pattern = re.compile(r'^\.\.ID\.\.(\d+)\.\.$')
+
+    try:
+        with pool(db_path) as conn:
+            # Get all models for the same engine type
+            rows = conn.execute(
+                "SELECT id, draft_model_path FROM engine_models"
+            ).fetchall()
+            all_ids = {r["id"] for r in rows}
+            for row in rows:
+                dmp = row["draft_model_path"]
+                if not isinstance(dmp, str) or not dmp.startswith('..ID..'):
+                    continue
+                m = _draft_pattern.match(dmp)
+                if m:
+                    ref_id = int(m.group(1))
+                    if ref_id not in all_ids:
+                        if row["id"] not in unresolved_draft_ids:
+                            unresolved_draft_ids.append(row["id"])
+    except Exception as exc:
+        logging.warning("Draft ref check failed: %s", str(exc))
 
 
 def log_ansible_action(db_path, action_type, node_id, instance_id, playbook,
@@ -1084,15 +1230,20 @@ def log_ansible_action(db_path, action_type, node_id, instance_id, playbook,
         def _extract_error_message(result_data):
             """Extract the most relevant error/reason from parsed Ansible result."""
             if result_data.get("failed"):
-                # Check for error in results
+                # Check for error in results — msg takes priority, stderr as fallback
                 for play in result_data.get("plays", []):
                     for task in play.get("tasks", []):
                         for entry in task.get("results", []):
+                            # Check msg first (most descriptive)
                             msg = entry.get("msg", "")
                             if isinstance(msg, dict):
                                 msg = json.dumps(msg)
-                            elif isinstance(msg, str) and msg.strip():
+                            if isinstance(msg, str) and msg.strip():
                                 return msg[:500]
+                            # Fallback: check stderr (cmake/git often write here)
+                            err = entry.get("stderr", "") or ""
+                            if isinstance(err, str) and err.strip():
+                                return err[:500]
                 # Fallback to result-level error
                 return result_data.get("error", "Action failed")[:500]
             # Health check / success case — look for "alive: false" or similar
@@ -1192,7 +1343,9 @@ def log_ansible_action(db_path, action_type, node_id, instance_id, playbook,
                 )
         return True
 
-    except Exception:
+    except Exception as _e:
+        import logging as _log_mod
+        _log_mod.warning("[qr-ansible] log_ansible_action failed: %s", _e)
         return False
 
 

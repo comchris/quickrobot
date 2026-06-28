@@ -1,6 +1,7 @@
 <!-- Top row: title, add button, refresh interval -->
 <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
   <h1 style="margin:0;font-size:1.3em;">Hosts</h1>
+  <span id="host-count" style="display:inline-block;padding:2px 8px;background:#555;color:#fff;border-radius:10px;font-size:0.75em;font-weight:normal;"></span>
   <a href="/webui/nodes/new" class="btn btn-primary" style="display:inline-block;padding:4px 12px;border-radius:4px;text-decoration:none;font-size:0.85em;">+ Add Host</a>
   <!-- Filter bar: hostname search + show inactive toggle -->
   <div style="display:flex;gap:8px;align-items:center;">
@@ -20,7 +21,6 @@
       <option value="120">120s</option>
     </select>
     <button id="refresh-once-btn" class="btn btn-primary" style="padding:4px 10px;font-size:0.85em;">Refresh</button>
-    <button id="refresh-all-btn" class="btn btn-success" style="padding:4px 10px;font-size:0.85em;" title="SSH probe all nodes + health check all instances">&#x21bb;</button>
   </div>
 </div>
 
@@ -115,7 +115,9 @@
 // >= 7d: full date + relative (e.g. "May 20, 2026 (10d)")
 function fmtCompact(iso) {
     if (!iso || iso === '-') return '-';
-    var ts = new Date(iso);
+    // Normalize ISO: SQLite stores naive UTC or space-separated, JS parses as local without suffix.
+    var normIso = qrNormIso(iso);
+    var ts = new Date(normIso);
     if (isNaN(ts.getTime())) return iso;
     var now = new Date();
     var diff = Math.floor((now - ts) / 1000);
@@ -509,70 +511,4 @@ if (hostSearchInput) {
     showInactiveSelect.value = showInactive ? 'true' : 'false';
   }
 })();
-
-// Refresh All button — POST /api/v1/health/check with scope=all
-var refreshAllBtn = document.getElementById('refresh-all-btn');
-if (refreshAllBtn) {
-  refreshAllBtn.addEventListener('click', function() {
-    var btn = this;
-    var origHTML = btn.innerHTML;
-    btn.disabled = true;
-    btn.style.pointerEvents = 'none';
-    btn.style.opacity = '0.6';
-    var dots = ['...', '. .', ' . .'];
-    var dotIdx = 0;
-    var dotInterval = setInterval(function() {
-      btn.innerHTML = dots[dotIdx % 3];
-      dotIdx++;
-    }, 400);
-
-    var toast = document.createElement('div');
-    toast.style.cssText = 'position:fixed;top:20px;right:20px;z-index:9999;padding:10px 16px;background:#1976d2;color:#fff;border-radius:4px;font-size:0.85em;opacity:0.95;box-shadow:0 2px 8px rgba(0,0,0,0.2);';
-    toast.textContent = 'Health check running...';
-    document.body.appendChild(toast);
-
-    qrApi('/health/check', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({scope: 'all'})}).then(function(data) {
-      clearInterval(dotInterval);
-      toast.style.opacity = '0';
-      setTimeout(function() { toast.remove(); }, 300);
-
-      if (data.status !== 'ok') {
-        btn.disabled = false;
-        btn.innerHTML = origHTML;
-        btn.style.pointerEvents = '';
-        btn.style.opacity = '';
-        alert('Health check failed: ' + (data.message || JSON.stringify(data)));
-        return;
-      }
-
-      var s = data.data.summary;
-      var msg = 'Health check done — ';
-      msg += 'Nodes: ' + s.nodes_ok + '/' + s.nodes_checked + ' OK';
-      if (s.nodes_fail) msg += ', ' + s.nodes_fail + ' down';
-      msg += ' | ';
-      msg += 'Instances: ' + s.instances_ok + '/' + s.instances_checked + ' OK';
-      if (s.instances_fail) msg += ', ' + s.instances_fail + ' down';
-
-      toast.textContent = msg;
-      toast.style.background = '#2e7d32';
-      document.body.appendChild(toast);
-
-      setTimeout(function() {
-        window.location.reload();
-      }, 1500);
-    }).catch(function(e) {
-      clearInterval(dotInterval);
-      toast.style.opacity = '0';
-      setTimeout(function() { toast.remove(); }, 300);
-      btn.disabled = false;
-      btn.innerHTML = origHTML;
-      btn.style.pointerEvents = '';
-      btn.style.opacity = '';
-      alert('Health check failed: ' + e);
-    });
-  });
-}
 </script>

@@ -1,15 +1,31 @@
 # @name: Scan Models
 # @playbook_id: NODE_SCAN_MODELS_V1
-# @version: 1
+# @version: 2
 # @timeout: 600
 # scan_models.yml — Scan nodes for available GGUF model files
 # Returns JSON with path, size, and optional mmproj_path per file
 - hosts: all
   gather_facts: no
+
+  vars:
+    # Default root path — only used when model_root_path is not provided via extra_vars.
+    # If not configured by the admin, this warning alerts that scan may miss models
+    # if the actual model directory differs on this node.
+    _qr_model_root_default: "/mnt/llama/gguf/models"
+
   tasks:
+    - name: Resolve model root path (extra_vars > default)
+      set_fact:
+        model_root_path: "{{ model_root_path | default(_qr_model_root_default, true) }}"
+
+    - name: Warn when using hardcoded fallback model root path
+      debug:
+        msg: "[scan_models] model_root_path not configured via extra_vars — using default '{{ _qr_model_root_default }}'. Configure node.model_base_path or engine_configs.model_root_path to avoid silent miss."
+      when: model_root_path == _qr_model_root_default
+
     - name: Find GGUF models with metadata via shell
       shell: >
-        find {{ model_root_path | default('/mnt/llama/gguf/models') }}
+        find {{ model_root_path }}
         -name '*.gguf' -type f 2>/dev/null | grep -v mmproj | while read f; do
           sz=$(stat -c '%s' "$f" 2>/dev/null || echo "0")
           # Look for companion mmproj in same directory

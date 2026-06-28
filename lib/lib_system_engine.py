@@ -20,49 +20,291 @@ system-managed subprocesses (WebUI, MCP). Reads config from
 """
 
 import os
+import re
+import signal as _signal
 import subprocess
 import sys
+import threading as _threading
 import time
 
-from lib.qr_engine_ids import get_port_default, get_name_by_id, QR_FORBIDDEN_HOSTS
+from lib.qr_engine_ids import (
+    QR_DEFAULT_LOCALHOST, get_port_default, get_name_by_id,
+    QR_FORBIDDEN_HOSTS, QR_ENGINE_PORT_DEFAULTS, get_system_instance_id,
+)
+from lib.lib_time import utcnow_str
 
-# MCP flag fallback defaults — must be explicitly set in .quickrobot.env
-_MCP_READ_FALLBACK = "true"
-_MCP_WRITE_FALLBACK = "false"
-_MCP_FULLPROXY_FALLBACK = "false"
+# Build env-var name -> default from SOT (avoids duplicating port values)
+_ENV_PORT_DEFAULTS = {
+    "QUICKROBOT_API_PORT":   QR_ENGINE_PORT_DEFAULTS["quickrobot-api"],
+    "QUICKROBOT_WEBUI_PORT": QR_ENGINE_PORT_DEFAULTS["quickrobot-webui"],
+    "QUICKROBOT_MCP_PORT":   QR_ENGINE_PORT_DEFAULTS["quickrobot-mcp"],
+}
+
+# ── Log path helper — unified logging for all system engines ───────────
+_LOG_DIR = "logs"
+
+
+def get_engine_log_path(engine_name):
+    """Get the log file path for a system engine.
+
+    Args:
+        engine_name: "webui", "mcp", or "scheduler"
+
+    Returns:
+        str: Absolute path to the engine's log file
+    """
+    return os.path.join(os.getcwd(), _LOG_DIR, f"{engine_name}.log")
+
+
+# ── Log rotation (vC): truncate on startup if > MAX_LOG_SIZE ──────────
+_MAX_LOG_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
+def rotate_log_if_needed(log_path, engine_name="engine"):
+    """Rotate a log file: if size exceeds MAX_LOG_BYTES, truncate to 0 bytes.
+
+    Called once per engine startup. Logs the action to stderr for visibility.
+    Returns True if rotation occurred, False otherwise.
+    """
+    try:
+        if not os.path.exists(log_path):
+            return False
+        size = os.path.getsize(log_path)
+        if size > _MAX_LOG_BYTES:
+            with open(log_path, "w") as f:
+                pass  # truncate
+            print(
+                f"[qr] {engine_name} log rotated ({size:,}B → 0B)",
+                file=sys.stderr, flush=True,
+            )
+            return True
+    except OSError as _e:
+        print(f"[qr] {engine_name} log rotation check failed: {_e}", file=sys.stderr)
+    return False
+
+
+# ── Child PID tracking for process group + signal cleanup ─────────────
+_CHILD_PIDS = set()
+_CHILD_PID_LOCK = _threading.Lock()
+
+def _register_child(pid):
+    """Register a child PID for cleanup on shutdown."""
+    with _CHILD_PID_LOCK:
+        _CHILD_PIDS.add(pid)
+
+def _cleanup_children():
+    """Kill all tracked child processes in their own process groups."""
+    with _CHILD_PID_LOCK:
+        pids = list(_CHILD_PIDS)
+    for pid in pids:
+        try:
+            os.killpg(pid, _signal.SIGTERM)
+        except (ProcessLookupError, OSError):
+            pass
+
+def _install_signal_handlers():
+    """Install signal handlers to clean up child processes on shutdown."""
+    try:
+        _signal.signal(_signal.SIGTERM, lambda s, f: (_cleanup_children(), sys.exit(0)))
+        _signal.signal(_signal.SIGINT, lambda s, f: (_cleanup_children(), sys.exit(0)))
+    except (OSError, ValueError):
+        # Signal handling might fail in non-main thread or Windows
+        pass
+
+# ── Port conflict safety check ────────────────────────────────────────
+
+def check_and_free_port(port, service_name):
+    """Check if port is in use by a stale process. Kill it if found.
+
+    Uses `ss -tlnp` to find processes listening on the given port.
+    If found and identified as orphaned (PPID=1 or zombie), kills it.
+
+    Args:
+        port: Integer port number to check.
+        service_name: Display name for logging (e.g., "webui", "mcp").
+
+    Returns:
+        True if port is free (or was successfully freed).
+        Returns False if port is in use and couldn't be killed.
+    """
+    if port is None or port == 0:
+        return True  # Scheduler doesn't bind a port
+
+    try:
+        result = subprocess.run(
+            ["ss", "-tlnp"], capture_output=True, text=True, timeout=5
+        )
+        lines = [
+            l for l in result.stdout.splitlines()
+            if f":{port}" in l and "LISTEN" in l
+        ]
+        if lines:
+            for line in lines:
+                pid_match = re.search(r"pid=(\d+)", line)
+                if pid_match:
+                    stale_pid = int(pid_match.group(1))
+                    try:
+                        import psutil
+                        proc = psutil.Process(stale_pid)
+                        ppid = proc.ppid()
+                        if ppid == 1 or proc.status() in ("zombie",):
+                            print(
+                                f"[qr] WARNING: Port {port} used by stale "
+                                f"{service_name} process (pid={stale_pid}, "
+                                f"PPID={ppid}). Killing."
+                            )
+                            proc.terminate()
+                            # Wait briefly, force kill if needed
+                            for _ in range(10):
+                                try:
+                                    if not psutil.pid_exists(stale_pid) \
+                                            or psutil.Process(
+                                                stale_pid
+                                            ).status() == "zombie":
+                                        break
+                                except Exception as _e:
+                                    print(f"[qr] WARNING: Orphan kill loop error (pid={stale_pid}): {_e}")
+                                    break
+                                time.sleep(0.1)
+                            if psutil.pid_exists(stale_pid):
+                                proc.kill()
+                            # Deregister if it was our tracked child
+                            with _CHILD_PID_LOCK:
+                                _CHILD_PIDS.discard(stale_pid)
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+    except FileNotFoundError:
+        # ss not available, skip check
+        pass
+    return True  # Best effort — don't block startup
+
+
+# ---------------------------------------------------------------------------
+# Port + process pre-flight scanner (designed for startup "force respawn")
+# ---------------------------------------------------------------------------
+
+_ENGINE_SCAN_PATTERNS = {
+    "webui": {"port": QR_ENGINE_PORT_DEFAULTS["quickrobot-webui"], "patterns": ["quickrobot_webui.py"]},
+    "mcp": {"port": QR_ENGINE_PORT_DEFAULTS["quickrobot-mcp"], "patterns": ["qr_mcp_server.py"]},
+    "scheduler": {"port": None, "patterns": ["quickrobot_scheduler", "engine.quickrobot_scheduler"]},
+}
+
+
+def check_port_and_process_free(engine_name, port=None):
+    """Pre-flight check: verify port is free AND no stale process exists.
+
+    Used during API startup to detect any existing system engine processes
+    before attempting a fresh start. Reports all findings and exits.
+
+    Args:
+        engine_name: "webui", "mcp", or "scheduler"
+        port: Optional explicit port (falls back to _ENGINE_SCAN_PATTERNS)
+
+    Returns:
+        {"free": bool, "issues": list[str]}
+        free=False means at least one conflict detected.
+    """
+    # Resolve port from scan patterns if not provided
+    if port is None and engine_name in _ENGINE_SCAN_PATTERNS:
+        port = _ENGINE_SCAN_PATTERNS[engine_name].get("port")
+
+    issues = []
+    import subprocess as _subp
+
+    # 1. Port check (skip for scheduler — no port)
+    if port is not None and port > 0:
+        try:
+            result = _subp.run(["ss", "-tlnp"], capture_output=True, text=True, timeout=5)
+            for line in result.stdout.splitlines():
+                if f":{port}" in line and "LISTEN" in line:
+                    pid_match = re.search(r"pid=(\d+)", line)
+                    comm_match = re.search(r'"([^"]+)"', line)
+                    pid_str = f" pid={pid_match.group(1)}" if pid_match else ""
+                    comm_str = comm_match.group(1) if comm_match else "(unknown)"
+                    issues.append(f"Port {port} occupied by {comm_str}{pid_str}")
+        except FileNotFoundError:
+            pass  # ss not available, skip port check
+
+    # 2. Process scan via ps aux (grep for known patterns)
+    if engine_name in _ENGINE_SCAN_PATTERNS:
+        patterns = _ENGINE_SCAN_PATTERNS[engine_name].get("patterns", [])
+        try:
+            result = _subp.run(["ps", "aux"], capture_output=True, text=True, timeout=5)
+            my_pid = os.getpid()
+            for line in result.stdout.splitlines():
+                # Skip the ps aux command itself and this function's grep subprocess
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                try:
+                    line_pid = int(parts[1])
+                except ValueError:
+                    continue
+                if line_pid == my_pid:
+                    continue
+                for pattern in patterns:
+                    if pattern in line and "ps aux" not in line.split()[:3]:
+                        # Format: USER PID %CPU %MEM VSZ RSS TTY STAT START TIME COMMAND...
+                        cmd = " ".join(parts[10:]) if len(parts) > 10 else line
+                        issues.append(f"Stale process found: pid={line_pid} cmd={cmd!r}")
+                        break
+        except FileNotFoundError:
+            pass
+
+    return {"free": len(issues) == 0, "issues": issues}
 
 
 def _mcp_binary_exists():
-    """Check if the MCP server binary exists on disk.
+    """Check if the MCP pipx venv exists and can import fastmcp.
 
-    The MCP binary path is configured in engine_configs table for engine
-    type 'quickrobot-mcp' with key 'binary_path'. If not set, falls back
-    to known default paths.
+    The MCP server runs via a pipx-installed Python environment. This function
+    verifies the pipx venv exists and has the mcp SDK (with fastmcp submodule)
+    available. Returns True if all checks pass.
+
+    Checks (in priority order):
+    1) engine_configs 'binary_path' for engine_type_id=3 (explicit override)
+    2) engine_configs 'mcp_python_interpreter' (pipx venv python path)
+    3) Default pipx MCP venv: ~/.local/share/pipx/venvs/mcp/bin/python
 
     Returns:
-        True if binary exists, False otherwise.
+        True if the MCP runtime environment is available, False otherwise.
     """
-    # Try known default paths
-    candidates = [
-        "/opt/quickrobot/build/bin/mcp-server",
-        "/usr/local/bin/mcp-server",
-    ]
-    # Also check if there's a config_override or engine_config pointing to it
+    candidates = []
     try:
         from db.sqlite import pool as _pool
-        from quickrobot import _CONFIG
+        from qr_api import _CONFIG
         with _pool(_CONFIG.get("db_path", "data/quickrobot.db")) as conn:
+            # Check binary_path override
             row = conn.execute(
                 "SELECT value FROM engine_configs WHERE engine_type_id = (SELECT id FROM engine_types WHERE name='quickrobot-mcp') AND key = 'binary_path'"
             ).fetchone()
             if row and row["value"]:
                 candidates.insert(0, row["value"])
-    except Exception:
-        pass  # DB not ready yet, use known defaults
+            # Check mcp_python_interpreter (pipx venv python path)
+            row2 = conn.execute(
+                "SELECT value FROM engine_configs WHERE engine_type_id = (SELECT id FROM engine_types WHERE name='quickrobot-mcp') AND key = 'mcp_python_interpreter'"
+            ).fetchone()
+            if row2 and row2["value"]:
+                interp = str(row2["value"]).strip()
+                candidates.insert(0, interp)
+    except Exception as _e:
+        print(f"[qr] WARN: MCP binary path lookup failed (using defaults): {_e}")
+
+    # Default pipx MCP venv python
+    default_python = os.path.expanduser("~/.local/share/pipx/venvs/mcp/bin/python")
+    candidates.append(default_python)
 
     for path in candidates:
-        if os.path.isfile(path):
-            return True
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            # Verify it can import the fastmcp module
+            try:
+                import subprocess as _subp
+                result = _subp.run([path, "-c", "import mcp.server.fastmcp"],
+                                   capture_output=True, timeout=5)
+                if result.returncode == 0:
+                    return True
+            except Exception:
+                pass
     return False
 
 
@@ -88,8 +330,7 @@ def load_env_config(cwd=None):
             f".quickrobot.env not found in {cwd}. "
             f"Create a .quickrobot.env file with keys: QUICKROBOT_API_HOST, "
             f"QUICKROBOT_API_PORT, QUICKROBOT_WEBUI_HOST, QUICKROBOT_WEBUI_PORT, "
-            f"QUICKROBOT_WEBUI_BEARER_TOKEN, QUICKROBOT_MCP_HOST, "
-            f"QUICKROBOT_MCP_PORT, QUICKROBOT_MCP_BEARER_TOKEN"
+            f"QUICKROBOT_MCP_HOST, QUICKROBOT_MCP_PORT"
         )
 
     # Track line numbers for error reporting
@@ -157,13 +398,8 @@ def _validate_env_config(config, key_line_map):
             print(f"[qr] ERROR: {key} is required but missing (line {line})")
             sys.exit(1)
 
-    # Required int keys (ports)
-    port_keys = {
-        "QUICKROBOT_API_PORT": 8040,
-        "QUICKROBOT_WEBUI_PORT": 8041,
-        "QUICKROBOT_MCP_PORT": 8042,
-    }
-    for key, default in port_keys.items():
+    # Required int keys (ports) — defaults from SOT QR_ENGINE_PORT_DEFAULTS
+    for key, default in _ENV_PORT_DEFAULTS.items():
         if key not in config:
             continue  # Will use default at runtime
         val = config[key]
@@ -246,7 +482,7 @@ def _parse_ipv6_host(host_str):
             uses IPv6 (has brackets).
     """
     if not host_str:
-        return ("127.0.0.1", False)
+        return (QR_DEFAULT_LOCALHOST, False)
 
     host_str = host_str.strip()
 
@@ -277,19 +513,15 @@ def _build_command(engine_name, env_config, api_host, api_port, extra_flags=None
     if engine_name == "webui":
         host = env_config["QUICKROBOT_WEBUI_HOST"]
         port = env_config.get("QUICKROBOT_WEBUI_PORT") or str(get_port_default("quickrobot-webui"))
-        token = env_config.get("QUICKROBOT_WEBUI_BEARER_TOKEN", "")
 
         webui_path = os.path.join(os.getcwd(), "quickrobot_webui.py")
 
+        # --host and --port are required by WebUI startup validation (_check_webui_args)
         cmd = [
             sys.executable, webui_path,
             "--host", host,
             "--port", str(port),
-            "--api-host", api_host,
-            "--api-port", str(api_port),
         ]
-        if token:
-            cmd.extend(["--api-token", token])
         return cmd
 
     elif engine_name == "mcp":
@@ -299,21 +531,24 @@ def _build_command(engine_name, env_config, api_host, api_port, extra_flags=None
         if host in QR_FORBIDDEN_HOSTS:
             print(f"[qr] FATAL: MCP bind host is '{host}' — {QR_FORBIDDEN_HOSTS}")
             sys.exit(1)
-        token = env_config.get("QUICKROBOT_MCP_BEARER_TOKEN", "")
 
         mcp_server_path = os.path.join(os.getcwd(), "engine", "qr_mcp_server.py")
 
+        # No CLI args needed — MCP reads everything from env (QUICKROBOT_MCP_* / QUICKROBOT_API_*)
         cmd = [
             sys.executable, mcp_server_path,
-            "--host", host,
-            "--port", str(port),
-            "--api-host", api_host,
-            "--api-port", str(api_port),
         ]
-        if token:
-            cmd.extend(["--api-token", token])
         if extra_flags:
             cmd.extend(extra_flags)
+        return cmd
+
+    elif engine_name == "scheduler":
+        # API-spawned: no --interval flag; scheduler reads poll_interval from DB config.
+        # Standalone usage: pass --interval CLI arg to override.
+        cmd = [
+            sys.executable, "-m", "engine.quickrobot_scheduler",
+            "--db", os.path.join(os.getcwd(), "data", "quickrobot.db"),
+        ]
         return cmd
 
     raise ValueError(f"Unknown engine_name: {engine_name}")
@@ -329,9 +564,7 @@ def _log_lifecycle(engine_name, action, details=None):
         action: "start", "stop", "restart"
         details: Dict with extra info (pid, port, status, etc.)
     """
-    from datetime import datetime as _dt
-
-    timestamp = _dt.now().strftime("%Y-%m-%dT%H:%M:%S")
+    timestamp = utcnow_str()
     detail_str = ""
     if details:
         parts = [f"{k}={v}" for k, v in details.items()]
@@ -346,8 +579,9 @@ def _log_lifecycle(engine_name, action, details=None):
         log_path = os.path.join(log_dir, "system_engine.log")
         with open(log_path, "a") as f:
             f.write(log_line + "\n")
-    except Exception:
-        pass  # Non-critical — logging should not break the runner
+    except Exception as _e:
+        # File write failure is non-critical but worth noting
+        print(f"[qr] LOG WRITE FAILED: {_e}")
 
     # Also print to stdout for tmux visibility
     print(f"[qr] {log_line}")
@@ -437,6 +671,39 @@ def _kill_orphaned_process(pid, name="process"):
         return False
 
 
+def _find_stale_schedulers():
+    """Find scheduler processes by command name scanning, independent of PID tracking.
+
+    Used as a coexistence guard: scans all running processes for quickrobot_scheduler.__main__
+    and returns PIDs of any found. This catches stale schedulers that PID-in-DB tracking misses,
+    including cases where the API restarts rapidly and the old scheduler survives prctl(PDEATHSIG).
+
+    Returns:
+        List of PIDs (ints) of running scheduler processes. Empty if none found.
+    """
+    import subprocess as _subprocess
+
+    try:
+        result = _subprocess.run(
+            ["ps", "aux"], capture_output=True, text=True, timeout=5
+        )
+        pids = []
+        for line in result.stdout.splitlines():
+            # Match the scheduler entry; skip ps aux itself and grep
+            if "quickrobot_scheduler" in line or "engine.quickrobot_scheduler" in line:
+                parts = line.split()
+                if len(parts) >= 2:
+                    try:
+                        pid = int(parts[1])
+                        pids.append(pid)
+                    except ValueError:
+                        pass
+        return pids
+    except Exception as exc:
+        print(f"[qr] WARN: stale scheduler scan failed ({exc})")
+        return []
+
+
 def start_system_engine(engine_name, env_config, api_host, api_port, python_exe=None):
     """Start a system engine subprocess.
 
@@ -458,11 +725,7 @@ def start_system_engine(engine_name, env_config, api_host, api_port, python_exe=
     from db.adapters.configs import get_engine_config as _gec
 
     # Determine instance ID from env config or DB lookup
-    inst_id = None
-    if engine_name == "webui":
-        inst_id = 2  # Hardcoded system engine ID
-    elif engine_name == "mcp":
-        inst_id = 3
+    inst_id = get_system_instance_id(engine_name)
 
     db_path = _CONFIG.get("db_path") if "_CONFIG" in globals() else os.path.join(os.getcwd(), "data", "quickrobot.db")
 
@@ -478,8 +741,34 @@ def start_system_engine(engine_name, env_config, api_host, api_port, python_exe=
         port = int(env_config.get("QUICKROBOT_WEBUI_PORT") or str(get_port_default("quickrobot-webui")))
     elif engine_name == "mcp":
         port = int(env_config.get("QUICKROBOT_MCP_PORT") or str(get_port_default("quickrobot-mcp")))
-    else:
+    elif engine_name == "scheduler":
+        port = 0  # Scheduler doesn't bind a port
         port = None
+
+    # Port conflict safety: check + free if stale process holds it
+    check_and_free_port(port, engine_name)
+
+    # REG-03-F1 Part 1: Stale scheduler coexistence guard.
+    # Scheduler has no port so check_and_free_port() skips it.
+    # Scan by command name to catch stale schedulers that PID tracking misses.
+    if engine_name == "scheduler":
+        stale = _find_stale_schedulers()
+        import psutil as _psutil  # local import — not at module level
+        for spid in stale:
+            try:
+                proc = _psutil.Process(spid)
+                ppid = proc.ppid()
+                # Skip if this is our own process group (ppid matches our PID)
+                my_pid = os.getpid()
+                if ppid == my_pid:
+                    continue
+                print(f"[qr] scheduler: found stale process (pid={spid}, ppid={ppid}), killing")
+                try:
+                    proc.kill()
+                except (_psutil.NoSuchProcess, _psutil.AccessDenied):
+                    pass
+            except (_psutil.NoSuchProcess, _psutil.AccessDenied):
+                pass
 
     # Check for existing live process via stored PID
     old_pid = inst.get("pid_last_known") if inst else None
@@ -537,11 +826,16 @@ def start_system_engine(engine_name, env_config, api_host, api_port, python_exe=
     # Build explicit env whitelist via consolidated builder
     env = build_subprocess_env(engine_name, env_config, api_host, api_port, is_system_managed=True)
 
+    # Unified log file for all system engines
+    log_path = get_engine_log_path(engine_name)
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    _logf = open(log_path, "a")  # Keep handle open for subprocess lifetime
     popen_kwargs = {
-        "stdout": None,  # Let subprocess handle output (or DEVNULL if preferred)
-        "stderr": None,
+        "stdout": _logf,  # All output to engine log file
+        "stderr": _logf,
         "env": env,
         "cwd": os.getcwd(),
+        "start_new_session": True,  # Isolates child in its own process group
     }
 
     # Whitelist verification: ensure test vars from env file don't leak
@@ -558,11 +852,16 @@ def start_system_engine(engine_name, env_config, api_host, api_port, python_exe=
 
     try:
         proc = subprocess.Popen([exe_path] + cmd[1:], **popen_kwargs)
+        # C5-REG: Auto-terminate on parent death (survives SIGKILL, not just SIGTERM)
+        import ctypes as _ctypes
+        _ctypes.CDLL("libc.so.6").prctl(1, 15)  # PR_SET_PDEATHSIG=1, SIGTERM=15
     except OSError as exc:
         _log_lifecycle(engine_name, "start", {"error": str(exc)})
         return {"error": f"Failed to start {engine_name}: {exc}", "action": "start", "engine": engine_name}
 
     new_pid = proc.pid
+    # Register child PID for cleanup on shutdown
+    _register_child(new_pid)
     if inst:
         try:
             update_instance(db_path, inst_id, pid_last_known=new_pid)
@@ -590,11 +889,7 @@ def stop_system_engine(engine_name, env_config):
     from db.adapters.configs import get_engine_config as _gec
 
     # Determine instance ID
-    inst_id = None
-    if engine_name == "webui":
-        inst_id = 2
-    elif engine_name == "mcp":
-        inst_id = 3
+    inst_id = get_system_instance_id(engine_name)
 
     db_path = _CONFIG.get("db_path") if "_CONFIG" in globals() else os.path.join(os.getcwd(), "data", "quickrobot.db")
 
@@ -612,6 +907,10 @@ def stop_system_engine(engine_name, env_config):
             psutil.Process(pid).terminate()
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass  # Best-effort termination
+
+    # Deregister child PID from tracking
+    with _CHILD_PID_LOCK:
+        _CHILD_PIDS.discard(pid) if pid else None
 
     if inst:
         try:
@@ -655,11 +954,7 @@ def restart_system_engine(engine_name, env_config, api_host, api_port, timeout=N
     db_path = _CONFIG.get("db_path") if "_CONFIG" in globals() else os.path.join(os.getcwd(), "data", "quickrobot.db")
 
     # Determine instance ID
-    inst_id = None
-    if engine_name == "webui":
-        inst_id = 2
-    elif engine_name == "mcp":
-        inst_id = 3
+    inst_id = get_system_instance_id(engine_name)
 
     inst = None
     if inst_id:
@@ -732,27 +1027,25 @@ def restart_system_engine(engine_name, env_config, api_host, api_port, timeout=N
     }
 
 
-def get_system_engine_pid(engine_name, env_config):
+def get_system_engine_pid(engine_name, env_config, _retried=False):
     """Lookup PID for a system engine.
 
     Reads pid_last_known from DB instance record. Verifies process exists via psutil.
-    Returns None if PID not found or process dead.
+    If PID is stale (dead process), resets pid_last_known to NULL and auto-restarts.
+    Returns None if PID not found or process dead (after one retry).
 
     Args:
-        engine_name: "webui" or "mcp"
+        engine_name: "webui", "mcp", or "scheduler"
         env_config: Dict from load_env_config()
+        _retried: Internal — prevents infinite recursion on stale PID restart.
 
     Returns:
         PID (int) or None
     """
-    from db.adapters.instances import get_instance
+    from db.adapters.instances import get_instance, update_instance
 
     # Determine instance ID
-    inst_id = None
-    if engine_name == "webui":
-        inst_id = 2
-    elif engine_name == "mcp":
-        inst_id = 3
+    inst_id = get_system_instance_id(engine_name)
 
     if not inst_id:
         return None
@@ -768,6 +1061,25 @@ def get_system_engine_pid(engine_name, env_config):
     pid = inst.get("pid_last_known") if inst else None
     if pid and _get_pid_status(pid):
         return pid
+
+    # Stale PID — clear cached value and auto-restart (only once to avoid storm)
+    if not _retried and pid:
+        try:
+            update_instance(db_path, inst_id, pid_last_known=None)
+            print(f"[qr] Stale PID for {engine_name} ({pid}) cleared, restarting...")
+            # Extract api_host/api_port from env_config for start_system_engine
+            api_host = env_config.get("QUICKROBOT_API_HOST", "127.0.0.1") if isinstance(env_config, dict) else "127.0.0.1"
+            api_port_raw = env_config.get("QUICKROBOT_API_PORT", str(QR_ENGINE_PORT_DEFAULTS["quickrobot-api"])) if isinstance(env_config, dict) else str(QR_ENGINE_PORT_DEFAULTS["quickrobot-api"])
+            try:
+                api_port = int(api_port_raw)
+            except (ValueError, TypeError):
+                api_port = QR_ENGINE_PORT_DEFAULTS["quickrobot-api"]
+            start_system_engine(engine_name, env_config, api_host, api_port)
+            # Recursive call to get the NEW PID after restart
+            return get_system_engine_pid(engine_name, env_config, _retried=True)
+        except Exception as exc:
+            print(f"[qr] WARNING: EIO prevention restart failed for {engine_name}: {exc}")
+
     return None
 
 
@@ -775,11 +1087,12 @@ def build_subprocess_env(engine_name, env_config, api_host, api_port, instance_c
     """Build a whitelisted subprocess environment dict for system engines.
 
     Consolidated builder replaces three independent inline dicts in:
-      - lib_system_engine.py::start_system_engine() (L537-553)
+      - lib_system_engine.py::start_system_engine() (L541-557)
       - engine/quickrobot_webui/__init__.py::execute() (L266-278)
       - engine/quickrobot_mcp/__init__.py::execute() (L432-457)
 
-    Layer 1: Base whitelist — always merged (PATH, HOME, LANG, LC_ALL, API_HOST, API_PORT, API_TOKEN)
+    Layer 1: Base whitelist — always merged (PATH, HOME, LANG, LC_ALL, API_HOST, API_PORT,
+             API_BEARER_TOKEN, CONSOLE_DEBUG_LEVEL, ANSIBLE_LOG_LEVEL)
     Layer 2: Engine extras — engine-specific (WEBUI_HOST/PORT, MCP_HOST/PORT/PYTHONPATH/FLAGS)
     Layer 3: Per-instance env_vars — subprocess engine only (config_override.env_vars)
 
@@ -798,9 +1111,8 @@ def build_subprocess_env(engine_name, env_config, api_host, api_port, instance_c
         QR_ENV_PATH, QR_ENV_HOME, QR_ENV_LANG, QR_ENV_LC_ALL, QR_ENV_PYTHONPATH,
         QR_ENV_API_BEARER_TOKEN, QR_ENV_API_HOST, QR_ENV_API_PORT,
         QR_ENV_WEBUI_HOST, QR_ENV_WEBUI_PORT,
-        QR_ENV_MCP_HOST, QR_ENV_MCP_PORT, QR_ENV_MCP_ALLOWED_HOSTS,
-        QR_ENV_MCP_DISABLE_DNS_REBINDING, QR_ENV_MCP_ALLOW_READS,
-        QR_ENV_MCP_ALLOW_WRITES, QR_ENV_MCP_ALLOW_PROXY,
+        QR_ENV_MCP_HOST, QR_ENV_MCP_PORT,
+        QR_ENV_MCP_DISABLE_DNS_REBINDING, QR_ENV_MCP_CORS_ORIGINS,
     )
 
     env = {}
@@ -810,9 +1122,20 @@ def build_subprocess_env(engine_name, env_config, api_host, api_port, instance_c
     env[QR_ENV_HOME] = os.environ.get(QR_ENV_HOME, "")
     env[QR_ENV_LANG] = os.environ.get(QR_ENV_LANG, "en_US.UTF-8")
     env[QR_ENV_LC_ALL] = os.environ.get(QR_ENV_LC_ALL, "en_US.UTF-8")
-    env[QR_ENV_API_BEARER_TOKEN] = env_config.get("QUICKROBOT_API_BEARER_TOKEN", "")
-    env[QR_ENV_API_HOST] = str(api_host)
-    env[QR_ENV_API_PORT] = str(api_port)
+    # Python bytecode cache — redirect all __pycache__ to single location (PYTHONPYCACHEPREFIX)
+    _pycache_prefix = env_config.get("PYTHONPYCACHEPREFIX", "")
+    if _pycache_prefix:
+        env["PYTHONPYCACHEPREFIX"] = _pycache_prefix
+    env["QUICKROBOT_API_BEARER_TOKEN"] = env_config.get("QUICKROBOT_API_BEARER_TOKEN", "")
+    env["QUICKROBOT_API_HOST"] = str(api_host)
+    env["QUICKROBOT_API_PORT"] = str(api_port)
+    # Operational mode — ensures subprocess always knows its mode regardless of _CONFIG import timing
+    env["QUICKROBOT_PB_MODE"] = os.environ.get("QUICKROBOT_PB_MODE", "prod")
+    # Debug/logging — each subprocess reads its own level from env
+    env["QUICKROBOT_CONSOLE_DEBUG_LEVEL"] = env_config.get("QUICKROBOT_CONSOLE_DEBUG_LEVEL", "")
+    env["QUICKROBOT_ANSIBLE_LOG_LEVEL"] = env_config.get("QUICKROBOT_ANSIBLE_LOG_LEVEL", "errors")
+    # Log path — used by health check for FATAL exit logging
+    env["QUICKROBOT_LOG_PATH"] = get_engine_log_path(engine_name)
 
     # === LAYER 2: Engine-specific extras ===
     if engine_name == "webui":
@@ -824,33 +1147,33 @@ def build_subprocess_env(engine_name, env_config, api_host, api_port, instance_c
         env[QR_ENV_MCP_HOST] = env_config["QUICKROBOT_MCP_HOST"]
         env[QR_ENV_MCP_PORT] = str(env_config.get("QUICKROBOT_MCP_PORT", ""))
 
-        def _mcp_flag(key, fallback):
-             """Resolve MCP flag: engine_configs (runtime) > .quickrobot.env (system default)."""
-             try:
-                 from db.adapters.configs import get_engine_config as _gec
-                 et_id = None
-                 if engine_name == "mcp":
-                     from lib.qr_engine_ids import QR_ENGINE_QUICKROBOT_MCP
-                     et_id = QR_ENGINE_QUICKROBOT_MCP
-                 if et_id:
-                     db_path = _CONFIG.get("db_path") if "_CONFIG" in globals() else os.path.join(os.getcwd(), "data", "quickrobot.db")
-                     row = _gec(db_path, et_id, key)
-                     if row and row.get("value"):
-                         return str(row["value"])
-             except Exception:
-                 pass
-             return env_config.get(f"QUICKROBOT_MCP_{key.upper()}", fallback)
+        db_path = os.path.join(os.getcwd(), "data", "quickrobot.db")
 
-        env[QR_ENV_MCP_ALLOW_READS] = _mcp_flag("allow_reads", _MCP_READ_FALLBACK)
-        env[QR_ENV_MCP_ALLOW_WRITES] = _mcp_flag("allow_writes", _MCP_WRITE_FALLBACK)
-        env[QR_ENV_MCP_ALLOW_PROXY] = _mcp_flag("allow_proxy", _MCP_FULLPROXY_FALLBACK)
+        def _resolve_mcp_flag(db_key, env_key):
+            """Resolve MCP flag from engine_configs (runtime) or .quickrobot.env."""
+            try:
+                from db.adapters.configs import get_engine_config as _gec
+                if engine_name == "mcp":
+                    from lib.qr_engine_ids import QR_ENGINE_MCP
+                    row = _gec(db_path, QR_ENGINE_MCP, db_key)
+                    if row and row.get("value"):
+                        return str(row["value"])
+            except Exception:
+                pass
+            return env_config.get(env_key, "false")
 
-        allowed_hosts = env_config.get("QUICKROBOT_MCP_ALLOWED_HOSTS", "")
-        if allowed_hosts:
-            env[QR_ENV_MCP_ALLOWED_HOSTS] = allowed_hosts
+        # Set env vars for subprocess — names must match qr_mcp_server.py expectations
+        env["QUICKROBOT_MCP_READ"] = _resolve_mcp_flag("mcp_allow_reads", "QUICKROBOT_MCP_READ")
+        env["QUICKROBOT_MCP_WRITE"] = _resolve_mcp_flag("mcp_allow_writes", "QUICKROBOT_MCP_WRITE")
+        env["QUICKROBOT_MCP_FULLPROXY"] = _resolve_mcp_flag("mcp_allow_proxy", "QUICKROBOT_MCP_FULLPROXY")
+
         disable_dns = env_config.get("QUICKROBOT_MCP_DISABLE_DNS_REBINDING", "")
         if disable_dns:
             env[QR_ENV_MCP_DISABLE_DNS_REBINDING] = disable_dns
+
+        cors_origins = env_config.get("QUICKROBOT_MCP_CORS_ORIGINS", "")
+        if cors_origins:
+            env[QR_ENV_MCP_CORS_ORIGINS] = cors_origins
 
     # === LAYER 3: Per-instance env_vars (subprocess engine only) ===
     if not is_system_managed and instance_config:
@@ -862,8 +1185,106 @@ def build_subprocess_env(engine_name, env_config, api_host, api_port, instance_c
     return env
 
 
+def api_health_check_loop(api_host, api_port, max_retries=3, retry_delay=3, check_interval=60):
+    """Periodic health check for system subprocesses.
+
+    Checks API connectivity every check_interval seconds. Exits with error if
+    API unreachable after max_retries consecutive failures. Prevents zombies
+    by ensuring clean exit when parent API dies.
+
+    Args:
+        api_host: API server host (e.g., "127.0.0.1")
+        api_port: API server port (e.g., 8039)
+        max_retries: Number of consecutive failures before exit
+        retry_delay: Seconds between retry attempts (default: 3 for fast failure)
+        check_interval: Seconds between health checks after recovery (default: 60)
+
+    Returns:
+        None — exits process on failure
+    """
+    import requests as _requests_lib
+
+    _api_url = f"http://{api_host}:{api_port}/api/v1/app/status"
+    _consecutive_failures = 0
+
+    print(f"[qr] Health check starting: {_api_url} (interval={check_interval}s, retries={max_retries}, retry_delay={retry_delay}s)", flush=True)
+    # Startup grace period: give Flask time to bind and start accepting connections.
+    import time as _time_mod
+    _time_mod.sleep(10)
+
+    while True:
+        try:
+            _resp = _requests_lib.get(_api_url, timeout=10)
+            if _resp.status_code == 200 and _resp.json().get("status") == "ok":
+                if _consecutive_failures > 0:
+                    print(f"[qr] Health check recovered after {_consecutive_failures} failure(s)", flush=True)
+                _consecutive_failures = 0
+                _wait = check_interval  # Normal interval after recovery
+            else:
+                _consecutive_failures += 1
+                print(f"[qr] Health check failed (attempt {_consecutive_failures}): HTTP {_resp.status_code}", flush=True)
+                _wait = retry_delay  # Short delay between retries
+
+        except _requests_lib.ConnectionError as _e:
+            _consecutive_failures += 1
+            print(f"[qr] Health check connection error (attempt {_consecutive_failures}): {_e}", flush=True)
+            _wait = retry_delay
+        except _requests_lib.Timeout as _e:
+            _consecutive_failures += 1
+            print(f"[qr] Health check timeout (attempt {_consecutive_failures}): {_e}", flush=True)
+            _wait = retry_delay
+        except Exception as _e:
+            _consecutive_failures += 1
+            print(f"[qr] Health check error (attempt {_consecutive_failures}): {_e}", flush=True)
+            _wait = retry_delay
+
+        # Exit if too many consecutive failures
+        if _consecutive_failures >= max_retries:
+            # Write FATAL to log file directly (stdout may not flush on os._exit)
+            _fatal_msg = f"[qr] FATAL: API unreachable after {_consecutive_failures} attempts. Exiting."
+            try:
+                import datetime
+                _log_path = os.environ.get("QUICKROBOT_LOG_PATH", "")
+                if _log_path:
+                    # Extract engine name from log path (e.g., "logs/scheduler.log" → "scheduler")
+                    _engine_name = os.path.basename(_log_path).replace(".log", "")
+                    with open(_log_path, "a") as _lf:
+                        _lf.write(f"{datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')} {_engine_name}: {_fatal_msg}\n")
+            except Exception:
+                pass
+            print(_fatal_msg, flush=True)
+            os._exit(1)
+
+        # Wait before next check
+        time.sleep(_wait)
+
+
+def start_health_check_thread(api_host, api_port, max_retries=3, retry_delay=10, check_interval=60):
+    """Start health check as a daemon thread.
+
+    Args:
+        api_host: API server host
+        api_port: API server port
+        max_retries: Number of consecutive failures before exit
+        retry_delay: Seconds between retry attempts
+        check_interval: Seconds between health checks (default: 60)
+
+    Returns:
+        Thread object (daemon=True)
+    """
+    import threading as _threading
+    _thread = _threading.Thread(
+        target=api_health_check_loop,
+        args=(api_host, api_port, max_retries, retry_delay, check_interval),
+        daemon=True,
+        name="api-health-check"
+    )
+    _thread.start()
+    return _thread
+
+
 # Import _CONFIG at module level for DB path access
 try:
-    from quickrobot import _CONFIG
+    from qr_api import _CONFIG
 except ImportError:
     _CONFIG = {"db_path": os.path.join(os.getcwd(), "data", "quickrobot.db")}

@@ -20,24 +20,26 @@
 </div>
 
 <table>
-<thead><tr><th class="sortable" data-col="0">ID</th><th class="sortable" data-col="1">Name</th><th class="sortable" data-col="2">Model</th><th class="sortable" data-col="3">GPU Device</th><th class="sortable" data-col="4">Category</th><th class="sortable" data-col="5">Age</th><th>Actions</th></tr></thead>
+<thead><tr><th class="sortable" data-col="0" style="min-width:50px;">ID</th><th class="sortable" data-col="1">Name</th><th class="sortable" data-col="2">Model</th><th class="sortable" data-col="3" style="min-width:80px;">Size</th><th class="sortable" data-col="4" style="min-width:70px;">Quant</th><th class="sortable" data-col="5" style="min-width:120px;">Draft / Mmproj</th><th class="sortable" data-col="6">Category</th><th class="sortable" data-col="7">Age</th><th>Actions</th></tr></thead>
 <tbody>
 {% for p in presets %}
 <tr>
   <td>{{ p.id }}</td>
   <td><a class="row-link" href="/webui/engine/{{ engine_type }}/presets/{{ p.id }}">{{ p.name }}</a></td>
   <td>{% if p.model_name and p.model_id %}<a class="row-link" href="/webui/models?q={{ p.model_name | urlencode }}&engine={{ engine_type }}" title="Show models matching '{{ p.model_name }}'">{{ p.model_name }}</a>{% else %}&mdash;{% endif %}</td>
-  <td>{{ gpu_device_badge(p.gpu_device) }}</td>
+  <td data-sort="{{ p.model_size_sort or '' }}">{{ p.model_size_display or '—' }}</td>
+  <td data-sort="{{ p.quantization or '' }}">{{ p.quantization or '—' }}</td>
+   <td data-sort="{{ '1' if p.mmproj_model == 'yes' else '0' }}-{{ '1' if p.draft_model == 'yes' else '0' }}">{{ p.mmproj_model or 'no' }} / {{ p.draft_model or 'no' }}</td>
   <td>{{ p.category }}</td>
   <td class="age-cell" data-sort="{{ p.created_at or '' }}">{{ p.created_at or '-' }}</td>
   <td style="white-space:nowrap;">
-     <a href="/webui/engine/{{ engine_type }}/presets/{{ p.id }}" class="btn btn-primary" style="font-size:0.75em;padding:2px 6px;margin-right:4px;text-decoration:none;">Edit</a>
-    <button class="btn btn-xs btn-success preset-clone-btn" data-preset-id="{{ p.id }}" data-engine="{{ engine_type }}" title="Clone this preset" style="padding:2px 6px;font-size:0.8em;margin-right:4px;">Clone</button>
-    <button class="btn btn-danger preset-delete-btn" data-preset-id="{{ p.id }}" data-engine="{{ engine_type }}" style="font-size:1.1em;padding:2px 5px;line-height:1;" title="Remove">&times;</button>
-   </td>
+      <a href="/webui/engine/{{ engine_type }}/presets/{{ p.id }}" class="btn btn-sm" style="font-size:0.8em;padding:1px 6px;" title="Edit">Edit</a>
+     <button class="btn btn-xs btn-success preset-clone-btn" data-preset-id="{{ p.id }}" data-engine="{{ engine_type }}" title="Clone this preset" style="padding:2px 6px;font-size:0.8em;margin-right:4px;">Clone</button>
+     <button class="btn btn-danger preset-delete-btn" data-preset-id="{{ p.id }}" data-engine="{{ engine_type }}" style="font-size:1.1em;padding:2px 5px;line-height:1;" title="Remove">&times;</button>
+    </td>
 </tr>
 {% else %}
-<tr><td colspan="7" style="text-align:center;color:#888;">No presets defined</td></tr>
+<tr><td colspan="9" style="text-align:center;color:#888;">No presets defined</td></tr>
 {% endfor %}
 </tbody>
 </table>
@@ -51,7 +53,7 @@
   });
 })();
 
-// Column sorting: ID(0 num), Name(1 str), Model(2 str), GPU Device(3 str), Category(4 str), Age(5 timestamp str)
+// Column sorting: ID(0 num), Name(1 str), Model(2 str), Size(3 num), Quant(4 str), Draft(5 str), Category(6 str), Age(7 timestamp)
 var _sortCol = parseInt(qrSettings.get('engine_presets', 'sort_col', '-1'), 10);
 var _sortDir = qrSettings.get('engine_presets', 'sort_dir', '');
 var ths = document.querySelectorAll('.sortable');
@@ -65,7 +67,8 @@ function engPresetsSortTable(col, dir) {
       rows.sort(function(a, b) {
         var cellA = a.cells[col] ? a.cells[col].getAttribute('data-sort') || a.cells[col].textContent.trim() : '';
         var cellB = b.cells[col] ? b.cells[col].getAttribute('data-sort') || b.cells[col].textContent.trim() : '';
-        if (col === 0) {
+        // Numeric sort for ID (0) and Size (3) columns
+        if (col === 0 || col === 3) {
           return dir === 'asc' ? (parseInt(cellA, 10) || 0) - (parseInt(cellB, 10) || 0) : (parseInt(cellB, 10) || 0) - (parseInt(cellA, 10) || 0);
         }
         return dir === 'asc' ? cellA.localeCompare(cellB) : cellB.localeCompare(cellA);

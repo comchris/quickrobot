@@ -1,6 +1,7 @@
 <!-- Single row header with controls and filters -->
 <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
   <h1 style="margin:0;font-size:1.3em;">Playbooks</h1>
+  <span id="playbook-count" style="display:inline-block;padding:2px 8px;background:#555;color:#fff;border-radius:10px;font-size:0.75em;font-weight:normal;"></span>
   <form method="get" action="/webui/playbooks" id="filter-form" style="display:flex;gap:8px;align-items:center;margin:0;">
     <label style="font-size:0.85em;color:#666;">Type:</label>
     <select name="file_type" id="filter-file-type" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
@@ -34,12 +35,13 @@
   <th class="sortable" data-col="5">Use</th>
   <th class="sortable" data-col="6">Err</th>
   <th class="sortable" data-col="7">Age</th>
-  <th>DB Checksum</th>
-  <th>Status</th>
+  <th class="sortable" data-col="8">Status</th>
+  <th class="sortable" data-col="9">Checksum</th>
+  <th class="sortable" data-col="10">Size</th>
 </tr></thead>
 <tbody>
 {% for pb in playbooks %}
-<tr data-checksum="{{ pb.checksum_sha256 or '' }}" data-pb-id="{{ pb.id }}">
+<tr data-checksum="{{ pb.checksum_sha256 or '' }}" data-size="{{ pb.file_size or '0' }}" data-pb-id="{{ pb.id }}">
   <td>{{ pb.id }}</td>
   <td style="font-family:monospace;font-size:0.85em;">{{ pb.playbook_id or '—' }}</td>
   <td><a class="row-link" href="/webui/playbooks/{{ pb.id }}">{{ pb.file_path }}</a></td>
@@ -50,11 +52,12 @@
     {{ pb.error_counter_since_update or 0 }}
   </td>
   <td class="age-cell" data-sort="{{ pb.created_at or '' }}">{{ pb.created_at or '-' }}</td>
-  <td style="font-family:monospace;font-size:0.8em;color:#888;">{{ pb.checksum_sha256[:12] }}...</td>
-  <td class="status-cell" style="font-size:0.85em;"></td>
+  <td class="status-cell" style="font-size:0.85em;font-family:monospace;"></td>
+  <td style="font-family:monospace;font-size:0.75em;color:#888;">{{ pb.checksum_sha256[:12] }}...</td>
+  <td style="font-family:monospace;font-size:0.75em;">{{ formatBytes(pb.file_size) }}</td>
 </tr>
 {% else %}
-<tr><td colspan="10" style="text-align:center;color:#888;">No playbooks registered</td></tr>
+<tr><td colspan="11" style="text-align:center;color:#888;">No playbooks registered</td></tr>
 {% endfor %}
 </tbody>
 </table>
@@ -67,6 +70,17 @@
     cell.textContent = qrFmtRelative(raw);
   });
 })();
+
+// Format bytes to human-readable string
+function formatBytes(bytes) {
+  if (bytes === null || bytes === undefined || bytes === '') return '\u2014';
+  var b = parseInt(bytes, 10);
+  if (isNaN(b) || b === 0) return '0 B';
+  var k = 1024;
+  var sizes = ['B', 'KB', 'MB'];
+  var i = Math.floor(Math.log(b) / Math.log(k));
+  return parseFloat((b / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
 
 // SHA-256 using crypto.subtle (browser native)
 function computeSHA256(str) {
@@ -172,18 +186,21 @@ if (checkBtn) {
     checkBtn.style.pointerEvents = 'none';
     checkBtn.textContent = 'Checking...';
 
-    var matched = 0, mismatched = 0, errors = 0;
+    var matched = 0, hashMismatch = 0, sizeMismatch = 0, bothMismatch = 0, errors = 0;
 
     function processRow(idx) {
       if (idx >= rows.length) {
         // Done — update button text with summary
         var parts = ['Done: ' + matched + ' ok'];
-        if (mismatched > 0) parts.push(mismatched + ' mismatch');
+        if (hashMismatch > 0) parts.push(hashMismatch + ' hash');
+        if (sizeMismatch > 0) parts.push(sizeMismatch + ' size');
+        if (bothMismatch > 0) parts.push(bothMismatch + ' both');
         if (errors > 0) parts.push(errors + ' error');
         checkBtn.textContent = '\u2713 ' + parts.join(', ');
         checkBtn.disabled = false;
         checkBtn.style.pointerEvents = '';
         // Turn button red if any mismatches found
+        var mismatched = hashMismatch + sizeMismatch + bothMismatch;
         if (mismatched > 0) {
           checkBtn.style.background = '#f44336';
         } else {
@@ -204,38 +221,56 @@ if (checkBtn) {
       // Debug: log crypto availability
       console.log('crypto.subtle available:', typeof crypto !== 'undefined' && !!crypto.subtle);
 
-      // Use fetch directly for content endpoint (needs raw Response for .text())
-       fetch(QR_API_BASE + '/playbooks/' + pbId + '/content')
-         .then(function(r) {
-           console.log('pbId=' + pbId + ' status:', r.status, 'url:', r.url);
-           return r.text();
-        })
-        .then(function(text) {
-          console.log('pbId=' + pbId + ' raw length:', text.length, 'first 100:', text.substring(0, 100));
-          try {
-            var data = JSON.parse(text);
-          } catch(e) {
-            throw new Error('JSON parse error: ' + e.message);
-          }
-          if (data && data.status === 'ok' && data.data) {
-            var content = data.data.content || '';
-            return computeSHA256(content);
-          }
-          throw new Error('API error: status=' + (data && data.status) + ' hasData=' + !!(data && data.data));
-        })
-        .then(function(computedHash) {
-          statusCell.textContent = computedHash;
+      // Use native fetch for content endpoint (needs raw Response for .text())
+         fetch(QR_API_BASE + '/playbooks/' + pbId + '/content')
+           .then(function(r) {
+             console.log('pbId=' + pbId + ' status:', r.status, 'url:', r.url);
+             return r.text();
+         })
+         .then(function(text) {
+            console.log('pbId=' + pbId + ' raw length:', text.length, 'first 100:', text.substring(0, 100));
+            try {
+              var data = JSON.parse(text);
+            } catch(e) {
+              throw new Error('JSON parse error: ' + e.message);
+            }
+            if (data && data.status === 'ok' && data.data) {
+               var content = data.data.content || '';
+               return computeSHA256(content).then(function(h) {
+                 return {hash:h, file_size:data.data.file_size, actual_file_size:data.data.actual_file_size};
+               });
+             }
+            throw new Error('API error: status=' + (data && data.status) + ' hasData=' + !!(data && data.data));
+          })
+        .then(function(result) {
+          // Get expected size from data attribute (DB-stored file size)
+          var expectedSize = parseInt(row.getAttribute('data-size') || '0', 10);
+          var actualSize = result.actual_file_size;
+          var computedHash = result.hash;
+          var hashMatch = dbCk && dbCk.toLowerCase() === computedHash.toLowerCase();
+          var sizeMatch = expectedSize > 0 && expectedSize === actualSize;
+
+          // Build two-column status: hash | size
+          var hashStatus = hashMatch ? '\u2713 match' : '\u26A0 mismatch';
+          var sizeStatus = sizeMatch ? '\u2713 ' + formatBytes(actualSize) : '\u26A0 ' + formatBytes(expectedSize) + '\u2192' + formatBytes(actualSize);
+          var hColor = hashMatch ? '#4caf50' : '#f44336';
+          var sColor = sizeMatch ? '#4caf50' : '#f44336';
+          statusCell.innerHTML = '<span style="color:' + hColor + ';">' + hashStatus + '</span> | <span style="color:' + sColor + ';">' + sizeStatus + '</span>';
           statusCell.style.fontFamily = 'monospace';
           statusCell.style.fontSize = '0.75em';
 
-          if (dbCk && dbCk.toLowerCase() === computedHash.toLowerCase()) {
-            statusCell.innerHTML = '<span style="color:#4caf50;">\u2713 match</span>';
+          if (hashMatch && sizeMatch) {
             row.style.background = '';
             matched++;
-          } else {
-            statusCell.innerHTML = '<span style="color:#f44336;">\u26A0 mismatch</span><br><span style="font-size:0.7em;color:#f44336;">expected:' + (dbCk || 'none') + '</span>';
+          } else if (hashMatch && !sizeMatch) {
             row.style.background = '#fff3cd';
-            mismatched++;
+            sizeMismatch++;
+          } else if (!hashMatch && sizeMatch) {
+            row.style.background = '#fff3cd';
+            hashMismatch++;
+          } else {
+            row.style.background = '#ffcdd2';
+            bothMismatch++;
           }
         })
         .catch(function(e) {

@@ -1,10 +1,11 @@
 <!-- Single row header with controls and filters -->
 <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
   <h1 style="margin:0;font-size:1.3em;">Instances</h1>
+  <span id="instance-count" style="display:inline-block;padding:2px 8px;background:#555;color:#fff;border-radius:10px;font-size:0.75em;font-weight:normal;"></span>
   <a href="/webui/instances/new" class="btn btn-primary" style="display:inline-block;padding:4px 12px;border-radius:4px;text-decoration:none;font-size:0.85em;">+ Add Instance</a>
-  <form method="get" action="/webui/instances" id="filter-form" style="display:flex;gap:8px;align-items:center;margin:0;">
+  <form method="get" action="/webui/instances" id="filter-form" style="display:flex;gap:6px;align-items:center;margin:0;flex-wrap:wrap;">
     <label style="font-size:0.85em;color:#666;">Engine:</label>
-    <select name="engine" id="filter-engine" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+    <select name="engine" id="filter-engine" class="filter-auto-refresh" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
       <option value="">Any</option>
       <option value="system_only" {% if filter_engine == 'system_only' %}selected="selected"{% endif %}>System only (ID &lt; 100)</option>
       <option value="exclude_system" {% if filter_engine == 'exclude_system' %}selected="selected"{% endif %}>All except system</option>
@@ -14,7 +15,7 @@
     </select>
 
     <label style="font-size:0.85em;color:#666;">State:</label>
-    <select name="state" id="filter-state" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+    <select name="state" id="filter-state" class="filter-auto-refresh" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
       <option value="">Any</option>
       {% for st in all_states %}
       <option value="{{ st }}" {% if st == filter_state %}selected="selected"{% endif %}>{{ st }}</option>
@@ -22,7 +23,7 @@
     </select>
 
     <label style="font-size:0.85em;color:#666;">Host:</label>
-    <select name="host" id="filter-host" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+    <select name="host" id="filter-host" class="filter-auto-refresh" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
       <option value="all" {% if not filter_host or filter_host == 'all' %}selected="selected"{% endif %}>All hosts</option>
       <option value="active_only" {% if filter_host == 'active_only' %}selected="selected"{% endif %}>Active only</option>
       {% for h in all_hosts %}
@@ -30,32 +31,55 @@
       {% endfor %}
     </select>
 
-    <button type="button" id="apply-refresh-btn" class="btn btn-primary" style="padding:4px 10px;font-size:0.85em;">Apply &amp; Refresh</button>
-    {% if filter_engine or filter_state or filter_host %}
-    <a href="/webui/instances" class="btn" style="padding:4px 10px;font-size:0.85em;text-decoration:none;background:#999;color:#fff;">Clear</a>
-    {% endif %}
-  </form>
-  <div style="display:flex;align-items:center;gap:6px;">
-    <label style="font-size:0.8em;color:#666;">Auto:</label>
-    <select id="refresh-interval" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+    <select id="refresh-interval" style="padding:3px 6px;border:1px solid #ccc;border-radius:3px;font-size:0.8em;width:55px;">
       <option value="0">Off</option>
-      <option value="10">10s</option>
       <option value="30" selected>30s</option>
       <option value="60">60s</option>
       <option value="120">120s</option>
     </select>
-  </div>
+    <button id="health-check-all-btn" class="btn" style="padding:4px 10px;font-size:0.85em;background:#90caf9;border:1px solid #64b5f6;color:#1565c0;" title="Trigger health check for all instances">Health check all</button>
+  </form>
 </div>
 {% if default_refresh_ms is defined %}
 {% endif %}
 
 <style>
-  table th[data-col="6"] { min-width: 80px; }
-  table th[data-col="7"], table td.state-cell { min-width: 40px; white-space: nowrap; }
-  table th[data-col="8"] { min-width: 100px; }
-  .badge-over { display:inline-block;padding:2px 8px;background:#fdebd0;color:#873b00;border-radius:10px;font-size:0.8em;font-weight:600;vertical-align:middle;line-height:inherit; }
-  #filter-form select, #filter-form .btn { white-space:nowrap; }
-</style>
+   /* Age column (col 2) — hidden to save space */
+   table th[data-col="2"], td.age-cell { display: none; }
+   /* Host column (col 4) */
+   table th[data-col="4"] { min-width: 165px; }
+   td.host-cell { word-break: break-word; overflow-wrap: anywhere; }
+   /* Engine column (col 3) */
+   table th[data-col="3"] { min-width: 165px; }
+   td.engine-cell { word-break: break-word; overflow-wrap: anywhere; }
+   /* Remote column (col 5) */
+   table th[data-col="5"] { min-width: 165px; }
+   td.remote-cell { font-size: 0.8em; overflow-wrap: anywhere; }
+   /* Preset & Actions merged column (col 6) — wider to fit buttons below dropdown */
+   table th[data-col="6"] { min-width: 280px; max-width: 400px; }
+   td.preset-actions-cell .preset-sel { max-width: 100%; width: 100%; }
+   /* Action buttons in merged column: flex row with gap, no wrap */
+   td.preset-actions-cell .actions-render { display: flex; gap: 4px; align-items: center; flex-wrap: nowrap; }
+   /* Info column (col 8) */
+   table th[data-col="8"] { min-width: 90px; }
+   /* State column (col 7) */
+   table th[data-col="7"], table td.state-cell { min-width: 80px; white-space: nowrap; padding: 4px 2px; }
+    .badge-over { display:inline-block;padding:2px 8px;border-radius:10px;font-size:0.8em;font-weight:600;vertical-align:middle;line-height:inherit;background:var(--badge-over, #fdebd0);color:var(--fg-over, #873b00); }
+   #filter-form select, #filter-form .btn { white-space:nowrap; }
+   /* Node ping state indicator dot */
+   .ping-dot { display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle;flex-shrink:0; }
+   .ping-dot.online { background:#27ae60; }
+   .ping-dot.offline { background:#e74c3c; }
+   .ping-dot.unknown { background:#95a5a6; }
+    /* Inactive host row highlight */
+     tr.row-inactive-host { background-color:var(--row-inactive, #f0f0f0) !important; }
+    /* Model load progress bar — list view sub-row */
+    .model-load-row td { padding: 6px 12px !important; }
+    .model-load-progress .load-bar { background:#e0e0e0;border-radius:3px;height:6px;overflow:hidden; }
+    .model-load-progress .load-fill { height:100%;border-radius:3px;transition:width 0.3s,background 0.3s; }
+    .model-load-progress .load-fill.loading { background:#2196f3; }
+    .model-load-progress .load-fill.complete { background:#4caf50; }
+  </style>
 <table>
 <thead>
   <tr>
@@ -65,244 +89,167 @@
     <th class="sortable" data-col="3">Engine</th>
     <th class="sortable" data-col="4">Host</th>
     <th class="sortable" data-col="5">Remote</th>
-    <th class="sortable" data-col="6">Preset</th>
+    <th class="sortable" data-col="6">PRESET &amp; ACTIONS</th>
     <th class="sortable" data-col="7">State</th>
-    <th class="sortable" data-col="8">ACTIONS</th>
-    <th class="sortable" data-col="9">Info</th>
+    <th class="sortable" data-col="8">Info</th>
   </tr>
 </thead>
 <tbody>
 {% for inst in instances %}
-<tr>
+<tr data-inst-id="{{ inst.id }}" class="{% if inst._host_inactive or (inst._node_is_active is defined and inst._node_is_active == 0) %}row-inactive-host{% endif %}">
   <!-- ID -->
   <td>{{ inst.id }}</td>
   <!-- Name: link to instance detail -->
   <td><a class="row-link" href="/webui/instances/{{ inst.id }}">{{ inst.name }}</a></td>
   <!-- Age: relative time, sortable via data-sort; system-managed + subprocess use process uptime -->
   <td class="age-cell"{% if (inst.system_managed or inst.engine_type_name == 'subprocess') and inst.process_age_seconds is defined %} data-uptime="{{ inst.process_age_seconds }}"{% endif %} data-sort="{{ inst.created_at or '' }}">{{ inst.created_at or '-' }}</td>
-  <!-- Engine + build number (RPC binding shown in REMOTE column only) -->
-   <td>
-     {{ inst.engine_display_name or inst.engine_type_name }}
-     {% if inst.build_number and inst.engine_type_name in ('llama_server','llama_rpc') %}
-     <br><small style="color:#888;">{{ inst.build_number }}</small>
-     {% endif %}
-   </td>
-  <!-- Host: clickable link to filter instances by this host, also links to node detail -->
-  <td class="host-cell">
-    {% if inst.node_id %}
-    <a href="/webui/instances?host={{ (inst.node_hostname or inst.node_name or '')|urlencode }}" title="Filter by host">{{ inst.node_name or inst.node_hostname or '?' }}</a>
-    {% elif inst.node_hostname %}<a href="/webui/instances?host={{ inst.node_hostname|urlencode }}" title="Filter by host">{{ inst.node_hostname }}</a>{% else %}-{% endif %}
-  </td>
-  <!-- Remote: llama_rpc shows plain text IP:port (binary protocol); all others get HTTP links + proxy -->
+   <!-- Engine + build number (RPC binding shown in REMOTE column only) -->
     <td>
-      {% if inst.engine_type_name == 'llama_rpc' %}
-        {% if inst.node_hostname and inst.port_assigned %}
-          {% set co = inst.config_override or {} %}
-          {% set bind_host = co.get("LLAMA_ARG_HOST", "") or co.get("host", "") or "0.0.0.0" %}
-          <span style="font-size:0.85em;">{{ bind_host }}:{{ inst.port_assigned }}</span>
-          {% if bind_host == '0.0.0.0' %}
-            <span style="font-size:0.7em;color:#e67e22;margin-left:4px;" title="Bind address is 0.0.0.0 — consider adding override for local subnet">⚠</span>
-          {% endif %}
-          {% if inst.id in rpc_to_llama %}
-            <br><small style="color:#666;">→ <a href="/webui/instances/{{ rpc_to_llama[inst.id].id }}">{{ rpc_to_llama[inst.id].name }}</a></small>
-          {% else %}
-            <br><small style="color:#e67e22;">unbound</small>
-          {% endif %}
-        {% else %}-{% endif %}
-      {% elif inst.engine_type_name == 'llama_server' %}
-        {% if inst.node_hostname and inst.port_assigned %}
-          {% set co = inst.config_override or {} %}
-          {% set bind_host = co.get("LLAMA_ARG_HOST", "") or co.get("host", "") or "0.0.0.0" %}
-          <a href="http://{{ inst.node_hostname }}:{{ inst.port_assigned }}" target="_blank" rel="noopener" style="font-size:0.85em;">{{ inst.node_hostname }}:{{ inst.port_assigned }}</a>
-          {% if bind_host == '0.0.0.0' %}
-            <span style="font-size:0.7em;color:#e67e22;margin-left:4px;" title="Bind address is 0.0.0.0 — consider adding override for local subnet">⚠</span>
-          {% endif %}
-          <br>
-          <a href="/webui/proxy/{{ inst.id }}" target="_parent" style="font-size:0.8em;color:#4fc3f7;">[proxy frame]</a>
-        {% else %}-{% endif %}
-      {% elif inst.engine_type_name == "subprocess" %}
-          {% set sp_host = inst.config_override.get("host") or "127.0.0.1" %}
-          {% set sp_port = inst.config_override.get("port") or inst.port_assigned %}
-          {% if sp_port %}<a href="http://{{ sp_host }}:{{ sp_port }}" target="_blank" rel="noopener" style="font-size:0.85em;">{{ sp_host }}:{{ sp_port }}</a>{% else %}-{% endif %}
-       {% elif inst.node_hostname and inst.port_assigned and inst.system_managed == 0 %}
-           <a href="http://{{ inst.node_hostname }}:{{ inst.port_assigned }}" target="_blank" rel="noopener" style="font-size:0.85em;">{{ inst.node_hostname }}:{{ inst.port_assigned }}</a>
+      {{ inst.engine_display_name or inst.engine_type_name }}
+      {% if inst.build_number and inst.engine_type_name in ('llama_server','llama_rpc') %}
+      <br><small style="color:#888;">{{ inst.build_number }}</small>
+      {% endif %}
+    </td>
+ <!-- Host: clickable link to filter instances by this host, also links to node detail -->
+   <td class="host-cell">
+     {% if inst.node_id %}
+     <a href="/webui/instances?host={{ (inst.node_hostname or inst.node_name or '')|urlencode }}" title="Filter by host">
+       {% if inst._node_ping_state is not none and inst.id > 10 %}
+       <span class="ping-dot {{ inst._node_ping_state }}" title="Node ping: {{ inst._node_ping_state }}"></span>
+       {% endif %}
+       {{ inst.node_name or inst.node_hostname or '?' }}
+     </a>
+     {% elif inst.node_hostname %}<a href="/webui/instances?host={{ inst.node_hostname|urlencode }}" title="Filter by host">{{ inst.node_hostname }}</a>{% else %}-{% endif %}
+   </td>
+    <!-- Remote: single-line with status badge inline -->
+      <td class="remote-cell" style="display:flex;flex-direction:column;gap:2px;">
+        {% if inst.engine_type_name == 'llama_rpc' %}
+          {% if inst.node_hostname and inst.port_assigned %}
+            {% set co = inst.config_override or {} %}
+            {% set bind_host = co.get("LLAMA_ARG_HOST", "") or co.get("host", "") or "0.0.0.0" %}
+            <span style="font-size:0.85em;">{{ bind_host }}:{{ inst.port_assigned }}</span>
+            {% if bind_host == '0.0.0.0' %}
+              <span style="font-size:0.7em;color:#e67e22;" title="Bind address is 0.0.0.0">⚠</span>
+            {% endif %}
+            {% if inst.id in rpc_to_llama %}
+              <small style="color:#666;">→ <a href="/webui/instances/{{ rpc_to_llama[inst.id].id }}">{{ rpc_to_llama[inst.id].name }}</a></small>
+            {% else %}
+              <small style="color:#e67e22;" title="Not bound to any llama-server">⊘ unbound</small>
+            {% endif %}
+          {% else %}-{% endif %}
+        {% elif inst.engine_type_name == 'llama_server' %}
+          {% if inst.node_hostname and inst.port_assigned %}
+            {% set co = inst.config_override or {} %}
+            {% set bind_host = co.get("LLAMA_ARG_HOST", "") or co.get("host", "") or "0.0.0.0" %}
+            <a href="http://{{ inst.node_hostname }}:{{ inst.port_assigned }}" target="_blank" rel="noopener" style="font-size:0.85em;">{{ inst.node_hostname }}:{{ inst.port_assigned }}</a>
+            {% if bind_host == '0.0.0.0' %}
+              <span style="font-size:0.7em;color:#e67e22;" title="Bind address is 0.0.0.0">⚠</span>
+            {% endif %}
            <br>
            <a href="/webui/proxy/{{ inst.id }}" target="_parent" style="font-size:0.8em;color:#4fc3f7;">[proxy frame]</a>
-       {% elif inst.system_managed and inst.engine_type_name == "quickrobot-webui" %}
-         {% set ws_host = inst.config_override.get("web_ui_host") or inst.node_hostname or "127.0.0.1" %}
-         {% set ws_port = inst.config_override.get("web_ui_port") or inst.port_assigned %}
-         {% if ws_port %}<a href="http://{{ ws_host }}:{{ ws_port }}" target="_blank" rel="noopener" style="font-size:0.85em;">{{ ws_host }}:{{ ws_port }}</a>{% else %}-{% endif %}
- {% elif inst.system_managed and inst.engine_type_name == "quickrobot-api" %}
-           {% set svc_host = inst.config_override.get("host") or inst.node_hostname or "127.0.0.1" %}
-           {% set svc_port = inst.config_override.get("port") %}
-           {% if not svc_port %}{% if inst.port_assigned %}{% set svc_port = inst.port_assigned %}{% endif %}{% endif %}
-           {% if svc_port %}<a href="http://{{ svc_host }}:{{ svc_port }}" target="_blank" rel="noopener" style="font-size:0.85em;">{{ svc_host }}:{{ svc_port }}</a>{% else %}-{% endif %}
-       {% elif inst.system_managed and inst.engine_type_name == "quickrobot-mcp" %}
-            {% set mcp_host = inst.config_override.get("mcp_host") or inst.config_override.get("mcp_api_host") or inst.node_hostname or "127.0.0.1" %}
-            {% set mcp_port_val = inst.config_override.get("mcp_port") or inst.port_assigned %}
-            {% if mcp_port_val %}<a href="http://{{ mcp_host }}:{{ mcp_port_val }}/sse" target="_blank" rel="noopener" style="font-size:0.85em;">http://{{ mcp_host }}:{{ mcp_port_val }}/sse</a>{% else %}-{% endif %}
-        {% else %}-{% endif %}
-     </td>
- <!-- Preset column -->
-   <td>
-     {# Engine-specific preset name display — hidden for dropdown engines #}
-     {% if inst.engine_type_name == 'subprocess' %}
-        {% set _co = inst.config_override or {} %}
-        {% set _exe = _co.get("executable", "-") %}
-        {% set _cli = _co.get("cli_args", "") %}
-        <span id="preset-name-{{ inst.id }}" class="preset-name-display" style="font-family:monospace;font-size:0.8em;" data-inst-id="{{ inst.id }}">
-          {{ _exe }}{% if _cli %} {{ _cli }}{% endif %}
-        </span>
-        <button class="btn" data-edit-preset="{{ inst.id }}" style="font-size:0.7em;padding:1px 4px;margin-left:4px;color:#666;" title="Edit command line">&#9998;</button>
-     {% elif inst.engine_type_name in ('llama_server', 'llama_rpc', 'iperf3') %}
-         {# Dropdown engines: preset options loaded via AJAX, not Jinja2 #}
-         <span id="preset-name-{{ inst.id }}" class="preset-name-display" data-inst-id="{{ inst.id }}" style="display:none;">{{ inst.preset_name or '-' }}</span>
-         <span class="preset-loading" data-inst-id="{{ inst.id }}" style="font-size:0.7em;color:#999;">loading...</span>
-         <select class="preset-sel" data-inst-id="{{ inst.id }}" data-engine="{{ inst.engine_type_name }}" data-preset-id="{{ inst.preset_id or '' }}" style="display:none;font-size:0.8em;margin-top:4px;padding:2px 4px;border:1px solid #ccc;border-radius:3px;">
-         </select>
-     {% elif inst.preset_name %}
-        {# Other engines: show preset name only if one is set #}
-        <span id="preset-name-{{ inst.id }}" class="preset-name-display">{{ inst.preset_name }}</span>
-     {% endif %}
-      {# MCP tool permissions — only for engine 3 #}
-      {% if inst.engine_type_name == "quickrobot-mcp" %}
-      <div style="margin-top:6px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
-        <label style="display:flex;align-items:center;gap:3px;font-size:0.75em;cursor:pointer;"><input type="checkbox" class="mcp-flag-cb" data-inst-id="{{ inst.id }}" data-flag="allow_reads" {% if inst.mcp_allow_reads %}checked{% endif %}><span>Read</span></label>
-        <label style="display:flex;align-items:center;gap:3px;font-size:0.75em;cursor:pointer;"><input type="checkbox" class="mcp-flag-cb" data-inst-id="{{ inst.id }}" data-flag="allow_writes" {% if inst.mcp_allow_writes %}checked{% endif %}><span>Write</span></label>
-        <label style="display:flex;align-items:center;gap:3px;font-size:0.75em;cursor:pointer;"><input type="checkbox" class="mcp-flag-cb" data-inst-id="{{ inst.id }}" data-flag="allow_proxy" {% if inst.mcp_allow_proxy %}checked{% endif %}><span>Full-API-Proxy-Mode</span></label>
+         {% else %}-{% endif %}
+       {% elif inst.engine_type_name == "subprocess" %}
+           {% set sp_host = inst.config_override.get("host") or "127.0.0.1" %}
+           {% set sp_port = inst.config_override.get("port") or inst.port_assigned %}
+           {% if sp_port %}<a href="http://{{ sp_host }}:{{ sp_port }}" target="_blank" rel="noopener" style="font-size:0.85em;">{{ sp_host }}:{{ sp_port }}</a>{% else %}-{% endif %}
+        {% elif inst.node_hostname and inst.port_assigned and inst.system_managed == 0 %}
+            <a href="http://{{ inst.node_hostname }}:{{ inst.port_assigned }}" target="_blank" rel="noopener" style="font-size:0.85em;">{{ inst.node_hostname }}:{{ inst.port_assigned }}</a>
+            <br>
+            <a href="/webui/proxy/{{ inst.id }}" target="_parent" style="font-size:0.8em;color:#4fc3f7;">[proxy frame]</a>
+        {% elif inst.system_managed and inst.engine_type_name == "quickrobot-webui" %}
+          {% set ws_host = inst.config_override.get("web_ui_host") or inst.node_hostname or "127.0.0.1" %}
+          {% set ws_port = inst.config_override.get("web_ui_port") or inst.port_assigned %}
+          {% if ws_port %}<a href="http://{{ ws_host }}:{{ ws_port }}" target="_blank" rel="noopener" style="font-size:0.85em;">{{ ws_host }}:{{ ws_port }}</a>{% else %}-{% endif %}
+  {% elif inst.system_managed and inst.engine_type_name == "quickrobot-api" %}
+            {% set svc_host = inst.config_override.get("host") or inst.node_hostname or "127.0.0.1" %}
+            {% set svc_port = inst.config_override.get("port") %}
+            {% if not svc_port %}{% if inst.port_assigned %}{% set svc_port = inst.port_assigned %}{% endif %}{% endif %}
+            {% if svc_port %}<a href="http://{{ svc_host }}:{{ svc_port }}" target="_blank" rel="noopener" style="font-size:0.85em;">{{ svc_host }}:{{ svc_port }}</a>{% else %}-{% endif %}
+        {% elif inst.system_managed and inst.engine_type_name == "quickrobot-mcp" %}
+             {% set mcp_host = inst.config_override.get("mcp_host") or inst.config_override.get("mcp_api_host") or inst.node_hostname or "127.0.0.1" %}
+             {% set mcp_port_val = inst.config_override.get("mcp_port") or inst.port_assigned %}
+               {% if mcp_port_val %}<a href="http://{{ mcp_host }}:{{ mcp_port_val }}/sse" target="_blank" rel="noopener" style="font-size:0.85em;">http://{{ mcp_host }}:{{ mcp_port_val }}/sse</a>{% else %}-{% endif %}
+         {% else %}-{% endif %}
+      </td>
+  <!-- Preset & Actions: merged column — preset config on top, action buttons below -->
+    <td class="preset-actions-cell" data-inst-id="{{ inst.id }}">
+      <div class="preset-config-row" style="margin-bottom:6px;">
+      {# Engine-specific preset name display — hidden for dropdown engines #}
+      {% if inst.engine_type_name == 'subprocess' %}
+         {% set _co = inst.config_override or {} %}
+         {% set _exe = _co.get("executable", "-") %}
+         {% set _cli = _co.get("cli_args", "") %}
+         <span id="preset-name-{{ inst.id }}" class="preset-name-display" style="font-family:monospace;font-size:0.8em;" data-inst-id="{{ inst.id }}">
+           {{ _exe }}{% if _cli %} {{ _cli }}{% endif %}
+         </span>
+         <button class="btn" data-edit-preset="{{ inst.id }}" style="font-size:0.7em;padding:1px 4px;margin-left:4px;color:#666;" title="Edit command line">&#9998;</button>
+      {% elif inst.engine_type_name in ('llama_server', 'llama_rpc', 'iperf3') %}
+          {# Dropdown engines: preset options loaded via AJAX, not Jinja2 #}
+          <span id="preset-name-{{ inst.id }}" class="preset-name-display" data-inst-id="{{ inst.id }}" style="display:none;">{{ inst.preset_name or '-' }}</span>
+          <span class="preset-loading" data-inst-id="{{ inst.id }}" style="font-size:0.7em;color:#999;">loading...</span>
+          <select class="preset-sel" data-inst-id="{{ inst.id }}" data-engine="{{ inst.engine_type_name }}" data-preset-id="{{ inst.preset_id or '' }}" style="display:none;font-size:0.8em;margin-top:4px;padding:2px 4px;border:1px solid #ccc;border-radius:3px;">
+          </select>
+      {% elif inst.preset_name %}
+         {# Other engines: show preset name only if one is set #}
+         <span id="preset-name-{{ inst.id }}" class="preset-name-display">{{ inst.preset_name }}</span>
+      {% endif %}
+       {# MCP tool permissions — dropdown for engine 3 #}
+        {% if inst.engine_type_name == "quickrobot-mcp" %}
+        <select class="mcp-perm-sel" data-inst-id="{{ inst.id }}" style="font-size:0.75em;padding:2px 4px;border:1px solid #ccc;border-radius:3px;margin-top:4px;width:100%;">
+          <option value="none" {% if not inst.mcp_allow_reads and not inst.mcp_allow_writes and not inst.mcp_allow_proxy %}selected{% endif %}>None</option>
+          <option value="read" {% if inst.mcp_allow_reads and not inst.mcp_allow_writes and not inst.mcp_allow_proxy %}selected{% endif %}>Read Only</option>
+          <option value="write" {% if inst.mcp_allow_reads and inst.mcp_allow_writes and not inst.mcp_allow_proxy %}selected{% endif %}>Allow Writes</option>
+          <option value="full" {% if inst.mcp_allow_reads and inst.mcp_allow_writes and inst.mcp_allow_proxy %}selected{% endif %}>Full API Proxy</option>
+        </select>
+        {% endif %}
       </div>
-      <button class="btn btn-success mcp-apply-btn" data-inst-id="{{ inst.id }}" style="font-size:0.7em;padding:2px 6px;margin-top:4px;">Apply &amp; Restart</button>
-      {% endif %}
+      {# Action buttons rendered here by initStatusActions() #}
+      <span class="actions-render" data-inst-id="{{ inst.id }}"></span>
     </td>
-  <!-- State: badges stacked vertically (no buttons) -->
-   <td class="state-cell" data-sort="{{ inst.state or '' }}" style="display:flex;flex-direction:column;gap:1px;align-items:flex-start;">
-     {{ status_badge(inst.state) }}{{ system_badge(inst.system_managed) }}
-     {# Orphaned instance indicator (node was deleted) #}
-     {% if not inst.node_name and inst.node_id %}
-     <span title="Node deleted — instance may be orphaned" style="color:#e67e22;font-size:0.7em;">&#9888; ORPHAN</span>
-     {% endif %}
-     {# RPC binding warnings for llama_server instances #}
-     {% if inst.engine_type_name == 'llama_server' and inst._rpc_warnings %}
-       {% for warn in inst._rpc_warnings %}
-       <span title="{{ warn }}" style="color:#e67e22;font-size:0.7em;">&#9888;</span>
-       {% endfor %}
-     {% endif %}
-     {# Per-instance config override indicator #}
-      {% if inst.has_custom_config %}<span class="badge-over" title="Per-instance config overrides active">override</span>{% endif %}
-      {# MCP availability indicator #}
-      {% if inst.engine_type_name == 'quickrobot-mcp' and inst._mcp_available is defined and not inst._mcp_available %}
-        <span title="MCP Python package not installed — cannot start" style="color:#e67e22;font-size:0.7em;">&#9888; NO-MCP</span>
-      {% endif %}
-    </td>
-   <!-- ACTIONS: all control buttons -->
-   <td>
-     {% set sm = inst.system_managed %}
-      {% set show_restart = inst.engine_type_name in ('quickrobot-webui', 'quickrobot-mcp', 'llama_server', 'llama_rpc', 'subprocess') %}
-      {% set mcp_controls = (sm and inst.engine_type_name == 'quickrobot-mcp') %}
-     <span style="display:inline-block;"
-       {% if inst._rpc_warnings %}data-rpc-warnings="{{ inst._rpc_warnings | join('|||') }}"{% endif %}>
-       {% if sm and inst.state == 'unconfigured' %}
-        <small style="color:#e67e22;">system</small>
-        {% elif sm and inst.state in ('running','deployed','started','stopping','starting') %}
-        {# System-managed engines: MCP=3 buttons, WebUI=restart only, API=none #}
-        {% if mcp_controls %}
-        <button class="btn btn-success inst-action" data-action="start" data-id="{{ inst.id }}" title="Start" style="font-size:0.65em;padding:1px 4px;">&#9654;</button>
-        <button class="btn btn-danger inst-action" data-action="stop" data-id="{{ inst.id }}" title="Stop" style="font-size:0.65em;padding:1px 4px;">&#9632;</button>
-        {% endif %}
-        {% if show_restart %}<button class="btn btn-primary inst-action" data-action="restart" data-id="{{ inst.id }}" title="Restart" style="font-size:0.65em;padding:1px 4px;">&#8635;</button>{% endif %}
-        {% elif sm and inst.state == 'stopped' %}
-        {# System-managed engines stopped: MCP=start+restart, WebUI=restart only #}
-        {% if mcp_controls %}
-        <button class="btn btn-success inst-action" data-action="start" data-id="{{ inst.id }}" title="Start" style="font-size:0.65em;padding:1px 4px;">&#9654;</button>
-        {% endif %}
-        {% if show_restart %}<button class="btn btn-primary inst-action" data-action="restart" data-id="{{ inst.id }}" title="Restart" style="font-size:0.65em;padding:1px 4px;">&#8635;</button>{% endif %}
-       {% elif not sm %}
-       {# Unconfigured: Deploy + Delete #}
-       {% if inst.state == 'unconfigured' %}
-       <button class="btn btn-success inst-action" data-action="deploy" data-id="{{ inst.id }}" title="Deploy" style="font-size:0.65em;padding:1px 4px;">&#9655;</button>
-       <button class="btn btn-danger inst-action" data-action="delete" data-id="{{ inst.id }}" title="Delete from DB" style="font-size:0.65em;padding:1px 4px;">&#10006;</button>
-       {% elif inst.state == 'stopped' %}
-       {# Stopped: Start + (Reconfigure for llama/rpc) + Build (llama/rpc) + Undeploy (non-subprocess) + Delete (subprocess) #}
-         {% if inst.engine_type_name in ('llama_server','llama_rpc') %}
-         <button class="btn btn-success inst-action" data-action="reconfigure" data-id="{{ inst.id }}" title="Reconfigure: update env+systemd, reload daemon, restart service (no rebuild)" style="font-size:0.65em;padding:1px 4px;">&#9655; Reconfig</button>
-         {% endif %}
-        <button class="btn btn-success inst-action" data-action="start" data-id="{{ inst.id }}" title="Start" style="font-size:0.65em;padding:1px 4px;">&#9654;</button>
-        {% if inst.engine_type_name in ('llama_server','llama_rpc') %}
-        <button class="btn btn-warning inst-action" data-action="update-build" data-id="{{ inst.id }}" title="Git pull + cmake build" style="font-size:0.65em;padding:1px 4px;">&#9652; Build</button>
-        {% endif %}
-        {% if inst.engine_type_name == 'subprocess' %}
-        <button class="btn btn-danger inst-action" data-action="delete" data-id="{{ inst.id }}" title="Delete from DB" style="font-size:0.65em;padding:1px 4px;">&#10006;</button>
-        {% endif %}
-        {% if inst.engine_type_name not in ('subprocess',) and not inst.system_managed %}
-        <button class="btn btn-secondary inst-action" data-action="undeploy" data-id="{{ inst.id }}" title="Undeploy" style="font-size:0.65em;padding:1px 4px;font-weight:bold;">&times;</button>
-        {% endif %}
-       {% elif inst.state == 'deployed' %}
-        {# Deployed (not running): Start + Stop + Restart + Build (llama/rpc) + Undeploy (non-subprocess) + Delete (subprocess) #}
-        <button class="btn btn-success inst-action" data-action="start" data-id="{{ inst.id }}" title="Start service" style="font-size:0.65em;padding:1px 4px;">&#9654;</button>
-        <button class="btn btn-danger inst-action" data-action="stop" data-id="{{ inst.id }}" title="Stop" style="font-size:0.65em;padding:1px 4px;">&#9632;</button>
-        {% if show_restart %}<button class="btn btn-primary inst-action" data-action="restart" data-id="{{ inst.id }}" title="Restart" style="font-size:0.65em;padding:1px 4px;">&#8635;</button>{% endif %}
-        {% if inst.engine_type_name in ('llama_server','llama_rpc') %}
-        <button class="btn btn-warning inst-action" data-action="update-build" data-id="{{ inst.id }}" title="Git pull + cmake build" style="font-size:0.65em;padding:1px 4px;">&#9652; Build</button>
-        {% endif %}
-        {% if inst.engine_type_name == 'subprocess' %}
-        <button class="btn btn-danger inst-action" data-action="delete" data-id="{{ inst.id }}" title="Delete from DB" style="font-size:0.65em;padding:1px 4px;">&#10006;</button>
-        {% endif %}
-        {% if inst.engine_type_name not in ('subprocess',) and not inst.system_managed %}
-        <button class="btn btn-secondary inst-action" data-action="undeploy" data-id="{{ inst.id }}" title="Undeploy" style="font-size:0.65em;padding:1px 4px;font-weight:bold;">&times;</button>
-        {% endif %}
-      {% elif inst.state == 'running' %}
-        {# Running: Stop + Restart (subprocess) + Delete (subprocess) + Restart (llama/rpc) — no Build #}
-        <button class="btn btn-danger inst-action" data-action="stop" data-id="{{ inst.id }}" title="Stop" style="font-size:0.65em;padding:1px 4px;">&#9632;</button>
-        {% if show_restart %}<button class="btn btn-primary inst-action" data-action="restart" data-id="{{ inst.id }}" title="Restart" style="font-size:0.65em;padding:1px 4px;">&#8635;</button>{% endif %}
-        {% if inst.engine_type_name == 'subprocess' %}
-        <button class="btn btn-danger inst-action" data-action="delete" data-id="{{ inst.id }}" title="Delete from DB" style="font-size:0.65em;padding:1px 4px;">&#10006;</button>
-        {% endif %}
-    {% elif inst.state == 'error' %}
-          {# Error: Stop + Start (if llama_server/rpc) + Restart (subprocess) + Reconfigure + Build (llama/rpc) + Undeploy + Delete #}
-          {% if inst.engine_type_name in ('llama_server','llama_rpc') %}
-          <button class="btn btn-danger inst-action" data-action="stop" data-id="{{ inst.id }}" title="Stop service" style="font-size:0.65em;padding:1px 4px;">&#9632;</button>
-          {% endif %}
-          {% if inst.engine_type_name in ('llama_server','llama_rpc') %}
-          <button class="btn btn-success inst-action" data-action="start" data-id="{{ inst.id }}" title="Start service (no rebuild)" style="font-size:0.65em;padding:1px 4px;">&#9654;</button>
-          {% endif %}
-          {% if inst.engine_type_name == 'subprocess' %}
-          <button class="btn btn-success inst-action" data-action="restart" data-id="{{ inst.id }}" title="Restart subprocess (no rebuild)" style="font-size:0.65em;padding:1px 4px;">&#8635;</button>
-          {% endif %}
-          <button class="btn btn-success inst-action" data-action="reconfigure" data-id="{{ inst.id }}" title="Reconfigure: update env+systemd, reload daemon, restart (no rebuild)" style="font-size:0.65em;padding:1px 4px;">&#9655; Reconfig</button>
-         {% if inst.engine_type_name in ('llama_server','llama_rpc') %}
-          <button class="btn btn-warning inst-action" data-action="update-build" data-id="{{ inst.id }}" title="Git pull + cmake build" style="font-size:0.65em;padding:1px 4px;">&#9652; Build</button>
-          {% endif %}
-          {% if not inst.system_managed %}
-           <button class="btn btn-secondary inst-action" data-action="undeploy" data-id="{{ inst.id }}" title="Undeploy" style="font-size:0.65em;padding:1px 4px;font-weight:bold;">&times;</button>
-          {% endif %}
-           <button class="btn btn-danger inst-action" data-action="delete" data-id="{{ inst.id }}" title="Delete from DB" style="font-size:0.65em;padding:1px 4px;">&#10006;</button>
-     {% else %}
-       {# Other states (starting, deploying, configuring, build_error, compiling, timeout, updating): Stop + Undeploy #}
-       {% if inst.state not in ('stopped','stopping') %}
-       <button class="btn btn-danger inst-action" data-action="stop" data-id="{{ inst.id }}" title="Stop" style="font-size:0.65em;padding:1px 4px;">&#9632;</button>
+  <!-- State: pill badges (original style) -->
+    <td class="state-cell" data-sort="{{ inst.state or '' }}" style="display:flex;flex-direction:column;gap:1px;align-items:flex-start;">
+       {{ status_badge(inst.state) }}
+       {# Orphaned instance indicator (node was deleted) #}
+       {% if not inst.node_name and inst.node_id %}
+       <span title="Node deleted — instance may be orphaned" style="color:#e67e22;font-size:0.7em;">&#9888; ORPHAN</span>
        {% endif %}
-       {% if inst.state in ('running','deployed') %}
-         {% if show_restart %}<button class="btn btn-primary inst-action" data-action="restart" data-id="{{ inst.id }}" title="Restart" style="font-size:0.65em;padding:1px 4px;">&#8635;</button>{% endif %}
-         {% endif %}
-        {% if not inst.system_managed %}
-        <button class="btn btn-secondary inst-action" data-action="undeploy" data-id="{{ inst.id }}" title="Undeploy" style="font-size:0.65em;padding:1px 4px;font-weight:bold;">&times;</button>
-        {% endif %}
-        {% endif %}
+       {# RPC binding warnings for llama_server instances #}
+       {% if inst.engine_type_name == 'llama_server' and inst._rpc_warnings %}
+         {% for warn in inst._rpc_warnings %}
+         <span title="{{ warn }}" style="color:#e67e22;font-size:0.7em;">&#9888;</span>
+         {% endfor %}
        {% endif %}
-     </span>
-     {# Force delete button for orphaned instances #}
-     {% if not inst.node_name and inst.node_id %}
-     <button class="btn btn-danger inst-action" data-action="force-delete" data-id="{{ inst.id }}" title="Force delete (node deleted)" style="font-size:0.65em;padding:1px 4px;margin-left:4px;">&#10006; FDEL</button>
-     {% endif %}
-   </td>
-  <!-- Info: relative time + refresh button -->
+       {# Per-instance config override indicator #}
+        {% if inst.has_custom_config %}<span class="badge-over" title="Per-instance config overrides active">override</span>{% endif %}
+        {# MCP availability indicator #}
+        {% if inst.engine_type_name == 'quickrobot-mcp' and inst._mcp_available is defined and not inst._mcp_available %}
+          <span title="MCP Python package not installed — cannot start" style="color:#e67e22;font-size:0.7em;">&#9888; NO-MCP</span>
+        {% endif %}
+     </td>
+   <!-- Info: relative time + refresh button (stacked vertically) -->
   <td class="last-info-cell" data-ts="{{ inst.last_state_change or '' }}" data-ts-utc="{{ inst.last_state_change or '' }}" data-id="{{ inst.id }}">
-    {{ inst.last_state_change[:19] if inst.last_state_change else '-' }}
-    <button class="btn btn-xs refresh-inst" data-id="{{ inst.id }}" title="Query remote status" style="font-size:0.7em;padding:2px 5px;">&#8635;</button>
+    {% if inst.last_state_change %}{{ inst.last_state_change[:19] }}<br>{% endif %}
+    <button class="btn btn-xs refresh-inst" data-id="{{ inst.id }}" title="Trigger remote health check" style="font-size:0.7em;padding:2px 5px;background:#90caf9;border:1px solid #64b5f6;color:#1565c0;">&#8635;</button>
   </td>
 </tr>
+{# Model Load Progress (list view) — llama_server only, shown as sub-row #}
+{% if inst.engine_type_name == 'llama_server' %}
+<tr class="model-load-row" data-inst-id="{{ inst.id }}" style="display:none;">
+  <td colspan="9" style="padding:4px 12px 8px 12px;background:#fafafa;border-top:1px solid #eee;">
+    <div class="model-load-progress" data-inst-id="{{ inst.id }}">
+      <div style="display:flex;justify-content:space-between;font-size:0.75em;color:#666;margin-bottom:2px;">
+        <span class="ml-stage"></span>
+        <span class="ml-pct">0%</span>
+      </div>
+      <div class="load-bar" style="background:#e0e0e0;border-radius:3px;height:6px;overflow:hidden;">
+        <div class="load-fill" style="width:0%;"></div>
+      </div>
+    </div>
+  </td>
+</tr>
+{% endif %}
 {% else %}
-<tr><td colspan="10" style="text-align:center;color:#888;">No instances match filters</td></tr>
+<tr><td colspan="9" style="text-align:center;color:#888;">No instances match filters</td></tr>
 {% endfor %}
 </tbody>
 </table>
@@ -332,12 +279,12 @@
     var raw = cell.getAttribute('data-sort') || cell.textContent.trim();
     cell.textContent = qrFmtRelative(raw);
   });
-  document.querySelectorAll('.last-info-cell').forEach(function(cell) {
-    var raw = cell.getAttribute('data-ts-utc') || cell.getAttribute('data-ts') || cell.textContent.trim();
+   document.querySelectorAll('.last-info-cell').forEach(function(cell) {
+    var raw = cell.getAttribute('data-ts-utc') || cell.getAttribute('data-ts') || '';
     var id = cell.getAttribute('data-id');
-    var btnHtml = '<button class="btn btn-xs refresh-inst" data-id="' + (id||'') + '" title="Query remote status" style="font-size:0.7em;padding:2px 5px;">&#8635;</button>';
+    var btnHtml = '<br><button class="btn btn-xs refresh-inst" data-id="' + (id||'') + '" title="Trigger remote health check" style="font-size:0.7em;padding:2px 5px;background:#90caf9;border:1px solid #64b5f6;color:#1565c0;">&#8635;</button>';
     // qrFmtTimestamp: <24h returns relative-only, >=24h returns "datetime (relative)"
-    if (raw && raw !== '-') {
+    if (raw && raw !== '-' && raw.trim()) {
       var formatted = qrFmtTimestamp(raw);
       // Check if it contains parentheses (means >=24h, has datetime + relative)
       var parenIdx = formatted.indexOf('(');
@@ -350,8 +297,9 @@
         // Relative-only (<24h)
         cell.innerHTML = formatted + ' ' + btnHtml;
       }
-    } else {
-      cell.innerHTML = '-' + ' ' + btnHtml;
+    } else if (raw && raw !== '-') {
+      // Only show button, no timestamp text
+      cell.innerHTML = btnHtml;
     }
   });
 })();
@@ -415,13 +363,14 @@ ths.forEach(function(th) {
 });
 
 // Wrap action buttons to second row when > 3 buttons (fits narrow viewports)
-(function(){
-  var rows = document.querySelectorAll('.state-cell');
-  rows.forEach(function(stateCell) {
-    var actionTd = stateCell.parentElement.querySelector('td:nth-child(9)');
-    if (!actionTd) return;
-    var btns = actionTd.querySelectorAll('.inst-action');
-    if (btns.length <= 3) return;
+function wrapActionButtons() {
+  var actionCells = document.querySelectorAll('.actions-render');
+  for (var ci = 0; ci < actionCells.length; ci++) {
+    var container = actionCells[ci];
+    // Skip merged column — uses flexbox with gap, no wrapping needed
+    if (container.closest('.preset-actions-cell')) continue;
+    var btns = container.querySelectorAll('.inst-action');
+    if (btns.length <= 3) continue;
     // Split: first 3 in row 1, rest wrapped to row 2 with <br> spacer
     var frag = document.createDocumentFragment();
     for (var i = 0; i < btns.length; i++) {
@@ -435,121 +384,17 @@ ths.forEach(function(th) {
       clone.setAttribute('data-action', origBtn.getAttribute('data-action'));
       clone.setAttribute('data-id', origBtn.getAttribute('data-id'));
       clone.setAttribute('title', origBtn.getAttribute('title'));
-      // Restore inline padding that may have been overridden
       clone.style.padding = '1px 4px';
       clone.addEventListener('click', function(){ origBtn.click(); });
       frag.appendChild(clone);
     }
-    actionTd.innerHTML = '';
-    actionTd.appendChild(frag);
-  });
-})();
+    container.innerHTML = '';
+    container.appendChild(frag);
+  }
+}
 
-document.querySelectorAll('.inst-action').forEach(function(btn) {
-  btn.addEventListener('click', function() {
-    var action = this.getAttribute('data-action');
-    var id = this.getAttribute('data-id');
-    // Check for RPC binding warnings on the row
-    var rpcWarnings = btn.closest('tr').getAttribute('data-rpc-warnings');
-    if (rpcWarnings) {
-      var warns = rpcWarnings.split('|||');
-      var msg = 'Not all bound RPCs are running:\n';
-      warns.forEach(function(w) { msg += '  - ' + w + '\n'; });
-      msg += '\nAre you sure you want to continue?';
-      if (!confirm(msg)) return;
-    } else if (!confirm('Are you sure you want to ' + action + ' this instance?')) {
-      return;
-    }
-    var ep = action;
-    // Determine HTTP method: DELETE for delete action, POST for others
-    var method = action === 'delete' ? 'DELETE' : 'POST';
-    // Busy indicator: disable button, show dots, show toast
-    var origHTML = btn.innerHTML;
-    btn.disabled = true;
-    btn.style.pointerEvents = 'none';
-    btn.style.opacity = '0.6';
-    var dots = ['...', '. .', ' . .'];
-    var dotIdx = 0;
-    var dotInterval = setInterval(function() {
-      btn.textContent = dots[dotIdx % 3];
-      dotIdx++;
-    }, 400);
-    // Construct URL: delete uses /instances/<id>, others use /instances/<id>/<action>
-    var url = action === 'delete' ? '/api/v1/instances/' + id : '/api/v1/instances/' + id + '/' + ep;
-    // Force-delete sends POST with clean_remote body
-    if (action === 'force-delete') {
-      method = 'POST';
-    }
-    var toast = document.createElement('div');
-    toast.style.cssText = 'position:fixed;top:20px;right:20px;z-index:9999;padding:10px 16px;background:#1976d2;color:#fff;border-radius:4px;font-size:0.85em;opacity:0.95;box-shadow:0 2px 8px rgba(0,0,0,0.2);';
-    toast.textContent = action.charAt(0).toUpperCase() + action.slice(1) + 'ing instance... please wait';
-    document.body.appendChild(toast);
-    fetch(url, {method: method})
-      .then(function(r) {
-        var ct = r.headers.get('content-type') || '';
-        if (ct.indexOf('application/json') !== -1) return r.json();
-        return r.text().then(function(t) { throw new Error(t); });
-      })
-      .then(function(data) {
-        clearInterval(dotInterval);
-        toast.style.opacity = '0';
-        setTimeout(function() { toast.remove(); }, 300);
-        if (data.status === 'ok') {
-          btn.style.pointerEvents = '';
-          btn.style.opacity = '';
-          setTimeout(function() { window.location.reload(); }, 1200);
-        } else {
-          btn.disabled = false;
-          btn.textContent = origHTML;
-          btn.style.pointerEvents = '';
-          btn.style.opacity = '';
-          alert('Action failed: ' + (data.message || JSON.stringify(data)));
-        }
-      }).catch(function(e) {
-         clearInterval(dotInterval);
-         toast.style.opacity = '0';
-         setTimeout(function() { toast.remove(); }, 300);
-         btn.disabled = false;
-         btn.textContent = origHTML;
-         btn.style.pointerEvents = '';
-         btn.style.opacity = '';
-         // Self-restart detection: if restarting a system-managed instance,
-         // the fetch may fail because the webui process is killed. In that case,
-         // show a friendly message and wait for the service to come back.
-         if (action === 'restart' && (parseInt(id, 10) === 1 || parseInt(id, 10) === 2 || parseInt(id, 10) === 3)) {
-           var toast2 = document.createElement('div');
-           toast2.style.cssText = 'position:fixed;top:20px;right:20px;z-index:9999;padding:10px 16px;background:#388e3c;color:#fff;border-radius:4px;font-size:0.85em;opacity:0.95;box-shadow:0 2px 8px rgba(0,0,0,0.2);';
-           toast2.textContent = 'Restarting... page will reload when service is back (30s max)';
-           document.body.appendChild(toast2);
-           // Poll for the API to come back, then reload
-           var tries = 0;
-           var poll = setInterval(function() {
-             tries++;
-             qrApi('/instances', {method: 'GET'})
-               .then(function(data) {
-                 if (data.status === 'ok') {
-                   clearInterval(poll);
-                   toast2.style.opacity = '0';
-                   setTimeout(function() { toast2.remove(); }, 500);
-                   window.location.reload();
-                 }
-               }).catch(function() {
-                 // Best effort — continue polling
-               });
-             if (tries >= 30) {
-               clearInterval(poll);
-               toast2.textContent = 'Restart may still be in progress. Refresh the page.';
-               setTimeout(function() { toast2.remove(); }, 3000);
-             }
-           }, 1000);
-         } else {
-           alert('Request failed: ' + e);
-         }
-       });
-  });
-});
 
-document.querySelectorAll('.refresh-inst').forEach(function(btn) {
+ document.querySelectorAll('.refresh-inst').forEach(function(btn) {
    btn.addEventListener('click', function() {
      var id = this.getAttribute('data-id');
      var origHTML = btn.innerHTML;
@@ -653,56 +498,134 @@ document.querySelectorAll('.refresh-inst').forEach(function(btn) {
       qrApi('/engine/' + encodeURIComponent(etype) + '/presets/' + newPreset)
         .then(function(data) {
           var p = data.data || {};
-          var details = [];
-          details.push('Instance: ' + document.querySelector('#preset-name-' + instId).textContent);
-          if (p.model_path) details.push('Model: ' + p.model_path);
-          if (p.category) details.push('Category: ' + p.category);
-          if (p.tags) details.push('Tags: ' + p.tags);
-          var msg = 'Switch to preset "' + (p.name || 'preset #' + newPreset) + '"?\n\n' + details.join('\n');
-          if (!confirm(msg)) {
-            sel.selectedIndex = sel.options.length - 1;
-            return;
-          }
-          _proceedChangePreset(instId, newPreset);
+          // Fetch model details + instance info in parallel
+          var modelPromise = (p.model_id ? qrApi('/engine/' + encodeURIComponent(etype) + '/models/' + p.model_id) : Promise.resolve({data: null}));
+          var instPromise = qrApi('/instances/' + instId);
+          return Promise.all([modelPromise, instPromise]).then(function(results) {
+            var modelData = results[0].data || {};
+            var instData = results[1].data || {};
+            var currentPresetLabel = '';
+            if (instData.preset_name) {
+              currentPresetLabel = instData.preset_name;
+            } else if (instData.preset_id) {
+              currentPresetLabel = 'preset #' + instData.preset_id;
+            }
+            var details = [];
+            details.push('Switch to preset ' + p.id + ': "' + (p.name || '') + '"');
+            if (modelData.id && modelData.name) {
+              var sizeStr = '';
+              if (modelData.size_bytes !== undefined && modelData.size_bytes !== null) {
+                var gb = (modelData.size_bytes / (1024*1024*1024));
+                sizeStr = ' ' + gb.toFixed(2) + ' GB';
+              }
+              details.push('Model ' + modelData.id + ': "' + modelData.name + '" ' + (modelData.quantization || '') + sizeStr);
+            }
+            var instName = document.querySelector('#preset-name-' + instId) ? document.querySelector('#preset-name-' + instId).textContent : instData.name || '';
+            details.push('On Instance: ' + instName);
+            var nodeHost = instData.node_hostname || '';
+            if (nodeHost) details.push('On Host: ' + nodeHost);
+            if (currentPresetLabel) {
+              details.push('Currently using: ' + currentPresetLabel);
+            }
+            if (p.category) details.push('Category: ' + p.category);
+            var msg = details.join('\n');
+            if (!confirm(msg)) {
+              sel.selectedIndex = sel.options.length - 1;
+              return;
+            }
+            _proceedChangePreset(instId, newPreset);
+          });
         }).catch(function(e) { _proceedChangePreset(instId, newPreset); });
     });
   });
+
+  // ---- SSE Model Load Progress Client ----
+  var _mlConnections = {}; // instId -> { es, loaded }
+  function mlConnectSSE(instId) {
+    if (_mlConnections[instId]) return;
+    var row = document.querySelector('tr.model-load-row[data-inst-id="' + instId + '"]');
+    if (!row) return;
+    var progEl = row.querySelector('.model-load-progress');
+    if (!progEl) return;
+    var fillEl = progEl.querySelector('.load-fill');
+    var stageEl = progEl.querySelector('.ml-stage');
+    var pctEl = progEl.querySelector('.ml-pct');
+    if (!fillEl || !stageEl || !pctEl) return;
+
+    row.style.display = '';
+    _mlConnections[instId] = { loaded: false };
+    var es = new EventSource('/api/v1/instances/' + instId + '/models-sse');
+    _mlConnections[instId].es = es;
+    var stage = '';
+
+    function updateProgress(s, value) {
+      stage = s || stage;
+      var labels = {text_model:'Loading weights',spec_model:'Loading draft',mmproj_model:'Loading projector',fit_params:'Initializing'};
+      stageEl.textContent = labels[stage] || (s ? 'Loading: ' + s : 'Loading model...');
+      var pct;
+      if (stage === 'text_model') { pct = value !== undefined && value !== null ? Math.round(value * 90) : 0; }
+      else if (value !== undefined && value !== null && value >= 1.0) { pct = 100; }
+      else if (value !== undefined && value !== null) { pct = 90 + Math.round(value * 10); }
+      else { return; }
+      pct = Math.min(100, Math.max(0, pct));
+      fillEl.style.width = pct + '%';
+      pctEl.textContent = pct + '%';
+      if (pct >= 100) {
+        fillEl.className = 'load-fill complete';
+        _mlConnections[instId].loaded = true;
+        setTimeout(function() { window.location.reload(); }, 2000);
+      } else {
+        fillEl.className = 'load-fill loading';
+      }
+    }
+
+    es.addEventListener('message', function(e) {
+      try {
+        var msg = JSON.parse(e.data);
+        if (msg.status === 'loaded' || msg.status === 'sleeping') { updateProgress('loaded', 1.0); }
+        else if (msg.status === 'unloaded') { row.style.display = 'none'; es.close(); delete _mlConnections[instId]; }
+        else if (msg.progress) { updateProgress(msg.progress.stage, msg.progress.value); }
+      } catch(err) {}
+    });
+    es.onerror = function() { row.style.display = 'none'; es.close(); delete _mlConnections[instId]; };
+  }
 
   window._proceedChangePreset = function(id, preset) {
     var nameEl = document.getElementById('preset-name-' + id);
     var sel = document.querySelector('.preset-sel[data-inst-id="' + id + '"]');
     if (sel) sel.disabled = true;
-    var toast = document.createElement('div');
-    toast.style.cssText = 'position:fixed;top:20px;right:20px;z-index:9999;padding:10px 16px;background:#1976d2;color:#fff;border-radius:4px;font-size:0.85em;opacity:0.95;box-shadow:0 2px 8px rgba(0,0,0,0.2);';
-    toast.textContent = 'Applying preset change... stopping instance';
-    document.body.appendChild(toast);
     qrApi('/instances/' + id, {
       method: 'PUT',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({preset_id: preset, skip_build: true})
     })
     .then(function(data) {
-      toast.style.opacity = '0';
-      setTimeout(function() { toast.remove(); }, 300);
       if (data.status === 'ok') {
         var pn = data.data.preset_name || '-';
         if (nameEl) nameEl.textContent = pn;
-        var t2 = document.createElement('div');
-        t2.style.cssText = 'position:fixed;top:20px;right:20px;z-index:9999;padding:10px 16px;background:#388e3c;color:#fff;border-radius:4px;font-size:0.85em;opacity:0.95;box-shadow:0 2px 8px rgba(0,0,0,0.2);';
-        t2.textContent = 'Deploying new preset... reloading page';
-        document.body.appendChild(t2);
-        setTimeout(function() {
-          t2.style.opacity = '0';
-          setTimeout(function() { t2.remove(); }, 300);
-          window.location.reload();
-        }, 1000);
+        // For llama_server, monitor model load progress via SSE
+        if (data.data.engine_type_name === 'llama_server') {
+          mlConnectSSE(id);
+          // Poll status to detect loading state and manage SSE connection lifecycle
+          var pollInterval = setInterval(function() {
+            qrApi('/instances/' + id + '/status').then(function(sd) {
+              var st = (sd && sd.data && sd.data.state) || '';
+              if (st === 'running' || st === 'error') {
+                clearInterval(pollInterval);
+                var row = document.querySelector('tr.model-load-row[data-inst-id="' + id + '"]');
+                if (row) row.style.display = 'none';
+              } else if (st === 'loading' && !_mlConnections[id]) {
+                // SSE was closed (server not ready), reconnect now
+                mlConnectSSE(id);
+              }
+            }).catch(function(){});
+          }, 3000);
+        }
       } else {
         if (sel) sel.disabled = false;
         alert('Preset change failed: ' + (data.message || JSON.stringify(data)));
       }
     }).catch(function(e) {
-      toast.style.opacity = '0';
-      setTimeout(function() { toast.remove(); }, 300);
       if (sel) sel.disabled = false;
       var errMsg = typeof e === 'string' ? e : (e.message || e.toString());
       alert('Preset change failed: ' + errMsg);
@@ -714,11 +637,42 @@ document.querySelectorAll('.refresh-inst').forEach(function(btn) {
 // Refresh interval timer
 var refreshInterval = null;
 var refreshSelect = document.getElementById('refresh-interval');
-var applyRefreshBtn = document.getElementById('apply-refresh-btn');
+var healthCheckAllBtn = document.getElementById('health-check-all-btn');
 var filterForm = document.getElementById('filter-form');
 var filterEngine = document.getElementById('filter-engine');
 var filterState = document.getElementById('filter-state');
 var filterHost = document.getElementById('filter-host');
+
+// Store/restore filters via qrSettings for persistence across navigation
+(function persistFilters() {
+  // Only restore from localStorage if the URL has no query params.
+  // If the URL has query params, the server already applied them (Jinja2
+  // rendered the correct dropdown selections). Restoring from localStorage
+  // would overwrite the server's authoritative values with stale data.
+  if (window.location.search) return;
+  var stored = qrSettings.get('instances', 'filters', null);
+  if (stored && typeof stored === 'object') {
+    if (stored.engine && filterEngine) filterEngine.value = stored.engine;
+    if (stored.state && filterState) filterState.value = stored.state;
+    if (stored.host && filterHost) filterHost.value = stored.host;
+  }
+})();
+
+function saveFilters() {
+  qrSettings.set('instances', 'filters', {
+    engine: filterEngine ? filterEngine.value : '',
+    state: filterState ? filterState.value : '',
+    host: filterHost ? filterHost.value : ''
+  });
+}
+
+// Auto-refresh on any filter select change
+document.querySelectorAll('.filter-auto-refresh').forEach(function(sel) {
+  sel.addEventListener('change', function() {
+    saveFilters();
+    apiReload();
+  });
+});
 
 // Pause auto-refresh while edit overlay is open to prevent losing unsaved changes
 var _editOverlayOpen = false;
@@ -735,7 +689,7 @@ function startAutoRefresh(seconds) {
     return;
   }
   stopAutoRefresh();
-  refreshInterval = setInterval(function() { queryAndReload(); }, seconds * 1000);
+  refreshInterval = setInterval(function() { apiReload(); }, seconds * 1000);
 }
 
 // Check before each auto-refresh cycle: if edit overlay opened during pause, skip reload
@@ -745,16 +699,57 @@ var checkEditOverlay = function() {
   _lastCheckEditOpen = sessionStorage.getItem('qr_edit_overlay_open') === 'true';
 };
 
-function queryAndReload() {
+// Lightweight API polling — fetches instance list, replaces page (preserves filters)
+function apiReload() {
   checkEditOverlay();
-  if (_lastCheckEditOpen) return; // Skip reload while edit overlay is open
+  if (_lastCheckEditOpen) return;
+  var url = '/webui/instances';
+  // Preserve active filters in URL
+  var params = [];
+  if (filterEngine && filterEngine.value) params.push('filter_engine=' + encodeURIComponent(filterEngine.value));
+  if (filterState && filterState.value) params.push('filter_state=' + encodeURIComponent(filterState.value));
+  if (filterHost && filterHost.value) params.push('filter_host=' + encodeURIComponent(filterHost.value));
+  if (params.length > 0) url += '?' + params.join('&');
+  window.location.href = url;
+}
+
+// Heavy health check: query-status on all active instances, skip inactive-host rows
+function healthCheckAll() {
+  if (healthCheckAllBtn) {
+    var origHTML = healthCheckAllBtn.innerHTML;
+    healthCheckAllBtn.textContent = 'Checking...';
+    healthCheckAllBtn.disabled = true;
+  }
   var buttons = document.querySelectorAll('.refresh-inst');
-  if (!buttons.length) { window.location.reload(); return; }
+  if (!buttons.length) {
+    // No instances — just reload
+    window.location.reload();
+    return;
+  }
   var ids = [];
-  buttons.forEach(function(b) { var id = b.getAttribute('data-id'); if (id) ids.push(id); });
+  var skipped = 0;
+  buttons.forEach(function(b) {
+    var row = b.closest('tr');
+    if (row && row.classList.contains('row-inactive-host')) { skipped++; return; }
+    var id = b.getAttribute('data-id'); if (id) ids.push(id);
+  });
+  if (!ids.length) {
+    // All instances on inactive hosts — just reload
+    if (healthCheckAllBtn) { healthCheckAllBtn.textContent = origHTML; healthCheckAllBtn.disabled = false; }
+    window.location.reload();
+    return;
+  }
   var idx = 0;
   function next() {
-    if (idx >= ids.length) { window.location.reload(); return; }
+    if (idx >= ids.length) {
+      // All done — reload to show updated state
+      if (healthCheckAllBtn) {
+        healthCheckAllBtn.textContent = origHTML;
+        healthCheckAllBtn.disabled = false;
+      }
+      window.location.reload();
+      return;
+    }
     var curId = ids[idx++];
     qrApi('/instances/' + curId + '/query-status')
       .catch(function() { /* best effort, continue */ });
@@ -781,6 +776,11 @@ refreshSelect.addEventListener('change', function() {
   saveRefreshInterval(val);
 });
 
+// Health check all button handler
+if (healthCheckAllBtn) {
+  healthCheckAllBtn.addEventListener('click', healthCheckAll);
+}
+
 // Load stored refresh interval on page load — default to "30s"
 (function() {
   var stored = qrSettings.get('instances', 'refresh_sec', '30');
@@ -801,30 +801,16 @@ refreshSelect.addEventListener('change', function() {
   startAutoRefresh(stored ? parseInt(stored, 10) : 30);
 })();
 
-applyRefreshBtn.addEventListener('click', function() {
-  // Check if any filter is active
-  var hasFilter = (filterEngine.value !== '') || (filterState.value !== '') || (filterHost && filterHost.value !== '');
-  if (hasFilter) {
-    filterForm.submit();
-  } else {
-    // No filters: clear URL and reload to show all instances
-    window.location.href = '/webui/instances';
-  }
-});
-
-// MCP tool permission Apply & Restart handler
-document.querySelectorAll('.mcp-apply-btn').forEach(function(btn) {
-  btn.addEventListener('click', function() {
+// MCP tool permission dropdown handler
+document.querySelectorAll('.mcp-perm-sel').forEach(function(sel) {
+  sel.addEventListener('change', function() {
     var instId = this.getAttribute('data-inst-id');
-    // Collect checkbox states
+    var mode = this.value; // none | read | write | full
     var reads = false, writes = false, proxy = false;
-    document.querySelectorAll('.mcp-flag-cb[data-inst-id="' + instId + '"]').forEach(function(cb) {
-      var flag = cb.getAttribute('data-flag');
-      if (flag === 'allow_reads' && cb.checked) reads = true;
-      if (flag === 'allow_writes' && cb.checked) writes = true;
-      if (flag === 'allow_proxy' && cb.checked) proxy = true;
-    });
-    // Save via API
+    if (mode === 'read') reads = true;
+    else if (mode === 'write') { reads = true; writes = true; }
+    else if (mode === 'full') { reads = true; writes = true; proxy = true; }
+
     var self = this;
     self.disabled = true;
     self.textContent = 'Saving...';
@@ -839,7 +825,7 @@ document.querySelectorAll('.mcp-apply-btn').forEach(function(btn) {
     })
     .then(function(data) {
       if (data.status === 'ok') {
-        // Restart MCP instance
+        // Restart MCP via common framework (same as restart_system endpoint)
         return qrApi('/instances/' + instId + '/restart_system', {method: 'POST'});
       } else {
         throw new Error(data.message || 'Save failed');
@@ -847,8 +833,7 @@ document.querySelectorAll('.mcp-apply-btn').forEach(function(btn) {
     })
     .then(function(data) {
       if (data.status === 'ok') {
-        self.textContent = 'Applied ✓';
-        self.style.background = '#4caf50';
+        self.textContent = 'Saved ✓';
         setTimeout(function() { window.location.reload(); }, 1500);
       } else {
          throw new Error(data.message || 'Restart failed');
@@ -856,8 +841,8 @@ document.querySelectorAll('.mcp-apply-btn').forEach(function(btn) {
      })
     .catch(function(err) {
       self.textContent = 'Error';
-      self.style.background = '#f44336';
-      setTimeout(function() { self.disabled = false; }, 2000);
+      self.disabled = false;
+      setTimeout(function() { location.reload(); }, 2000);
     });
   });
 });
@@ -960,6 +945,54 @@ document.querySelectorAll('.mcp-apply-btn').forEach(function(btn) {
       });
     });
 });
+})();
+
+// STATUS-1: Use shared renderInstanceActions from base.html for action buttons
+// Adds system-managed badge in state column (not part of shared renderer)
+(function initStatusActions() {
+  
+  var _statusCache = {};
+
+  function fetchStatus(instId) {
+    if (_statusCache[instId]) return Promise.resolve(_statusCache[instId]);
+    return qrApi('/instances/' + instId + '/status')
+      .then(function(data) {
+        var statusData = (data && data.data) || {};
+        _statusCache[instId] = statusData;
+        return statusData;
+      })
+      .catch(function() { return null; });
+  }
+
+  // Auto-render for visible rows on load (non-blocking)
+  setTimeout(function() {
+    var actionCells = document.querySelectorAll('.actions-render[data-inst-id]');
+    
+    var promises = [];
+    for (var i = 0; i < actionCells.length; i++) {
+      (function(cell, instId) {
+        promises.push(
+          fetchStatus(instId).then(function(statusData) {
+            if (!statusData) return;
+            // Use shared renderer from base.html (renderInstanceActions)
+            renderInstanceActions(instId, statusData, cell);
+            // Add system-managed badge in state column if applicable
+            if (statusData.system_managed) {
+              var stateCell = document.querySelector('tr[data-inst-id="' + instId + '"] td.state-cell');
+              if (stateCell && !stateCell.querySelector('.badge-system')) {
+                var sysBadge = document.createElement('span');
+                sysBadge.className = 'badge badge-system';
+                sysBadge.textContent = 'system';
+                stateCell.appendChild(sysBadge);
+              }
+            }
+          })
+        );
+      })(actionCells[i], actionCells[i].getAttribute('data-inst-id'));
+    }
+    // After all renders complete, wrap buttons that exceed 3
+    Promise.all(promises).then(function() { setTimeout(wrapActionButtons, 100); });
+  }, 500);
 })();
 
 </script>

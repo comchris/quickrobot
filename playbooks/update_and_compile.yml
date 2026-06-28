@@ -1,6 +1,6 @@
 # @name: Update And Compile
-# @playbook_id: UPDATE_AND_COMPILE_V1
-# @version: 1
+# @playbook_id: update_and_compile
+# @version: 2
 # @timeout: 3600
 # update_and_compile.yml — Standalone git pull + cmake rebuild
 # Separated from deploy — only handles source update and compilation.
@@ -96,12 +96,12 @@
 
         - name: Verify new binary exists
           stat:
-            path: "{{ node_build_dir | default('/opt/quickrobot/llama.cpp/build') }}/bin/{{ 'llama-server' if engine_type == 'llama_server' else 'rpc-server' }}"
+            path: "{{ node_build_dir | default('/opt/quickrobot/llama.cpp/build') }}/bin/{{ 'llama-server' if engine_type == 'llama_server' else 'ggml-rpc-server' }}"
           register: new_binary
 
         - name: Fail if binary not found after build
           fail:
-            msg: "Build completed but {{ 'llama-server' if engine_type == 'llama_server' else 'rpc-server' }} not found in {{ node_build_dir | default('/opt/quickrobot/llama.cpp/build') }}/bin/"
+            msg: "Build completed but {{ 'llama-server' if engine_type == 'llama_server' else 'ggml-rpc-server' }} not found in {{ node_build_dir | default('/opt/quickrobot/llama.cpp/build') }}/bin/"
           when: not new_binary.stat.exists
       become_user: "{{ remote_node_user }}"
 

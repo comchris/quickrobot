@@ -6,6 +6,7 @@
 <!-- Single row header with controls and filters -->
 <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
   <h1 style="margin:0;font-size:1.3em;">Logs</h1>
+  <span id="log-count" style="display:inline-block;padding:2px 8px;background:#555;color:#fff;border-radius:10px;font-size:0.75em;font-weight:normal;"></span>
   <form method="get" action="/webui/ansible-logs" id="filter-form" style="display:flex;gap:8px;align-items:center;margin:0;">
     <label style="font-size:0.85em;color:#666;">Action:</label>
     <select name="action_type" id="filter-action" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
@@ -46,7 +47,7 @@
       <option value="90">90d</option>
       <option value="0">All</option>
     </select>
-    <button id="clear-logs-btn" class="btn btn-danger" style="font-size:0.85em;padding:4px 10px;">Clear Selected</button>
+    <button id="clear-logs-btn" class="btn btn-danger" style="font-size:0.85em;padding:4px 10px;">Remove Selected</button>
     <span id="clear-status" style="font-size:0.8em;color:#666;"></span>
   </div>
 </div>
@@ -81,7 +82,9 @@
 // >= 7d: full date + relative (e.g. "May 20, 2026 (10d ago)")
 function fmtCompact(iso) {
     if (!iso || iso === '-') return '-';
-    var ts = new Date(iso);
+    // Normalize ISO: SQLite stores naive UTC or space-separated, JS parses as local without suffix.
+    var normIso = qrNormIso(iso);
+    var ts = new Date(normIso);
     if (isNaN(ts.getTime())) return iso;
     var now = new Date();
     var diff = Math.floor((now - ts) / 1000);
@@ -193,12 +196,12 @@ document.getElementById('clear-logs-btn').addEventListener('click', function() {
         statusEl.textContent = 'Error: ' + (data.message || JSON.stringify(data));
       }
       btn.disabled = false;
-      btn.textContent = 'Clear Selected';
+      btn.textContent = 'Remove Selected';
     }).catch(function(e) {
       statusEl.style.color = '#f44336';
       statusEl.textContent = 'Request failed: ' + e;
       btn.disabled = false;
-      btn.textContent = 'Clear Selected';
+      btn.textContent = 'Remove Selected';
     });
 });
 </script>

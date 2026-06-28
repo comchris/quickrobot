@@ -1,0 +1,76 @@
+# @name: Install Dependencies
+# @playbook_id: install_deps
+# @version: 4
+# @timeout: 300
+# deps.yml — Install missing build dependencies via apt
+- hosts: "{{ inventory_host | default('localhost') }}"
+  become: yes
+  gather_facts: no
+
+  vars:
+    # node_build_install_depends — must be provided via extra_vars from engine_configs.
+    # No default — if missing, playbook fails with a clear error (fail-fast).
+    _install_depends_str: "{{ node_build_install_depends }}"
+
+  tasks:
+    - name: Fail if node_build_install_depends not provided
+      fail:
+        msg: "Required variable 'node_build_install_depends' not set in engine_configs for this engine type. Cannot install dependencies."
+      when: node_build_install_depends is not defined or node_build_install_depends == ''
+
+    - name: Parse space-separated dependency list
+      set_fact:
+        _extra_deps: "{{ (_install_depends_str | default('')).split() }}"
+
+    - name: Detect missing core packages
+      shell: "which {{ pkg_name }} 2>/dev/null || echo 'missing'"
+      register: pkg_check
+      changed_when: false
+      loop:
+        - git
+        - cmake
+        - build-essential
+      loop_control:
+        loop_var: pkg_name
+        label: "{{ pkg_name }}"
+
+    - name: Detect missing extra dependencies
+      shell: "which {{ pkg_name }} 2>/dev/null || echo 'missing'"
+      register: extra_pkg_check
+      changed_when: false
+      loop: "{{ _extra_deps }}"
+      loop_control:
+        loop_var: pkg_name
+
+    - name: Collect missing core packages
+      set_fact:
+        missing_pkgs: >-
+          {{ pkg_check.results | selectattr('stdout', 'equalto', 'missing') | map(attribute='pkg_name') | list }}
+
+    - name: Collect missing extra dependencies
+      set_fact:
+        missing_extra_pkgs: >-
+          {{ extra_pkg_check.results | default([]) | selectattr('stdout', 'equalto', 'missing') | map(attribute='pkg_name') | list }}
+
+    - name: Merge all missing packages
+      set_fact:
+        missing_pkgs: "{{ missing_pkgs + (missing_extra_pkgs | default([])) }}"
+
+    - name: Skip if all dependencies present
+      debug:
+        msg: "All dependencies already installed"
+      when: missing_pkgs | length == 0
+
+    - name: Install missing build dependencies
+      ansible.builtin.apt:
+        name: "{{ missing_pkgs }}"
+        update_cache: yes
+        state: present
+      when: missing_pkgs | length > 0
+      register: apt_result
+      retries: 2
+      delay: 5
+
+    - name: Report dependency install status
+      debug:
+        msg: "deps installed={{ missing_pkgs | length }}, already_present={{ (pkg_check.results | length + (extra_pkg_check.results | default([]) | length)) - (missing_pkgs | length) }}"

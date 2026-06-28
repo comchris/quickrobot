@@ -1,3 +1,5 @@
+# @playbook_id: TEMPLATE_LLAMA_SERVER_SERVICE
+# @version: 1
 # systemd service unit for llama-server
 # QR_UUID={{ instance_uuid }}
 [Unit]
@@ -9,7 +11,7 @@ Type=simple
 User={{ remote_node_user | default('mepaw') }}
 WorkingDirectory=/opt/quickrobot/{{ unit_name }}
 EnvironmentFile={{ env_file }}
-{% if binary_path %}ExecStart={{ binary_path }} {% else %}ExecStart=/opt/quickrobot/llama.cpp/build/bin/llama-server {% endif %}{{ merged_cli_opts | join(' ') }}
+{% if binary_path %}ExecStart={{ binary_path }} {% else %}ExecStart=/opt/quickrobot/llama.cpp/build/bin/llama-server {% endif %}$QR_CLI_ARGS_JOINED
 Restart={{ restart_policy | default('no') }}
 RestartSec=5
 StandardOutput=journal

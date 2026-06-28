@@ -1,0 +1,51 @@
+# @name: Start Service
+# @playbook_id: service_start
+# @version: 2
+# @timeout: 30
+# start.yml — Stop, start, and verify service is running (quick check only).
+# Model loading health probe is deferred — not blocking.
+- hosts: "{{ inventory_host | default('localhost') }}"
+  become: yes
+  gather_facts: no
+
+  vars:
+    unit_name: "qr-{{ instance_id }}-{{ engine_type }}"
+    _check_delay: 10
+
+  tasks:
+    - name: Stop service (ensure clean state)
+      systemd:
+        name: "{{ unit_name }}"
+        state: stopped
+        daemon_reload: yes
+      ignore_errors: yes
+
+    - name: Set service boot state (start_on_boot)
+      systemd:
+        name: "{{ unit_name }}"
+        enabled: "{{ (start_on_boot is defined and start_on_boot) | bool }}"
+
+    - name: Start service
+      systemd:
+        name: "{{ unit_name }}"
+        state: started
+        daemon_reload: yes
+
+    - name: Wait for service to initialize
+      wait_for:
+        delay: "{{ _check_delay }}"
+        timeout: 1
+
+    - name: Verify service is still running (not crashed)
+      command: systemctl is-active "{{ unit_name }}"
+      register: _svc_active
+      changed_when: false
+
+    - name: Fail if service died within {{ _check_delay }}s
+      fail:
+        msg: "Service {{ unit_name }} started but died within {{ _check_delay }}s — check logs (journalctl -u {{ unit_name }})"
+      when: _svc_active.stdout != "active"
+
+    - name: Report start status
+      debug:
+        msg: "start — unit={{ unit_name }}, boot={{ start_on_boot | default(false) }}, health=systemd-active"

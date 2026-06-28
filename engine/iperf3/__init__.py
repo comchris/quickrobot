@@ -20,6 +20,7 @@ discovery by the engine loader. Supports two modes via presets:
 - client mode: runs iperf3 as a one-shot client against a target (-c)
 """
 
+from lib.qr_engine_ids import QR_DEFAULT_LOCALHOST, QR_ENGINE_PORT_DEFAULTS
 from engine.base import BaseEngine
 
 from lib.lib_constants import DEFAULT_ANSIBLE_USER
@@ -31,7 +32,7 @@ CAPABILITIES = {
     "supports_models": False,
     "supports_presets": True,
     "max_instances": 99,
-    "base_port": 9900,
+    "base_port": QR_ENGINE_PORT_DEFAULTS.get("iperf3", 9900),
     "sub_pages": [
         {"path": "/engines/iperf3/config", "label": "Config", "order": 1},
         {"path": "/engines/iperf3/presets", "label": "Presets", "order": 2},
@@ -98,7 +99,7 @@ class Iperf3Engine(BaseEngine):
                             "error": f"Instance {instance_id} not found"}
 
                 unit_name = f"qr-{instance_id}-{row['engine_type_name']}"
-                node_host = row["node_host"] or "127.0.0.1"
+                node_host = row["node_host"] or QR_DEFAULT_LOCALHOST
                 node_user = (row["node_user"] if row["node_user"] else None) or DEFAULT_ANSIBLE_USER
 
                 result = self._check_remote_service(node_host, unit_name, node_user)
@@ -120,7 +121,7 @@ class Iperf3Engine(BaseEngine):
     def _check_remote_service(self, node_host, unit_name, node_user=None):
         """Check remote systemd service and process stats via ansible playbook.
 
-        Uses INSTANCE_HEALTH_CHECK_V1 playbook for unified, interlock-aware health checks.
+        Uses instance_health_check playbook for unified, interlock-aware health checks.
 
         Args:
             node_host: Hostname or IP of the remote node.
@@ -134,8 +135,8 @@ class Iperf3Engine(BaseEngine):
         import json as _json
 
         try:
-            from quickrobot import _execute_playbook as _ep
-            r = _ep("INSTANCE_HEALTH_CHECK_V1", resolver_type="playbook_id",
+            from qr_api import _execute_playbook as _ep
+            r = _ep("instance_health_check", resolver_type="playbook_id",
                     limit=node_host,
                     extra_vars={"inventory_host": node_host, "unit_name": unit_name},
                     action_type="health_check")
@@ -197,7 +198,7 @@ class Iperf3Engine(BaseEngine):
     def query_status(self, instance_id, db_path=None):
         """Remote health check via ansible playbook.
 
-        Uses INSTANCE_HEALTH_CHECK_V1 for unified interlock-aware status checks.
+        Uses instance_health_check for unified interlock-aware status checks.
 
         Args:
             instance_id: Integer primary key of the instance.
@@ -226,19 +227,19 @@ class Iperf3Engine(BaseEngine):
                 return {"alive": False, "latency_ms": None,
                         "error": f"Instance {instance_id} not found"}
 
-            node_host = row["node_host"] or "127.0.0.1"
+            node_host = row["node_host"] or QR_DEFAULT_LOCALHOST
             state = row["state"] or "unknown"
 
             if state not in ("running", "starting", "deployed", "stopped", "error",
                               "updating", "build_error", "configuring", "deploying",
-                              "compiling", "loading"):
+                              "compiling"):
                 return {"alive": False, "latency_ms": None,
                         "error": f"Instance not running (state={state})"}
 
             unit_name = f"qr-{instance_id}-iperf3"
             # Check systemctl is-active via ansible playbook
-            from quickrobot import _execute_playbook as _ep
-            r = _ep("INSTANCE_HEALTH_CHECK_V1", resolver_type="playbook_id",
+            from qr_api import _execute_playbook as _ep
+            r = _ep("instance_health_check", resolver_type="playbook_id",
                     limit=node_host,
                     extra_vars={"inventory_host": node_host, "unit_name": unit_name},
                     action_type="health_check")
@@ -419,3 +420,64 @@ class Iperf3Engine(BaseEngine):
         """
         return {"engine": self._name, "instance_id": instance_id,
                 "method": method, "params": params or {}, "result": None}
+
+    @classmethod
+    def get_instance_status(cls, db_path, instance_id):
+        """Unified status endpoint for iperf3 instances (STATUS-1)."""
+        from db.sqlite import pool
+
+        with pool(db_path) as conn:
+            inst = conn.execute(
+                """SELECT i.id, i.name, i.state, i.port_assigned,
+                          i.node_id,
+                          e.name as engine_type_name,
+                          n.hostname as node_hostname
+                   FROM instances i
+                   JOIN engine_types e ON i.engine_type_id = e.id
+                   LEFT JOIN nodes n ON i.node_id = n.id
+                   WHERE i.id = ?""",
+                (instance_id,),
+            ).fetchone()
+
+        if not inst:
+            return None
+
+        engine_data = {"port_assigned": inst["port_assigned"], "node_hostname": inst["node_hostname"]}
+
+        actions = cls._get_available_actions(inst["state"])
+        warnings = []
+        if inst["node_hostname"] and inst["state"] in ("running", "deployed"):
+            warnings.append({"type": "info", "message": f"Running on {inst['node_hostname']}"})
+
+        state_machine = cls.get_state_machine()
+        valid_next = state_machine.get(inst["state"], [])
+
+        return {
+            "id": inst["id"],
+            "state": inst["state"],
+            "engine_type_name": inst["engine_type_name"],
+            "engine_data": engine_data,
+            "actions": actions,
+            "warnings": warnings,
+            "_meta": {
+                "valid_next_states": valid_next,
+                "is_transitioning": inst["state"] in ("configuring",),
+            },
+        }
+
+    @classmethod
+    def _get_available_actions(cls, state):
+        """Map instance state to available actions."""
+        action_map = {
+            "unconfigured": [{"name": "deploy", "label": "Deploy"}],
+            "configuring": [{"name": "restart", "label": "Restart"}],
+            "deployed": [{"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "reconfigure", "label": "Reconfigure"}],
+            "starting": [{"name": "stop", "label": "Stop"}],
+            "running": [{"name": "stop", "label": "Stop"}, {"name": "restart", "label": "Restart"}, {"name": "reconfigure", "label": "Reconfigure"}],
+            "stopping": [{"name": "start", "label": "Start"}],
+            "stopped": [{"name": "start", "label": "Start"}, {"name": "rebuild", "label": "Rebuild"}],
+            "error": [{"name": "start", "label": "Start"}, {"name": "deploy", "label": "Deploy"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "stop", "label": "Stop"}],
+            "build_error": [{"name": "deploy", "label": "Deploy"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}],
+            "timeout": [{"name": "deploy", "label": "Deploy"}],
+        }
+        return action_map.get(state, [])

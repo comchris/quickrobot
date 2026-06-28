@@ -44,12 +44,13 @@ ANSIBLE_LOG_LEVELS = {
     "scan_models": "errors",
     "apt_update": "warnings",
     "apt_upgrade": "warnings",
+    "apt_update_upgrade": "warnings",
     "reboot_node": "all",
     "shutdown_node": "all",
     # Instance lifecycle
     "deploy_instance": "warnings",
     "undeploy_instance": "warnings",
-    "update_build": "warnings",
+    "rebuild": "warnings",
     "update_and_compile": "warnings",
     "restart_instance": "errors",
     "stop_instance": "errors",
@@ -63,7 +64,9 @@ ANSIBLE_LOG_LEVELS = {
 QUICKROBOT_DEBUG_LEVEL = 10
 
 # Grace period before crash-detection kicks in for running instances (seconds).
-# Large models need time to load after service restart; 300s prevents false positives.
+# DEPRECATED (2026-06-26): SSE endpoint + systemd fallback in query_status() provide
+# reliable alive detection. Grace period removed from api_query_status().
+# Kept for backward-compat import; may be removed in v0.08.
 GRACE_PERIOD_RUNNING = 300
 
 # Default playbook execution timeout in seconds (3600s = 1 hour).
@@ -82,10 +85,11 @@ SSH_CONNECT_TIMEOUT = _QR_SSH_CONNECT_TIMEOUT_FALLBACK
 
 # ── Re-exports from qr_engine_ids.py (backward-compat import paths) ────
 import getpass as _getpass
-from lib.qr_engine_ids import QR_FORBIDDEN_HOSTS
+from lib.qr_engine_ids import QR_FORBIDDEN_HOSTS, QR_DEFAULT_LOCALHOST
 
 # Default bind address for services that need a localhost fallback
-QR_DEFAULT_BIND_HOST = "127.0.0.1"
+# Real SOT: QR_DEFAULT_LOCALHOST in lib/qr_engine_ids.py
+QR_DEFAULT_BIND_HOST = QR_DEFAULT_LOCALHOST
 
 # Default timezone when DB config is unavailable
 DEFAULT_TIMEZONE = "Europe/Berlin"

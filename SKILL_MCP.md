@@ -38,10 +38,13 @@ Return complete API responses. Use only when you need fields excluded from summa
 |------|-----------|---------|
 | `create_instance(name, engine_type_id, node_id, preset_id, config_override)` | All params required except config_override | Create new instance |
 | `deploy_instance(instance_id, start_after_deploy)` | instance_id (int), start_after_deploy (bool) | Build + deploy systemd unit |
+| `change_preset(instance_id, preset_id, skip_build=True)` | instance_id (int), preset_id (int), skip_build (bool) | Change preset (async, <100ms response) |
 | `start_instance(instance_id)` | instance_id (int) | Start service |
 | `stop_instance(instance_id)` | instance_id (int) | Stop service |
 | `restart_instance(instance_id)` | instance_id (int) | Graceful restart |
 | `delete_instance(instance_id, force)` | instance_id (int), force (bool) | Remove instance |
+
+**NOTE on `change_preset`:** Runs async via RUNNER-1 (async_mode=True). Returns instantly with `"config_update_triggered": true`. Instance stays in running state — the scheduler transitions it to "configuring" → "deploying" → "running". Do NOT poll for "running" immediately after calling.
 
 ### 4. Proxy Tool (requires MCP_FULLPROXY)
 | Tool | Signature | Purpose |
@@ -122,6 +125,35 @@ for inst in stopped_servers:
 
 ---
 
+## Job & Task System (RUNNER-1) via Proxy
+
+The job/task system is accessible through the `quickrobot_api` proxy tool. No dedicated MCP tools needed — all 5 endpoints work via proxy.
+
+**Available endpoints:**
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/jobs` | GET | List jobs (filter: `?status=running`, `?instance_id=X`) |
+| `/jobs/<id>` | GET | Job detail with task breakdown |
+| `/tasks` | GET | List tasks (filter: `?job_id=X`, `?instance_id=X`) |
+| `/tasks/<id>` | GET | Task detail with stage, timing, ansible output |
+| `/instances/<id>/jobs` | GET | Jobs scoped to one instance |
+
+**NOTE on job states (JOB-STATE-1 + JOB-DURATION-2):**
+- Jobs stay `'queued'` until the scheduler claims them (~1s poll). `GET /jobs?status=running` may show nothing for newly-created jobs.
+- Job duration = actual execution time only (`started_at` set at first task claim, not creation).
+- Global per-job timeout: 2h (7200s). Jobs exceeding this get reset to queued with `'error'` status.
+
+**Example via MCP proxy:**
+```python
+# List all running jobs
+quickrobot_api("GET", "/jobs?status=running", None)
+
+# Get job detail including task breakdown
+quickrobot_api("GET", f"/jobs/{job_id}", None)
+```
+
+---
+
 ## Key Rules for MCP Users
 
 1. **Use summary tools first** — they reduce token cost by 70-95%. Full detail tools only when needed.
@@ -129,3 +161,9 @@ for inst in stopped_servers:
 3. **Preset ID 1** = router mode (no model). Use for deploy/systemd tests without loading models.
 4. **One benchmark at a time per instance** — the API returns BENCHMARK_RUNNING if another is active.
 5. **RPC servers use binary protocol** — not HTTP. Health check via `curl /health` works on llama_server only.
+6. **Preset changes are async** — `change_preset` returns <100ms with `"config_update_triggered": true`. The instance state transitions (running → configuring → deploying → running) happen in background. Check status via `GET /instances/<id>` after a few seconds.
+7. **Config changes need no daemon-reload** — `$QR_CLI_ARGS_JOINED` env file pattern: preset/config changes write the env file and restart the service. No systemctl reload needed (CONFIG-1).
+8. **RPC preset must match node cores** — Check `list_nodes_summary()` for each node's `cpu_cores`. If a node has 2 cores, use an RPC preset with 2 threads (not 4). Over-allocating threads on thin clients causes thrashing and slower inference.
+9. **Bind requires manual reconfigure** — After `bind-rpc` via MCP proxy, the server needs `change_preset(instance_id, same_preset_id, skip_build=True)` or `deploy_instance(instance_id)` to regenerate the remote env file with updated `--rpc`, `-dev`, and `LLAMA_ARG_TENSOR_SPLIT`. Without this, the server still uses the old config.
+10. **MCP tools may have stale SSE session** — Early in a session, MCP tools can return `MCP error -32602: Invalid request parameters` if the opencode harness has a cached stale SSE session ID from a prior API restart. This typically resolves after 5-30 minutes of API activity as the session auto-recovers. If all tools fail simultaneously, retry after a short wait or use `quickrobot_api` proxy as fallback.
+11. **Benchmark metrics are always `{}`** — The `benchmark_results` table has no `metrics` column; the API returns it as an empty default. This is a schema gap, not a failure. `success=1` means: the llama-server responded, text was captured in the `output` column, and the run completed (not just started). The `response_json` column contains `tokens_predicted` and `tokens_evaluated` from the llama.cpp `/completion` response — these are useful proxy metrics for throughput comparison. Use `duration_ms` for total wall-clock time.

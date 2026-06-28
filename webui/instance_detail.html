@@ -17,12 +17,13 @@
 {% endif %}
 
 <div class="actions">
-{% for action_key, btn_label, endpoint, allowed in actions %}
-<button class="{% if allowed %}btn btn-primary{% else %}btn btn-secondary{% endif %} instance-action"
-        data-action="{{ action_key }}" data-id="{{ inst_id }}" data-enabled="{{ 1 if allowed else 0 }}"
-        {% if not allowed %}disabled style="opacity:0.4;cursor:not-allowed;"{% endif %}>
-  {{ btn_label }}
-</button>
+{# ACTION BUTTONS: rendered by initDetailActions() from STATUS-1 API #}
+<span class="actions-render" data-inst-id="{{ inst_id }}"></span>
+{# STATUS-1 warnings #}
+{% for w in status_warnings or [] %}
+<div class="warning-badge" style="font-size:0.8em;padding:2px 8px;margin-left:6px;border-radius:3px;background:#fff3cd;color:#856404;border:1px solid #ffc107;display:inline-block;">
+  {{ w.message or w }}
+</div>
 {% endfor %}
 <div class="journal-control">
   <label style="font-size:0.8em;color:#666;">Journal:</label>
@@ -142,6 +143,19 @@
   <small style="color:#888;margin-top:8px;display:block;">
     Applying a preset redeploys the instance with new configuration. Model loading may take up to 60 minutes.
   </small>
+</div>
+{% endif %}
+
+{# Model Load Progress (SSE) — llama_server only, shown during "starting" state #}
+{% if is_llama and engine_name == 'llama_server' %}
+<div id="model-load-progress">
+  <div style="display:flex;justify-content:space-between;font-size:0.8em;color:#666;margin-bottom:4px;">
+    <span id="load-stage-label">Loading model...</span>
+    <span id="load-progress-pct">0%</span>
+  </div>
+  <div class="load-bar" style="background:#e0e0e0;border-radius:4px;height:8px;overflow:hidden;">
+    <div id="load-fill" class="load-fill loading" style="width:0%;"></div>
+  </div>
 </div>
 {% endif %}
 
@@ -789,63 +803,34 @@
 
 {# Main action handlers #}
 <script>
+// STATUS-1: Render action buttons from API data (shared with instances.html pattern)
 (function() {
-  // Instance action buttons (start/stop/restart/undeploy)
-  document.querySelectorAll('.instance-action').forEach(function(btn) {
-    btn.addEventListener('click', function(e) {
-      var action = e.currentTarget.getAttribute('data-action');
-      var id = e.currentTarget.getAttribute('data-id');
-      if (e.currentTarget.disabled) return;
-      var actionKey = action.toLowerCase();
-      var labelMap = {
-        'undeploy': 'undeploy',
-        'start': 'start',
-        'stop': 'stop',
-        'restart': 'restart',
-        'restart-system': 'restart system',
-        'update-build': 'rebuild llama.cpp',
-        'build': 'rebuild llama.cpp'
-      };
-      var display = labelMap[actionKey] || action;
-      if (!confirm('Are you sure you want to ' + display + ' this instance?')) return;
-      var epMap = {
-        'start': 'start',
-        'stop': 'stop',
-        'undeploy': 'undeploy',
-        'restart': 'restart',
-        'restart-system': 'restart_system',
-        'update-build': 'update-build',
-        'build': 'update-build'
-      };
-      var endpoint = epMap[actionKey];
-      if (endpoint === undefined) return;
+  var instId = {{ inst_id }};
 
-      qrApi('/instances/' + id + '/' + endpoint, {method: 'POST'})
+  // Fetch status and render actions via shared renderer from base.html
+  function initDetailActions() {
+    qrApi('/instances/' + instId + '/status')
       .then(function(data) {
-        if (data.status === 'ok') {
-          setTimeout(function() { window.location.reload(); }, 1000);
-        } else if (data.message && data.message.indexOf('timed out') >= 0) {
-          alert('Action ' + display + ' received, polling for completion...');
-          var attempts = 0;
-          var poll = setInterval(function() {
-            attempts++;
-            qrApi('/instances/' + id)
-            .then(function(d) {
-              if (d.data && d.data.state !== 'starting' && d.data.state !== 'stopping') {
-                clearInterval(poll);
-                window.location.reload();
-              }
-              if (attempts > 60) { clearInterval(poll); alert('Action timed out'); }
-            });
-          }, 3000);
-        } else {
-          alert('Action failed: ' + (data.message || 'Unknown'));
-        }
-      }).catch(function(e) { alert('Error: ' + e); });
-    });
-  });
+        var statusData = (data && data.data) || {};
+        var cell = document.querySelector('.actions-render[data-inst-id="' + instId + '"]');
+        if (!cell) return;
+        // Use shared renderer from base.html — pass methodOverrides for restart-system
+        window.renderInstanceActions(instId, statusData, cell, {
+          methodOverrides: {'restart-system': 'POST'}
+        });
+      })
+      .catch(function() {});
+  }
 
-  // Preset change handler
+  // Run after page load (base.html script block is available)
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initDetailActions);
+  } else {
+    initDetailActions();
+  }
+})();
+
+// Preset change handler
   (function() {
     var selectEl = document.getElementById('preset-change-select');
     var applyBtn = document.getElementById('preset-apply-btn');
@@ -904,10 +889,109 @@
           applyBtn.textContent = origHTML;
           applyBtn.style.pointerEvents = '';
           applyBtn.style.opacity = '';
-          alert('Request failed: ' + e);
+         alert('Request failed: ' + e);
         });
     });
-  })();
+})();
+</script>
+
+{# Model Load SSE Client — connects to /api/v1/instances/<id>/models-sse #}
+<script>
+(function() {
+  var instId = {{ inst_id }};
+  var progressEl = document.getElementById('model-load-progress');
+  var fillEl = document.getElementById('load-fill');
+  var pctEl = document.getElementById('load-progress-pct');
+  var stageEl = document.getElementById('load-stage-label');
+  if (!progressEl || !fillEl) return;
+
+  var eventSource = null;
+  var currentStage = '';
+  var progressValue = 0;
+  var loaded = false;
+
+  function updateProgress(stage, value) {
+    currentStage = stage || currentStage;
+    // Labels per ServeurpersoCom PR #24878
+    var labels = {text_model:'Loading weights',spec_model:'Loading draft',mmproj_model:'Loading projector',fit_params:'Initializing'};
+    stageEl.textContent = labels[currentStage] || (stage ? 'Loading: ' + currentStage : 'Loading model...');
+
+    if (value !== undefined && value !== null) {
+      // Scale: text_model fills 0-90%, tail stages share remaining 10%
+      var pct;
+      if (currentStage === 'text_model') {
+        pct = Math.round(value * 90);
+      } else if (value >= 1.0) {
+        pct = 100;
+      } else {
+        pct = 90 + Math.round(value * 10);
+      }
+      progressValue = Math.min(100, Math.max(0, pct));
+    }
+
+    fillEl.style.width = progressValue + '%';
+    pctEl.textContent = progressValue + '%';
+
+    if (progressValue >= 100) {
+      fillEl.className = 'load-fill complete';
+      loaded = true;
+    } else {
+      fillEl.className = 'load-fill loading';
+      loaded = false;
+    }
+  }
+
+  function connectSSE() {
+    // Check current state first
+    qrApi('/instances/' + instId + '/status')
+    .then(function(data) {
+      var statusData = (data && data.data) || {};
+      var st = statusData.state || '';
+      if (st === 'running' || st === 'error') {
+        progressEl.style.display = 'none';
+        if (eventSource) { eventSource.close(); eventSource = null; }
+        return;
+      }
+      // Show progress bar for starting/loading states
+      if (st === 'starting' || st === 'loading') {
+        progressEl.style.display = 'block';
+        // Connect to SSE proxy
+        if (eventSource) { eventSource.close(); }
+        var url = '/api/v1/instances/' + instId + '/models-sse';
+        try {
+          eventSource = new EventSource(url);
+          eventSource.addEventListener('message', function(e) {
+            try {
+              var msg = JSON.parse(e.data);
+              if (msg.status === 'loaded' || msg.status === 'sleeping') {
+                updateProgress('loaded', 1.0);
+                setTimeout(function() { location.reload(); }, 2000);
+              } else if (msg.status === 'unloaded') {
+                progressEl.style.display = 'none';
+                eventSource.close();
+              } else if (msg.progress) {
+                updateProgress(msg.progress.stage, msg.progress.value);
+              }
+            } catch(err) { /* ignore parse errors */ }
+          });
+          eventSource.onerror = function() {
+            // SSE error — check if server still supports the endpoint
+            progressEl.style.display = 'none';
+            eventSource.close();
+          };
+        } catch(e) { /* EventSource not supported, silently hide */ }
+      }
+    }).catch(function() {});
+  }
+
+  // Connect on page load
+  connectSSE();
+
+  // Also reconnect if status changes (e.g., from external deploy)
+  setInterval(function() {
+    if (!loaded && eventSource) return; // Already loaded or connecting
+    connectSSE();
+  }, 10000); // Check every 10s
 })();
 </script>
 

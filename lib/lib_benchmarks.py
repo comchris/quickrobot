@@ -27,6 +27,7 @@ import time
 import threading
 import urllib.request as _urq
 import urllib.error as _ure
+from lib.qr_engine_ids import QR_DEFAULT_LOCALHOST
 
 # Global configurable max timeout per benchmark run (seconds)
 BENCHMARK_MAX_TIMEOUT = 600
@@ -419,7 +420,7 @@ def start_benchmark(db_path, run_id, instance_id, prompt_id, override=False):
         raise RuntimeError("PROMPT_NOT_FOUND")
 
     # Resolve node hostname and model name
-    node_hostname = inst.get("node_hostname") or inst.get("node_name", "127.0.0.1")
+    node_hostname = inst.get("node_hostname") or inst.get("ipv4_address", QR_DEFAULT_LOCALHOST)
     port = inst["port_assigned"]
     preset_name = inst.get("preset_name")
 
@@ -556,8 +557,9 @@ def _benchmark_thread(db_path, run_id, instance_id, prompt_id,
 
         # Write result to DB (running=0 on completion)
         try:
+            from lib.lib_time import utcnow_str
             with pool(db_path) as conn:
-                ts = _time.strftime("%Y-%m-%d %H:%M:%S")
+                ts = utcnow_str()
                 conn.execute(
                     """UPDATE benchmark_results
                        SET output = ?, response_json = ?, finished_at = ?, duration_ms = ?,
@@ -690,9 +692,10 @@ def _write_failure(db_path, run_id, output, started_at, finished_time):
     """
     import time as _time
     from db.sqlite import pool
+    from lib.lib_time import utcnow_str
 
     duration_ms = int((finished_time - started_at) * 1000) if started_at else 0
-    ts = _time.strftime("%Y-%m-%d %H:%M:%S")
+    ts = utcnow_str()
     with pool(db_path) as conn:
         conn.execute(
             """UPDATE benchmark_results

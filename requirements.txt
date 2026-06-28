@@ -39,7 +39,9 @@ psutil>=7.0.0
 # The MCP SDK lives in a separate pipx environment.
 # This keeps it isolated from the main quickrobot Python env.
 # ============================================================
-# pipx install mcp
+# pipx install mcp 
+# pipx install websocket-client
+
 
 # ============================================================
 # DEBIAN APT — Required packages (all python3-*)

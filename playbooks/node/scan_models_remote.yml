@@ -1,0 +1,62 @@
+# @name: Scan Models Remote
+# @playbook_id: scan_models_remote
+# @version: 2
+# @timeout: 600
+# scan_models_remote.yml — Scan remote nodes for GGUF model files
+# Outputs JSONL lines per host: {"host": ..., "models_raw": [...]}
+# Required vars: model_root_path (must be provided, no default)
+
+- hosts: all
+  gather_facts: no
+
+  vars:
+    model_root_path: "{{ model_root_path }}"
+
+  pre_tasks:
+    - name: Ensure model root path exists
+      ansible.builtin.stat:
+        path: "{{ model_root_path }}"
+      register: _model_root_check
+
+    - name: Fail if model root missing on host
+      ansible.builtin.fail:
+        msg: "Model root {{ model_root_path }} not found on {{ inventory_hostname }}"
+      when: not _model_root_check.stat.exists
+
+  tasks:
+    - name: Find GGUF models with metadata via shell
+      ansible.builtin.shell: >
+        find {{ model_root_path }}
+        -name '*.gguf' -type f 2>/dev/null | grep -v mmproj | while read f; do
+          sz=$(stat -c '%s' "$f" 2>/dev/null || echo "0")
+          dir=$(dirname "$f")
+          base=$(basename "$f" .gguf)
+          mmproj_path=""
+          if [ -f "${dir}/${base}.mmproj" ]; then
+            mmproj_path="${dir}/${base}.mmproj"
+          elif [ -f "${dir}/${base}_mmproj.gguf" ]; then
+            mmproj_path="${dir}/${base}_mmproj.gguf"
+          else
+            clean_base=$(echo "$base" | sed -E 's/-(bf?16|f32|q[0-9]+_[a-z]+|-Q[0-9])$//i')
+            for pattern in "${dir}/${clean_base}-mmproj*.gguf" "${dir}/${clean_base}_mmproj*.gguf" "${dir}/mmproj-${clean_base}*.gguf"; do
+              if [ -f "$pattern" ]; then
+                mmproj_path="$pattern"
+                break
+              fi
+            done
+          fi
+          mt=$(stat -c '%Y' "$f" 2>/dev/null || echo "0")
+          printf '{"path":"%s","size":%s,"mmproj_path":"%s","last_modified_epoch":%s}\n' "$f" "$sz" "$mmproj_path" "$mt"
+        done
+      register: _find_output
+      changed_when: false
+
+    - name: Collect model results per host
+      ansible.builtin.set_fact:
+        _models_jsonl: "{{ _find_output.stdout_lines | select('search', '^.*') | list }}"
+        _scan_result_host: "{{ inventory_hostname }}"
+
+    - name: Output model list per host
+      ansible.builtin.debug:
+        msg: "{{ { 'host': _scan_result_host, 'models_raw': _models_jsonl } }}"
+      changed_when: false

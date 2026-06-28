@@ -1,0 +1,30 @@
+# @name: Stop Service
+# @playbook_id: service_stop
+# @version: 2
+# @timeout: 60
+# service_stop.yml — Stop and verify the deployed systemd service
+- hosts: "{{ inventory_host | default('localhost') }}"
+  become: yes
+  gather_facts: no
+
+  vars:
+    unit_name: "qr-{{ instance_id }}-{{ engine_type }}"
+
+  tasks:
+    - name: Stop service
+      systemd:
+        name: "{{ unit_name }}"
+        state: stopped
+        daemon_reload: yes
+
+    - name: Verify service is stopped
+      wait_for:
+        port: "{{ instance_port }}"
+        state: stopped
+        timeout: 30
+        delay: 1
+      when: instance_port is defined and instance_port | string | trim != ''
+
+    - name: Report stop status
+      debug:
+        msg: "stop — unit={{ unit_name }}, port={{ instance_port | default('N/A') }}"

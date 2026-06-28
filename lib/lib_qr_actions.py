@@ -43,9 +43,9 @@ def log_qr_action(db_path, action_type, node_id=None, instance_id=None,
     """
     from db.sqlite import pool
 
+    from lib.lib_time import utcnow_str
     details_json = json.dumps(details or {})
-    import time as _time
-    created_at = _time.strftime('%Y-%m-%dT%H:%M:%S')
+    created_at = utcnow_str()
     try:
         with pool(db_path) as conn:
             conn.execute(
@@ -79,19 +79,19 @@ def log_qr_override(db_path, action_type, node_id=None, instance_id=None,
         True if logged successfully, False otherwise.
     """
     from db.sqlite import pool
+    from lib.lib_time import utcnow_str
 
     details = details or {}
     details["__warning__"] = "OVERRIDE: This action bypassed normal guards. Verify with user before proceeding."
     details_json = json.dumps(details)
-    import time as _time
-    created_at = _time.strftime('%Y-%m-%dT%H:%M:%S')
+    created_at = utcnow_str()
     try:
         with pool(db_path) as conn:
             conn.execute(
                 """INSERT INTO qr_actions
                    (action_type, node_id, instance_id, actor, details, created_at, override)
                    VALUES (?, ?, ?, ?, ?, ?, 1)""",
-                (action_type, node_id, instance_id, actor, details_json, created_at),
+                 (action_type, node_id, instance_id, actor, details_json, created_at),
             )
         return True
     except Exception:
@@ -99,7 +99,7 @@ def log_qr_override(db_path, action_type, node_id=None, instance_id=None,
 
 
 def log_qr_task(db_path, action_type, node_id=None, instance_id=None,
-                playbook_registry_id=None, extra_details=None):
+                playbook_registry_id=None, actor="api", extra_details=None):
     """Log a framework task in 'running' state for real-time visibility.
 
     Creates a qr_actions record with status='running' and started_at.
@@ -127,8 +127,8 @@ def log_qr_task(db_path, action_type, node_id=None, instance_id=None,
                 """INSERT INTO qr_actions
                    (action_type, node_id, instance_id, actor, details,
                     created_at, started_at, status, override)
-                   VALUES (?, ?, ?, 'api', ?, ?, ?, 'running', 0)""",
-                (action_type, node_id, instance_id,
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 'running', 0)""",
+                (action_type, node_id, instance_id, actor,
                  json.dumps(details), now, now),
             )
             task_id = cursor.lastrowid

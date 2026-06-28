@@ -46,6 +46,10 @@
     <value>{{ node.ansible_user or '—' }}</value>
   </div>
   <div class="detail-card">
+    <label>SSH Port</label>
+    <value>{{ node.ssh_port or 22 }}</value>
+  </div>
+  <div class="detail-card">
     <label>SSH Key</label>
     <value>{% if node.ansible_key_path %}{{ node.ansible_key_path }}{% else %}ssh-agent (default){% endif %}</value>
   </div>
@@ -54,8 +58,7 @@
 <!-- Actions -->
 {% if node.id != 1 %}
 <div class="actions">
-  <button class="btn btn-success node-action" data-action="apt-update" data-id="{{ node.id }}" data-label="Update">Update (apt)</button>
-  <button class="btn btn-primary node-action" data-action="apt-upgrade" data-id="{{ node.id }}" data-label="Upgrade">Upgrade (apt)</button>
+  <button class="btn btn-success node-action" data-action="apt-update-upgrade" data-id="{{ node.id }}" data-label="Update & Upgrade">Update &amp; Upgrade (apt)</button>
   <button class="btn btn-success node-action" data-action="reboot" data-id="{{ node.id }}" data-label="Reboot">Reboot</button>
   <button class="btn btn-danger node-action" data-action="shutdown" data-id="{{ node.id }}" data-label="Shutdown">Shutdown</button>
 </div>
@@ -106,10 +109,14 @@
 <!-- SSH Settings Edit Section -->
 <div class="detail-card" style="margin-top:16px;">
   <label>SSH Settings (edit per-host)</label>
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px;">
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:8px;">
     <div>
       <label style="font-size:0.8em;color:#888;">SSH User (empty = unset, falls back to .env/default)</label>
       <input type="text" id="ssh-user-input" value="{{ node.ansible_user or '' }}" placeholder="unset" style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+    </div>
+    <div>
+      <label style="font-size:0.8em;color:#888;">SSH Port (default 22)</label>
+      <input type="number" id="ssh-port-input" value="{{ node.ssh_port or 22 }}" min="1" max="65535" style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
     </div>
     <div>
       <label style="font-size:0.8em;color:#888;">SSH Key Path (empty = unset, falls back to ssh-agent)</label>
@@ -233,11 +240,13 @@ if (saveBtn) {
   saveBtn.addEventListener('click', function() {
     var nodeId = '{{ node.id }}';
     var userVal = document.getElementById('ssh-user-input').value.trim();
+    var portVal = document.getElementById('ssh-port-input').value.trim();
     var keyVal = document.getElementById('ssh-key-input').value.trim();
 
     var payload = {};
     if (userVal === '') payload.ansible_user = null;
     else payload.ansible_user = userVal;
+    if (portVal && portVal !== '{{ node.ssh_port or 22 }}') payload.ssh_port = parseInt(portVal);
     if (keyVal === '') payload.ansible_key_path = null;
     else payload.ansible_key_path = keyVal;
 

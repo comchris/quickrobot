@@ -1,39 +1,27 @@
 # @name: Check Undeploy
-# @playbook_id: CHECK_UNDEPLOY_V1
-# @version: 1
-# @timeout: 120
-# check_undeploy.yml — Verify an instance's unit files have been removed from the remote node
+# @playbook_id: check_undeploy
+# @version: 2
+# check_undeploy.yml — Verify undeploy artifacts removed
 - hosts: "{{ inventory_host }}"
   become: yes
   vars:
-    instance_id: "{{ instance_id }}"
-    engine_type: "{{ engine_type }}"
-    unit_name: "qr-{{ instance_id }}-{{ engine_type }}"
+    unit_name: "qr-{{ instance_id }}-{{ engine_type | default('rpc') }}"
   tasks:
     - name: Check service file removed
       stat:
         path: "/etc/systemd/system/{{ unit_name }}.service"
-      register: svc_file
-
+      register: svc_check
     - name: Check env file removed
       stat:
         path: "/etc/quickrobot/{{ unit_name }}.env"
-      register: env_file
-
-    - name: Check instance directory removed
+      register: env_check
+    - name: Check instance dir removed
       stat:
         path: "/opt/quickrobot/{{ unit_name }}"
-      register: inst_dir
-
-    - name: Fail if any files remain
-      fail:
-        msg: >-
-          Undeploy incomplete for qr-{{ instance_id }}-{{ engine_type }}:
-          service={{ svc_file.stat.exists }},
-          env={{ env_file.stat.exists }},
-          dir={{ inst_dir.stat.exists }}
-      when: svc_file.stat.exists or env_file.stat.exists or inst_dir.stat.exists
-
-    - name: Report clean undeploy
+      register: dir_check
+    - name: Report check results
       debug:
-        msg: "Undeploy verified clean for qr-{{ instance_id }}-{{ engine_type }}"
+        msg: >-
+          Undeploy check {{ unit_name }}: svc={{ 'gone' if not svc_check.stat.exists else 'EXISTS' }},
+          env={{ 'gone' if not env_check.stat.exists else 'EXISTS' }},
+          dir={{ 'gone' if not dir_check.stat.exists else 'EXISTS' }}

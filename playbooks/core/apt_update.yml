@@ -1,0 +1,13 @@
+# @name: Apt Update
+# @playbook_id: apt_update
+# @version: 2
+# @timeout: 300
+# apt_update.yml — Run apt update on a remote node (RUNNER-1 compatible)
+- hosts: "{{ inventory_host }}"
+  become: yes
+  gather_facts: no
+  tasks:
+    - name: Run apt update
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600

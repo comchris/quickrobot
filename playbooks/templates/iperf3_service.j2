@@ -1,3 +1,5 @@
+# @playbook_id: TEMPLATE_IPERF3_SERVICE
+# @version: 1
 # systemd service unit for iperf3
 # QR_UUID={{ instance_uuid }}
 [Unit]
@@ -8,7 +10,7 @@ After=network.target
 Type=simple
 User={{ remote_node_user | default('mepaw') }}
 WorkingDirectory=/opt/quickrobot/{{ unit_name }}
-ExecStart={{ binary_path | default('/usr/bin/iperf3') }} {{ merged_cli_opts | join(' ') | default('') }}
+ExecStart={{ binary_path | default('/usr/bin/iperf3') }} $QR_CLI_ARGS_JOINED
 Restart={{ restart_policy | default('no') }}
 RestartSec=5
 StandardOutput=journal

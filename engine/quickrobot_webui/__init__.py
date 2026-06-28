@@ -23,7 +23,7 @@ import sys
 import subprocess
 import time
 
-from lib.qr_engine_ids import QR_FORBIDDEN_HOSTS
+from lib.qr_engine_ids import QR_DEFAULT_LOCALHOST, QR_FORBIDDEN_HOSTS
 
 from engine.base import BaseEngine
 
@@ -102,7 +102,7 @@ class QrWebuiEngine(BaseEngine):
                     error=None,
                     running=running, pid=pid if running else None,
                     web_ui_port=port,
-                    web_ui_host=inst.get("config_override", {}).get("web_ui_host", "127.0.0.1") if inst else "127.0.0.1")
+                   web_ui_host=inst.get("config_override", {}).get("web_ui_host", QR_DEFAULT_LOCALHOST) if inst else QR_DEFAULT_LOCALHOST)
 
     def query_status(self, instance_id, db_path=None):
         """Remote health check for the web server via HTTP.
@@ -127,8 +127,8 @@ class QrWebuiEngine(BaseEngine):
                         "error": "No port assigned"}
             host = inst.get("config_override", {}).get("web_ui_host")
             # Try 127.0.0.1 first (local process), then config host
-            hosts_to_try = ["127.0.0.1"]
-            if host and host not in ("127.0.0.1",) + QR_FORBIDDEN_HOSTS:
+            hosts_to_try = [QR_DEFAULT_LOCALHOST]
+            if host and host not in (QR_DEFAULT_LOCALHOST,) + QR_FORBIDDEN_HOSTS:
                 hosts_to_try.append(host)
             elif host in QR_FORBIDDEN_HOSTS:
                 # Wildcard bind — try to find local LAN IP via socket
@@ -263,7 +263,7 @@ class QrWebuiEngine(BaseEngine):
 
             try:
                 # Consolidated env whitelist builder (Phase 1)
-                from lib.lib_system_engine import build_subprocess_env
+                from lib.lib_system_engine import build_subprocess_env, _register_child
                 env = build_subprocess_env(
                     engine_name="webui",
                     env_config=env_config,
@@ -281,7 +281,10 @@ class QrWebuiEngine(BaseEngine):
                 log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "logs", "webui.log")
                 os.makedirs(os.path.dirname(log_path), exist_ok=True)
                 with open(log_path, "a") as logf:
-                    proc = subprocess.Popen(cmd, stdout=logf, stderr=logf, env=env, cwd=os.getcwd())
+                    proc = subprocess.Popen(cmd, stdout=logf, stderr=logf, env=env, cwd=os.getcwd(), start_new_session=True)
+                # C5-REG: Auto-terminate on parent death (survives SIGKILL, not just SIGTERM)
+                import ctypes as _ctypes
+                _ctypes.CDLL("libc.so.6").prctl(1, 15)  # PR_SET_PDEATHSIG=1, SIGTERM=15
             except OSError as exc:
                 _log_lifecycle("webui", "start", {"error": str(exc)})
                 return {"error": f"Failed to start webui: {exc}", "action": command}
@@ -298,6 +301,7 @@ class QrWebuiEngine(BaseEngine):
                 return {"error": f"WebUI crashed immediately (rc={retcode}): {err_msg}", "action": command}
 
             new_pid = proc.pid
+            _register_child(new_pid)  # Isolates child in own process group (C1 fix)
             update_instance(db_path, instance_id, pid_last_known=new_pid)
             try:
                 # Transition through proper state chain: unconfigured→deployed→starting→running
@@ -326,7 +330,7 @@ class QrWebuiEngine(BaseEngine):
             return {"action": "stop", "pid": pid}
 
         elif command == "restart":
-            # Full restart cycle: stop → dead-check → start
+            # Full restart cycle: kill → port-wait → start
             # Transition to stopping for visible state change in UI
             try:
                 transition_state(db_path, instance_id, "stopping")
@@ -334,14 +338,23 @@ class QrWebuiEngine(BaseEngine):
                 pass
 
             old_pid = inst.get("pid_last_known")
+
+            # Clear PID from DB FIRST — prevents race condition where stale PID
+            # is detected as "running" during the kill window
+            try:
+                update_instance(db_path, instance_id, pid_last_known=None)
+            except Exception:
+                pass
+
             if old_pid and _get_pid_status(old_pid):
                 try:
                     import psutil as _psutil
-                    _psutil.Process(old_pid).terminate()
+                    # SIGKILL for immediate death — no graceful shutdown delay
+                    _psutil.Process(old_pid).kill()
                 except (_psutil.NoSuchProcess, _psutil.AccessDenied):
                     pass
 
-            # Dead-check loop
+            # Wait for process to die (shorter timeout since we use SIGKILL)
             timeout = int(env_config.get("QUICKROBOT_SERVER_SPAWN_TIMEOUT", 5))
             deadline = __import__("time").time() + timeout
             dead_verified = False
@@ -352,14 +365,28 @@ class QrWebuiEngine(BaseEngine):
                 __import__("time").sleep(0.5)
 
             if not dead_verified:
-                print(f"[qr] webui restart: old PID {old_pid} didn't exit within {timeout}s, force killing")
+                print(f"[qr] webui restart: old PID {old_pid} didn't exit within {timeout}s")
+                # Already used SIGKILL, just continue — stale PID cleared above
+
+            # Wait for port to be fully released before spawning new process
+            import socket as _socket
+            from lib.qr_engine_ids import QR_ENGINE_WEBUI
+            webui_port = int(inst.get("port_assigned") or env_config["QUICKROBOT_WEBUI_PORT"])
+            port_wait_start = __import__("time").time()
+            port_timeout = 3
+            while __import__("time").time() < port_wait_start + port_timeout:
                 try:
-                    import psutil as _psutil
-                    if _get_pid_status(old_pid):
-                        _psutil.Process(old_pid).kill()
-                        __import__("time").sleep(1)
+                    sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+                    sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+                    sock.connect(("127.0.0.1", webui_port))
+                    sock.close()
+                    # Port still in use — old process lingering
+                    __import__("time").sleep(0.2)
+                except ConnectionRefusedError:
+                    # Port is free — we can start
+                    break
                 except Exception:
-                    pass
+                    break
 
             # Start new process
             return self.execute(instance_id, "start", db_path)

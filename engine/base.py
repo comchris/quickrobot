@@ -49,7 +49,7 @@ class BaseEngine(abc.ABC):
             "running": ["stopping", "error", "test_mode"],
             "stopping": ["stopped", "running", "starting", "deployed", "configuring", "error", "timeout"],
             "stopped": ["starting", "running", "configuring", "stopping", "error", "test_mode", "unconfigured"],
-            "error": ["unconfigured", "configuring", "deploying", "starting", "stopping", "updating", "build_error", "compiling", "loading", "running"],
+            "error": ["unconfigured", "configuring", "deploying", "starting", "stopping", "updating", "build_error", "compiling", "running"],
             "timeout": ["error"],
             "test_mode": ["running", "stopped", "error"],
         }

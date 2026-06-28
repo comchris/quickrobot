@@ -18,6 +18,7 @@ Provides the LLAMA.RPC engine class and its CAPABILITIES metadata for
 discovery by the engine loader.
 """
 
+from lib.qr_engine_ids import QR_DEFAULT_LOCALHOST, QR_ENGINE_PORT_DEFAULTS
 from engine.base import BaseEngine
 
 
@@ -27,7 +28,7 @@ CAPABILITIES = {
     "supports_models": False,
     "supports_presets": False,
     "max_instances": 99,
-    "base_port": 9000,
+    "base_port": QR_ENGINE_PORT_DEFAULTS.get("llama_rpc", 9000),
     "sub_pages": [
         {"path": "/engines/llama_rpc/config", "label": "Config", "order": 1},
     ],
@@ -57,6 +58,9 @@ class RpcEngine(BaseEngine):
         sm["compiling"] = ["deployed", "error", "timeout"]
         # Allow recovery from build_error to running when health check confirms alive
         sm["build_error"].extend(["updating", "running"])
+        # Allow recovery from deploying/configuring to running when health check confirms alive
+        sm["deploying"].append("running")
+        sm["configuring"].append("running")
         return sm
 
     def get_status(self, instance_id, db_path=None):
@@ -99,7 +103,7 @@ class RpcEngine(BaseEngine):
                             "service_state": None, "error": f"Instance {instance_id} not found"}
 
                 unit_name = f"qr-{instance_id}-{row['engine_type_name']}"
-                node_host = row["node_host"] or "127.0.0.1"
+                node_host = row["node_host"] or QR_DEFAULT_LOCALHOST
                 node_user = (row["node_user"] if row["node_user"] else None) or DEFAULT_ANSIBLE_USER
 
                 result = self._check_remote_service(node_host, unit_name, node_user)
@@ -150,12 +154,12 @@ class RpcEngine(BaseEngine):
                 return {"alive": False, "latency_ms": None,
                         "error": f"Instance {instance_id} not found"}
 
-            node_host = row["node_host"] or "127.0.0.1"
+            node_host = row["node_host"] or QR_DEFAULT_LOCALHOST
             state = row["state"] or "unknown"
 
             if state not in ("running", "starting", "deployed", "stopped", "error",
                               "updating", "build_error", "configuring", "deploying",
-                              "compiling", "loading"):
+                              "compiling"):
                 return {"alive": False, "latency_ms": None,
                         "error": f"Instance not active (state={state})"}
 
@@ -173,7 +177,7 @@ class RpcEngine(BaseEngine):
     def _check_rpc_systemd(self, node_host, instance_id, db_path):
         """Check RPC service status via centralized ansible playbook.
 
-        Uses INSTANCE_HEALTH_CHECK_V1 for unified interlock-aware health checks.
+        Uses instance_health_check for unified interlock-aware health checks.
         Primary health check — RPC ports are occupied by llama-server tensor_split,
         so HTTP JSON-RPC is unreliable.
 
@@ -198,12 +202,12 @@ class RpcEngine(BaseEngine):
                 return None
 
             unit_name = f"qr-{_row['id']}-llama_rpc"
-            from quickrobot import _execute_playbook as _ep
-            r = _ep("INSTANCE_HEALTH_CHECK_V1", resolver_type="playbook_id",
+            from qr_api import _execute_playbook as _ep
+            r = _ep("instance_health_check", resolver_type="playbook_id",
                     limit=node_host,
                     extra_vars={"inventory_host": node_host, "unit_name": unit_name},
                     node_id=_row["node_id"], instance_id=_row["id"],
-                    action_type="llama_rpc_health_check")
+                    action_type="health_check")
 
             if r.get("error"):
                 return {"alive": False, "latency_ms": None,
@@ -263,7 +267,7 @@ class RpcEngine(BaseEngine):
     def _check_remote_service(self, node_host, unit_name, node_user=None):
         """Check remote systemd service and process stats via ansible playbook.
 
-        Uses INSTANCE_HEALTH_CHECK_V1 playbook for unified, interlock-aware health checks.
+        Uses instance_health_check playbook for unified, interlock-aware health checks.
 
         Args:
             node_host: Hostname or IP of the remote node.
@@ -277,8 +281,8 @@ class RpcEngine(BaseEngine):
         import json as _json
 
         try:
-            from quickrobot import _execute_playbook as _ep
-            r = _ep("INSTANCE_HEALTH_CHECK_V1", resolver_type="playbook_id",
+            from qr_api import _execute_playbook as _ep
+            r = _ep("instance_health_check", resolver_type="playbook_id",
                     limit=node_host,
                     extra_vars={"inventory_host": node_host, "unit_name": unit_name},
                     action_type="health_check")
@@ -404,3 +408,69 @@ class RpcEngine(BaseEngine):
         """
         return {"engine": self._name, "instance_id": instance_id,
                 "method": method, "params": params or {}, "result": None}
+
+    @classmethod
+    def get_instance_status(cls, db_path, instance_id):
+        """Unified status endpoint for llama_rpc instances (STATUS-1)."""
+        from db.sqlite import pool
+
+        with pool(db_path) as conn:
+            inst = conn.execute(
+                """SELECT i.id, i.name, i.state, i.port_assigned,
+                          i.node_id, i.config_override,
+                          e.name as engine_type_name,
+                          n.hostname as node_hostname
+                   FROM instances i
+                   JOIN engine_types e ON i.engine_type_id = e.id
+                   LEFT JOIN nodes n ON i.node_id = n.id
+                   WHERE i.id = ?""",
+                (instance_id,),
+            ).fetchone()
+
+        if not inst:
+            return None
+
+        engine_data = {"port_assigned": inst["port_assigned"], "node_hostname": inst["node_hostname"]}
+
+        actions = cls._get_available_actions(inst["state"])
+        warnings = []
+        if inst["node_hostname"] and inst["state"] in ("running", "deployed"):
+            warnings.append({"type": "info", "message": f"Running on {inst['node_hostname']}"})
+
+        state_machine = cls.get_state_machine()
+        valid_next = state_machine.get(inst["state"], [])
+
+        return {
+            "id": inst["id"],
+            "state": inst["state"],
+            "engine_type_name": inst["engine_type_name"],
+            "engine_data": engine_data,
+            "actions": actions,
+            "warnings": warnings,
+            "_meta": {
+                "valid_next_states": valid_next,
+                "is_transitioning": inst["state"] in ("configuring", "deploying", "updating", "compiling", "starting", "stopping"),
+            },
+        }
+
+    @classmethod
+    def _get_available_actions(cls, state):
+        """Map instance state to available actions."""
+        action_map = {
+            "unconfigured": [{"name": "deploy", "label": "Deploy"}, {"name": "undeploy", "label": "Undeploy"}, {"name": "delete", "label": "Delete"}],
+            "configuring": [{"name": "stop", "label": "Stop"}],
+            "deployed": [{"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "reconfigure", "label": "Reconfigure"}, {"name": "delete", "label": "Delete"}],
+            "starting": [{"name": "stop", "label": "Stop"}],
+            "loading": [{"name": "stop", "label": "Stop"}],
+            "running": [{"name": "stop", "label": "Stop"}, {"name": "restart", "label": "Restart"}, {"name": "reconfigure", "label": "Reconfigure"}],
+            "stopping": [{"name": "start", "label": "Start"}],
+            "stopped": [{"name": "start", "label": "Start"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "reconfigure", "label": "Reconfigure"}, {"name": "deploy", "label": "Deploy"}, {"name": "delete", "label": "Delete"}],
+            "error": [{"name": "start", "label": "Start"}, {"name": "deploy", "label": "Deploy"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "stop", "label": "Stop"}, {"name": "delete", "label": "Delete"}],
+            "deploying": [{"name": "stop", "label": "Stop"}],
+            "updating": [],
+            "compiling": [],
+            "build_error": [{"name": "deploy", "label": "Deploy"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "delete", "label": "Delete"}],
+            "timeout": [{"name": "deploy", "label": "Deploy"}],
+            "test_mode": [{"name": "stop", "label": "Stop"}],
+        }
+        return action_map.get(state, [])

@@ -35,7 +35,8 @@ _ENGINES_MAP = {}
 # Uses QR_ENGINE_* constants from lib.qr_engine_ids as single source of truth
 from lib.qr_engine_ids import (QR_ENGINE_API, QR_ENGINE_WEBUI, QR_ENGINE_MCP,
                                QR_ENGINE_UNIVERSAL, QR_ENGINE_SUBPROCESS,
-                               QR_ENGINE_IPERF3, QR_ENGINE_LLAMA_SERVER, QR_ENGINE_LLAMA_RPC)
+                               QR_ENGINE_IPERF3, QR_ENGINE_IPERF3_NAME,
+                               QR_ENGINE_LLAMA_SERVER, QR_ENGINE_LLAMA_RPC)
 _ENGINE_ID_MAP = {
     "quickrobot_api": QR_ENGINE_API,
     "quickrobot_webui": QR_ENGINE_WEBUI,
@@ -73,7 +74,8 @@ def _discover_engine_packages(base_dir):
         module_name = f"engine.{entry}"
         try:
             module = importlib.import_module(module_name)
-        except Exception:
+        except Exception as _e:
+            print(f"[qr] ENGINE IMPORT FAILED ({entry}): {_e}")
             continue
 
         # Look for BaseEngine subclass in the module
@@ -89,6 +91,59 @@ def _discover_engine_packages(base_dir):
                     break
 
     return discovered
+
+
+def _is_engine_enabled(engine_name, capabilities):
+    """Check if engine is enabled via QUICKROBOT_ENGINE_<ID>_<name>_ENABLED env key.
+
+    Keys are read from _CONFIG["qr_env_config"]. Commented-out keys (absent from dict)
+    default to enabled (loaded). Uncommented keys with value "false" disable the engine.
+
+    Format: QUICKROBOT_ENGINE_<ID>_<name>_ENABLED=true/false
+    Example: QUICKROBOT_ENGINE_12_subprocess_ENABLED=false  →  subprocess disabled
+
+    Engine list imported from SOT (lib.qr_engine_ids._QR_ENGINES).
+
+    Args:
+        engine_name: Engine package name (e.g., "subprocess", "llama_server").
+        capabilities: CAPABILITIES dict from the engine module.
+
+    Returns:
+        True if engine should be loaded, False if explicitly disabled.
+    """
+    try:
+        from lib.qr_engine_ids import _QR_ENGINES
+
+        # Build the canonical env key for this specific engine (imported from SOT)
+        cap_name = capabilities.get("name", engine_name)
+
+        for _id, _canonical, _cat in _QR_ENGINES:
+            # Check if this engine matches by any of its name forms
+            # Must use _canonical (the iteration variable), not stale cap_name/engine_name comparison
+            if (_canonical == engine_name or
+                _canonical == cap_name or
+                _canonical.replace("_", "-") == cap_name or
+                _canonical.replace("-", "_") == engine_name):
+                # Build env key in both underscore and hyphen forms
+                key_underscore = f"QUICKROBOT_ENGINE_{_id}_{_canonical}_ENABLED"
+                key_hyphen = f"QUICKROBOT_ENGINE_{_id}_{_canonical.replace('_', '-')}_ENABLED"
+                qr_env = {}
+                try:
+                    from qr_api import _CONFIG
+                    qr_env = _CONFIG.get("qr_env_config", {}) if isinstance(_CONFIG, dict) else {}
+                except Exception:
+                    pass
+
+                for key in (key_underscore, key_hyphen):
+                    val = qr_env.get(key)
+                    if val is not None:
+                        return str(val).lower() != "false"
+                break  # Found matching engine — check complete
+
+    except Exception:
+        pass  # Any error → default to enabled
+
+    return True  # No key set → enabled by default
 
 
 def load_engines():
@@ -110,6 +165,10 @@ def load_engines():
     _ENGINES_MAP = {}
 
     for name, cls, capabilities in packages:
+        if not _is_engine_enabled(name, capabilities):
+            cap_name = capabilities.get("name", name)
+            print(f"[qr] Engine '{cap_name}' disabled via env config — not loading")
+            continue
         instance = cls()
         # Use CAPABILITIES["name"] as map key if available, else directory name
         cap_name = capabilities.get("name", name)
@@ -140,7 +199,14 @@ def _auto_register_engines(db_path):
         add_engine_type as _ae
     registered = []
 
+    # Check engine whitelist (from .env QUICKROBOT_ENGINE_*_ENABLED keys)
+    # If engine is disabled via env, skip registration entirely (prevents race window)
+
+
     for eng_name, cls, cap in ENGINES:
+        if not _is_engine_enabled(eng_name, cap):
+            print(f"[qr] Skipping disabled engine '{eng_name}' (env whitelist)")
+            continue
         existing = _get_etb(db_path, eng_name)
         if existing is None:
             # Also check hyphen variant (e.g., "qr_api" vs "qr-api")
@@ -158,7 +224,7 @@ def _auto_register_engines(db_path):
         if existing is None:
             # Normalize name: use underscores (matching the filesystem package)
             # Override: iperf3 → "iperf;3" for cleaner display
-            if eng_name == "iperf3":
+            if eng_name == QR_ENGINE_IPERF3_NAME:
                 display_name = "iperf;3"
             else:
                 display_name = cap.get("display_name", eng_name.replace("_", " ").title())
@@ -174,7 +240,7 @@ def _auto_register_engines(db_path):
                 print(f"Warning: failed to register engine '{eng_name}': {exc}")
         else:
             # Sync display_name for known overrides (e.g., iperf3 → "iperf;3")
-            if eng_name == "iperf3" and existing.get("display_name") != "iperf;3":
+            if eng_name == QR_ENGINE_IPERF3_NAME and existing.get("display_name") != "iperf;3":
                 try:
                     from db.sqlite import pool as _pool
                     with _pool(db_path) as conn:

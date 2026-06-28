@@ -1,15 +1,17 @@
 # @name: Reboot Node
-# @playbook_id: REBOOT_NODE_V1
-# @version: 1
+# @playbook_id: reboot_node
+# @version: 2
 # @timeout: 600
-# reboot_node.yml — Reboot a remote node
+# reboot_node.yml — Async fire-and-forget reboot of a remote node
 # NOTE: become: yes required — sudoers.d not yet active on target nodes.
 #       Once NOPASSWD sudo is confirmed, remove become and align with other playbooks.
 - hosts: "{{ inventory_host }}"
   become: yes
   gather_facts: yes
   tasks:
-    - name: Reboot node
+    - name: Reboot node (async fire-and-forget)
       ansible.builtin.reboot:
         reboot_timeout: 300
-        msg: "Reboot initiated by keeper_v2"
+        msg: "Reboot initiated by quickrobot"
+      async: 10
+      poll: 0

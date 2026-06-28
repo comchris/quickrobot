@@ -1,14 +1,11 @@
 # @name: Undeploy Iperf3
-# @playbook_id: UNDEPLOY_IPERF3_V1
-# @version: 1
-# @timeout: 300
+# @playbook_id: undeploy_iperf3
+# @version: 2
 # undeploy_iperf3.yml — Undeploy iperf3 instance from target node
 - hosts: "{{ inventory_host }}"
   become: yes
   vars:
-    instance_id: "{{ instance_id }}"
-    engine_type: "iperf3"
-    unit_name: "qr-{{ instance_id }}-{{ engine_type }}"
+    unit_name: "qr-{{ instance_id }}-{{ engine_type | default('iperf3') }}"
     pkill_pattern: "iperf3"
   tasks:
     - import_tasks: "{{ playbook_dir }}/common/undeploy_base.yml"

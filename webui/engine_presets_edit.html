@@ -1,22 +1,22 @@
-<h1 style="margin:0;font-size:1.3em;">Edit Preset: {{ preset.name }} (ID #{{ preset.id | default('?') }}) — {{ engine_type }}</h1>
+<h1 style="margin:0;font-size:1.3em;">Edit Preset: <span id="preset-title">Loading...</span></h1>
 <form id="preset-form" style="max-width:600px;">
   <div style="margin-bottom:12px;">
     <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Preset Name</label>
-    <input type="text" name="name" value="{{ preset.name | default('?') }}" required style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+    <input type="text" name="name" id="preset-name" required style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
   </div>
   <div style="margin-bottom:12px;">
     <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Category</label>
-    <input type="text" name="category" value="{{ preset.category | default('default') }}" style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+    <input type="text" name="category" id="preset-category" style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
   </div>
 
   <!-- GPU Device Selector -->
   <div style="margin-bottom:12px;">
     <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">GPU Device</label>
     <select id="gpu-device-select" style="width:100%;max-width:300px;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
-      <option value="" {% if not preset.gpu_device %}selected{% endif %}>-- Default (from instance or engine) --</option>
-      <option value="none" {% if preset.gpu_device == 'none' %}selected{% endif %}>None (CPU only)</option>
-      <option value="Vulkan0" {% if preset.gpu_device == 'Vulkan0' %}selected{% endif %}>Vulkan0 (AMD/Intel)</option>
-      <option value="CUDA0" {% if preset.gpu_device == 'CUDA0' %}selected{% endif %}>CUDA0 (NVIDIA)</option>
+      <option value="">-- Default (from instance or engine) --</option>
+      <option value="none">None (CPU only)</option>
+      <option value="Vulkan0">Vulkan0 (AMD/Intel)</option>
+      <option value="CUDA0">CUDA0 (NVIDIA)</option>
     </select>
   </div>
 
@@ -35,27 +35,40 @@
     </div>
   </div>
 
-  <!-- CLI Options Editor -->
+  <!-- Dynamic Config Display -->
   <div style="margin-bottom:12px;">
-    <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">CLI Options</label>
-    <button type="button" class="btn btn-xs btn-success" id="edit-cli-btn">Edit CLI Options</button>
-    <div id="cli-preview" style="font-size:0.85em;color:#666;margin-top:4px;font-family:monospace;">{{ preset.cli_data | default('[]') | tojson }}</div>
+    <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Configuration</label>
+    <div id="config-display" style="border:1px solid #ddd;border-radius:4px;padding:8px;background:#fafafa;">
+      <table style="font-size:0.85em;width:100%;border-collapse:collapse;" id="config-table">
+        <thead><tr style="border-bottom:1px solid #ccc;"><th style="text-align:left;padding:4px;">Key</th><th style="text-align:left;padding:4px;">Value</th><th style="text-align:left;padding:4px;">Action</th></tr></thead>
+        <tbody id="config-body"></tbody>
+      </table>
+      <p id="config-empty" style="color:#888;font-size:0.85em;margin-top:8px;display:none;">No config keys defined. Click "Add Env Var" or "Add CLI Option" to start.</p>
+    </div>
+    <div style="margin-top:8px;display:flex;gap:6px;">
+      <button type="button" class="btn btn-xs btn-success" id="add-env-btn">+ Add Env Var</button>
+      <button type="button" class="btn btn-xs btn-success" id="add-cli-btn">+ Add CLI Option</button>
+    </div>
   </div>
 
-  <!-- Env Vars Editor -->
+  <!-- Merge Chain Preview -->
   <div style="margin-bottom:12px;">
-    <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Environment Variables</label>
-    <button type="button" class="btn btn-xs btn-success" id="edit-env-btn">Edit Env Vars</button>
-   <div id="env-preview" style="font-size:0.85em;color:#666;margin-top:4px;font-family:monospace;">{{ preset.env_data | default('{}') | tojson }}</div>
+    <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Preset Config (L3 — Preset Template Layer)</label>
+    <pre id="preset-config-output" style="background:#1e1e1e;color:#d4d4d4;padding:12px;border-radius:4px;font-size:0.8em;max-height:200px;overflow:auto;font-family:Cascadia Code,Consolas,Monaco,monospace;"></pre>
   </div>
 
-  <!-- Merged Preview -->
-  <div style="margin-bottom:12px;">
-    <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Merged Preview</label>
-    <pre id="merged-preview" style="background:#f5f5f5;padding:8px;border-radius:4px;font-size:0.85em;max-height:150px;overflow:auto;"></pre>
-  </div>
+  <!-- Merge Chain Visualization -->
+  <details style="margin-bottom:12px;">
+    <summary style="cursor:pointer;color:#aaa;font-size:0.9em;">Show Merge Chain Preview</summary>
+    <div id="merge-chain-view" style="margin-top:8px;border:1px solid #ddd;border-radius:4px;padding:8px;background:#fafafa;">
+      <table style="font-size:0.8em;width:100%;border-collapse:collapse;">
+        <thead><tr style="border-bottom:1px solid #ccc;"><th style="text-align:left;padding:3px;">Layer</th><th style="text-align:left;padding:3px;">Key</th><th style="text-align:left;padding:3px;">Value</th></tr></thead>
+        <tbody id="merge-chain-body"></tbody>
+      </table>
+    </div>
+  </details>
 
-  <button type="submit" class="btn btn-success">Save Preset</button>
+  <button type="submit" class="btn btn-success" id="preset-save-btn">Save Preset</button>
   <a href="/webui/engine/{{ engine_type }}/presets" class="btn btn-primary" style="text-decoration:none;">Cancel</a>
 </form>
 
@@ -102,34 +115,19 @@
            console.log('Failed to load presets: ' + e);
          });
        });
-     });
-   }
-})();
+     }
+ })();
 </script>
 {% else %}
 <h2>Affected Instances</h2>
 <p>No instances currently use this preset.</p>
 {% endif %}
 
-<!-- CLI JSON Modal -->
-<div id="cli-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:1000;">
-  <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:#fff;padding:20px;border-radius:8px;max-width:700px;width:90%;max-height:80vh;overflow-y:auto;">
-    <h3 style="margin-top:0;">Edit CLI Options</h3>
-    <p style="color:#888;font-size:0.85em;margin-bottom:8px;">JSON array of CLI flag strings (e.g. `["-v","-d"]`) or a single string (e.g. `-v`). Last occurrence wins on dedup.</p>
-    <textarea id="cli-json" rows="14" style="width:100%;font-family:monospace;padding:8px;border:1px solid #ccc;border-radius:4px;font-size:0.9em;"></textarea>
-    <span id="cli-status" style="font-size:0.85em;margin-top:4px;display:block;"></span>
-    <div style="margin-top:12px;text-align:right;">
-      <button class="btn btn-xs" id="cli-cancel">Cancel</button>
-      <button class="btn btn-success btn-xs" id="cli-save">Save</button>
-    </div>
-  </div>
-</div>
-
 <!-- Env JSON Modal -->
 <div id="env-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:1000;">
   <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:#fff;padding:20px;border-radius:8px;max-width:700px;width:90%;max-height:80vh;overflow-y:auto;">
-    <h3 style="margin-top:0;">Edit Environment Variables</h3>
-    <p style="color:#888;font-size:0.85em;margin-bottom:8px;">JSON dict of key/value pairs for LLAMA_ARG_* env vars.</p>
+    <h3 style="margin-top:0;" id="env-modal-title">Edit Environment Variables</h3>
+    <p style="color:#888;font-size:0.85em;margin-bottom:8px;">JSON dict of key/value pairs. Keys become env vars in the merge chain (L3 layer).</p>
     <textarea id="env-json" rows="14" style="width:100%;font-family:monospace;padding:8px;border:1px solid #ccc;border-radius:4px;font-size:0.9em;"></textarea>
     <span id="env-status" style="font-size:0.85em;margin-top:4px;display:block;"></span>
     <div style="margin-top:12px;text-align:right;">
@@ -139,19 +137,111 @@
   </div>
 </div>
 
+<!-- CLI JSON Modal -->
+<div id="cli-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:1000;">
+  <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:#fff;padding:20px;border-radius:8px;max-width:700px;width:90%;max-height:80vh;overflow-y:auto;">
+    <h3 style="margin-top:0;" id="cli-modal-title">Edit CLI Options</h3>
+    <p style="color:#888;font-size:0.85em;margin-bottom:8px;">JSON array of CLI flag strings (e.g. `["-v","-d"]`) or a single string. These go into the merge chain's cli_opts (L3 layer).</p>
+    <textarea id="cli-json" rows="14" style="width:100%;font-family:monospace;padding:8px;border:1px solid #ccc;border-radius:4px;font-size:0.9em;"></textarea>
+    <span id="cli-status" style="font-size:0.85em;margin-top:4px;display:block;"></span>
+    <div style="margin-top:12px;text-align:right;">
+      <button class="btn btn-xs" id="cli-cancel">Cancel</button>
+      <button class="btn btn-success btn-xs" id="cli-save">Save</button>
+    </div>
+  </div>
+</div>
+
 <script>
 (function() {
+  var presetId = {{ preset_id }};
+  var engineType = '{{ engine_type }}';
   var modelSelect = document.getElementById('model-select');
-  var modelInfo = document.getElementById('model-info');
-  var cliPreview = document.getElementById('cli-preview');
-  var envPreview = document.getElementById('env-preview');
-  var mergedPreview = document.getElementById('merged-preview');
   var gpuSelect = document.getElementById('gpu-device-select');
+  var configBody = document.getElementById('config-body');
+  var configEmpty = document.getElementById('config-empty');
+  var presetConfigOutput = document.getElementById('preset-config-output');
+  var mergeChainBody = document.getElementById('merge-chain-body');
 
-  // Initialize from server-rendered values
-  var currentCli = {{ preset.cli_data | default("{}") | tojson }};
-  var currentEnv = {{ preset.env_data | default("{}") | tojson }};
-  var currentModelId = {{ preset.model_id | default("null") | tojson }};
+  // HTML escaping helpers
+  function escapeHtml(s) {
+    var div = document.createElement('div');
+    div.appendChild(document.createTextNode(String(s)));
+    return div.innerHTML;
+  }
+  function escapeJs(s) {
+    return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '\\"');
+  }
+
+  // State — initialized from API, NOT server-rendered
+  var currentEnv = {};
+  var currentCli = [];
+  var currentModelId = null;
+  var currentName = '';
+  var currentCategory = '';
+  var currentGpuDevice = '';
+
+  // Loading state
+  var loadStatus = document.getElementById('preset-title');
+
+  // Load preset data from API (API-driven, not Jinja2)
+  function loadPreset() {
+    qrApi('/engine/' + engineType + '/presets/' + presetId)
+      .then(function(data) {
+        if (data.status !== 'ok' || !data.data) {
+          loadStatus.textContent = 'Error loading preset';
+          return;
+        }
+        var p = data.data;
+        currentName = p.name || '';
+        currentCategory = p.category || 'default';
+        currentGpuDevice = p.gpu_device || '';
+        currentModelId = p.model_id || null;
+
+        // Parse config_template (may be dict or JSON string from API)
+        var ct = {};
+        if (p.config_template) {
+          if (typeof p.config_template === 'object') {
+            ct = p.config_template;  // Already parsed by API
+          } else {
+            try { ct = JSON.parse(p.config_template); } catch(e) { ct = {}; }
+          }
+        }
+        currentEnv = ct.env || {};
+        currentCli = ct.cli_opts || [];
+
+        // Render form fields
+        document.getElementById('preset-name').value = currentName;
+        document.getElementById('preset-category').value = currentCategory;
+        gpuSelect.value = currentGpuDevice;
+        loadStatus.textContent = currentName + ' (ID #' + p.id + ') — ' + engineType;
+
+        // Populate model select
+        qrApi('/engine/' + engineType + '/models?include_inactive=false')
+          .then(function(md) {
+            var items = md.items || [];
+            items.forEach(function(m) {
+              var opt = document.createElement('option');
+              opt.value = m.id;
+              var q = m.quantization ? ' (' + m.quantization + ')' : '';
+              var tags = [];
+              if (m.mmproj_path) tags.push('(+ mmproj)');
+              if (m.draft_model_path) tags.push('(+ draft)');
+              opt.textContent = m.name + q + (tags.length ? ' ' + tags.join(' ') : '');
+              modelSelect.appendChild(opt);
+            });
+            if (currentModelId) modelSelect.value = currentModelId;
+          })
+          .catch(function(e) { console.log('Model fetch failed: ' + e); });
+
+        renderConfigTable();
+        renderPresetConfigPreview();
+        renderMergeChainView();
+      })
+      .catch(function(e) {
+        loadStatus.textContent = 'Error loading preset';
+        console.error('Failed to load preset:', e);
+      });
+  }
 
   function formatSize(bytes) {
     if (!bytes || bytes === 0) return '';
@@ -162,155 +252,272 @@
     return size.toFixed(1) + units[i];
   }
 
-// Load models list (active only)
-  qrApi('/engine/{{ engine_type }}/models?include_inactive=false')
-    .then(function(data) {
-       var items = data.items || [];
-       items.forEach(function(m) {
-         var opt = document.createElement('option');
-         opt.value = m.id;
-         var q = m.quantization ? ' (' + m.quantization + ')' : '';
-         var tags = [];
-         if (m.mmproj_path) tags.push('(+ mmproj)');
-         if (m.draft_model_path) tags.push('(+ draft)');
-         opt.textContent = m.name + q + (tags.length ? ' ' + tags.join(' ') : '');
-         modelSelect.appendChild(opt);
-       });
-       // Select current model_id if set
-       if (currentModelId) {
-         modelSelect.value = currentModelId;
-         modelInfo.style.display = 'block';
-         document.getElementById('mi-name').textContent = modelSelect.options[modelSelect.selectedIndex].text;
-         // Fetch model details
-         qrApi('/engine/{{ engine_type }}/models/' + currentModelId)
-         .then(function(d) {
-  if (d.status === 'ok' && d.data) {
-    document.getElementById('mi-quant').textContent = d.data.quantization || '';
-    document.getElementById('mi-size').textContent = d.data.size_bytes ? formatSize(d.data.size_bytes) : '';
-    if (d.data.mmproj_path) {
-      document.getElementById('mi-mmproj').textContent = d.data.mmproj_path;
-      document.getElementById('mi-mmproj-wrap').style.display = 'inline';
-    }
-    if (d.data.draft_model_path) {
-      document.getElementById('mi-draft').textContent = d.data.draft_model_path;
-      document.getElementById('mi-draft-wrap').style.display = 'inline';
-    }
- }
-         }).catch(function() {});
-       }
-     }).catch(function(e) {
-        console.log('Model fetch failed: ' + e);
-      });
+  function selectModelInfo() {
+    var mi = document.getElementById('model-info');
+    if (!modelSelect.value) { mi.style.display = 'none'; return; }
+    mi.style.display = 'block';
+    currentModelId = parseInt(modelSelect.value, 10);
+    document.getElementById('mi-name').textContent = modelSelect.options[modelSelect.selectedIndex].text;
 
-modelSelect.addEventListener('change', function() {
-    currentModelId = this.value ? parseInt(this.value, 10) : null;
-    if (currentModelId) {
-      modelInfo.style.display = 'block';
-      document.getElementById('mi-name').textContent = this.options[this.selectedIndex].text;
-      qrApi('/engine/{{ engine_type }}/models/' + currentModelId)
+    qrApi('/engine/' + engineType + '/models/' + currentModelId)
       .then(function(d) {
- if (d.status === 'ok' && d.data) {
-  document.getElementById('mi-quant').textContent = d.data.quantization || '';
-  document.getElementById('mi-size').textContent = d.data.size_bytes ? formatSize(d.data.size_bytes) : '';
-  if (d.data.mmproj_path) {
-    document.getElementById('mi-mmproj').textContent = d.data.mmproj_path;
-    document.getElementById('mi-mmproj-wrap').style.display = 'inline';
-  }
-  if (d.data.draft_model_path) {
-    document.getElementById('mi-draft').textContent = d.data.draft_model_path;
-    document.getElementById('mi-draft-wrap').style.display = 'inline';
-  }
- }
+        if (d.status === 'ok' && d.data) {
+          document.getElementById('mi-quant').textContent = d.data.quantization || '';
+          document.getElementById('mi-size').textContent = d.data.size_bytes ? formatSize(d.data.size_bytes) : '';
+          if (d.data.mmproj_path) {
+            document.getElementById('mi-mmproj').textContent = d.data.mmproj_path;
+            document.getElementById('mi-mmproj-wrap').style.display = 'inline';
+          }
+          if (d.data.draft_model_path) {
+            document.getElementById('mi-draft').textContent = d.data.draft_model_path;
+            document.getElementById('mi-draft-wrap').style.display = 'inline';
+          }
+        }
       }).catch(function() {});
-    } else {
-      modelInfo.style.display = 'none';
-    }
-    updatePreview();
-  });
 
-  // CLI modal handlers
-  document.getElementById('edit-cli-btn').addEventListener('click', function() {
-    document.getElementById('cli-json').value = JSON.stringify(currentCli, null, 2);
-    document.getElementById('cli-status').textContent = '';
-    document.getElementById('cli-modal').style.display = 'block';
-  });
-  document.getElementById('cli-cancel').addEventListener('click', function() {
-    document.getElementById('cli-modal').style.display = 'none';
-  });
-  document.getElementById('cli-save').addEventListener('click', function() {
-    var raw = document.getElementById('cli-json').value.trim();
-    if (!raw) { currentCli = []; cliPreview.textContent = '[]'; document.getElementById('cli-status').textContent = 'Cleared'; setTimeout(function() { document.getElementById('cli-modal').style.display = 'none'; }, 400); updatePreview(); return; }
-    try {
-      var parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) { currentCli = parsed; }
-      else if (typeof parsed === 'string') { currentCli = [parsed]; }
-      else { throw new Error('Value must be a string or array'); }
-      cliPreview.textContent = JSON.stringify(currentCli, null, 2);
-      document.getElementById('cli-status').innerHTML = '<span style="color:green;">OK</span>';
-      setTimeout(function() { document.getElementById('cli-modal').style.display = 'none'; }, 400);
-      updatePreview();
-    } catch(e) {
-      // Fallback: treat as single CLI arg
-      currentCli = [raw];
-      cliPreview.textContent = JSON.stringify(currentCli, null, 2);
-      document.getElementById('cli-status').innerHTML = '<span style="color:green;">Saved (as single arg)</span>';
-      setTimeout(function() { document.getElementById('cli-modal').style.display = 'none'; }, 400);
-      updatePreview();
-    }
-  });
+    renderMergeChainView();
+  }
 
-  // Env modal handlers
-  document.getElementById('edit-env-btn').addEventListener('click', function() {
-    document.getElementById('env-json').value = JSON.stringify(currentEnv, null, 2);
+  function renderConfigTable() {
+    var rows = [];
+    var hasContent = false;
+
+    // Render env vars with source annotation (L3 — preset_template)
+    var envKeys = Object.keys(currentEnv).sort();
+    envKeys.forEach(function(k) {
+      hasContent = true;
+      var val = currentEnv[k];
+      rows.push(
+        '<tr>' +
+        '<td style="padding:4px;"><code>' + escapeHtml(k) + '</code></td>' +
+        '<td style="padding:4px;"><code>' + escapeHtml(String(val)) + '</code></td>' +
+        '<td style="padding:4px;">' +
+        '<button class="btn btn-xs" onclick="editEnvKey(\'' + escapeJs(k) + '\')" title="Edit">✎</button> ' +
+        '<button class="btn btn-xs btn-danger" onclick="removeEnvKey(\'' + escapeJs(k) + '\')" title="Remove">&times;</button>' +
+        '</td>' +
+        '</tr>');
+    });
+
+    // Render CLI opts with source annotation (L3 — preset_template)
+    currentCli.forEach(function(opt, idx) {
+      hasContent = true;
+      rows.push(
+        '<tr>' +
+        '<td style="padding:4px;"><code>cli[' + idx + ']</code></td>' +
+        '<td style="padding:4px;"><code>' + escapeHtml(String(opt)) + '</code></td>' +
+        '<td style="padding:4px;">' +
+        '<button class="btn btn-xs" onclick="editCliItem(' + idx + ')" title="Edit">✎</button> ' +
+        '<button class="btn btn-xs btn-danger" onclick="removeCliItem(' + idx + ')" title="Remove">&times;</button>' +
+        '</td>' +
+        '</tr>');
+    });
+
+    configBody.innerHTML = rows.join('');
+    configEmpty.style.display = hasContent ? 'none' : 'block';
+    renderPresetConfigPreview();
+    renderMergeChainView();
+  }
+
+  // Edit a specific env key by opening modal with just that key
+  window.editEnvKey = function(key) {
+    var obj = {};
+    obj[key] = currentEnv[key];
+    document.getElementById('env-modal-title').textContent = 'Edit Env Var: ' + key;
+    document.getElementById('env-json').value = JSON.stringify(obj, null, 2);
     document.getElementById('env-status').textContent = '';
     document.getElementById('env-modal').style.display = 'block';
-  });
-  document.getElementById('env-cancel').addEventListener('click', function() {
-    document.getElementById('env-modal').style.display = 'none';
-  });
-  document.getElementById('env-save').addEventListener('click', function() {
+
+    // Override save to do partial update
+    document.getElementById('env-save').onclick = function() {
+      try {
+        var parsed = JSON.parse(document.getElementById('env-json').value);
+        if (typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Must be a JSON object');
+        // Update only the specified key
+        for (var k in parsed) {
+          if (parsed[k] === null || parsed[k] === '') {
+            delete currentEnv[k];
+          } else {
+            currentEnv[k] = parsed[k];
+          }
+        }
+        renderConfigTable();
+        document.getElementById('env-status').innerHTML = '<span style="color:green;">OK</span>';
+        setTimeout(function() { document.getElementById('env-modal').style.display = 'none'; }, 400);
+        document.getElementById('env-save').onclick = saveEnvModal; // Reset to full save
+        document.getElementById('env-modal-title').textContent = 'Edit Environment Variables';
+      } catch(e) {
+        document.getElementById('env-status').innerHTML = '<span style="color:red;">' + e.message + '</span>';
+      }
+    };
+  };
+
+  function saveEnvModal() {
     try {
       var parsed = JSON.parse(document.getElementById('env-json').value);
       if (typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Must be a JSON object');
       currentEnv = parsed;
-      envPreview.textContent = JSON.stringify(currentEnv, null, 2);
+      renderConfigTable();
       document.getElementById('env-status').innerHTML = '<span style="color:green;">OK</span>';
       setTimeout(function() { document.getElementById('env-modal').style.display = 'none'; }, 400);
-      updatePreview();
     } catch(e) {
       document.getElementById('env-status').innerHTML = '<span style="color:red;">' + e.message + '</span>';
     }
-  });
-
-  function updatePreview() {
-    var merged = {};
-    merged.env = Object.keys(currentEnv).length > 0 ? currentEnv : {};
-    merged.cli_opts = currentCli.length > 0 ? currentCli : [];
-    document.getElementById('merged-preview').textContent = JSON.stringify(merged, null, 2);
   }
 
-  updatePreview();
+  window.removeEnvKey = function(key) {
+    delete currentEnv[key];
+    renderConfigTable();
+  };
 
+  window.editCliItem = function(idx) {
+    var single = [currentCli[idx]];
+    document.getElementById('cli-modal-title').textContent = 'Edit CLI Option [' + idx + ']';
+    document.getElementById('cli-json').value = JSON.stringify(single, null, 2);
+    document.getElementById('cli-status').textContent = '';
+    document.getElementById('cli-modal').style.display = 'block';
+
+    document.getElementById('cli-save').onclick = function() {
+      var raw = document.getElementById('cli-json').value.trim();
+      if (!raw) { currentCli.splice(idx, 1); renderConfigTable(); document.getElementById('cli-modal').style.display = 'none'; return; }
+      try {
+        var parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) { currentCli[idx] = parsed[parsed.length - 1]; }
+        else if (typeof parsed === 'string') { currentCli[idx] = parsed; }
+        else throw new Error('Must be a string or array');
+        renderConfigTable();
+        document.getElementById('cli-status').innerHTML = '<span style="color:green;">OK</span>';
+        setTimeout(function() { document.getElementById('cli-modal').style.display = 'none'; }, 400);
+        document.getElementById('cli-save').onclick = saveCliModal;
+        document.getElementById('cli-modal-title').textContent = 'Edit CLI Options';
+      } catch(e) {
+        document.getElementById('cli-status').innerHTML = '<span style="color:red;">' + e.message + '</span>';
+      }
+    };
+  };
+
+  function saveCliModal() {
+    var raw = document.getElementById('cli-json').value.trim();
+    if (!raw) { currentCli = []; renderConfigTable(); document.getElementById('cli-modal').style.display = 'none'; return; }
+    try {
+      var parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) { currentCli = parsed; }
+      else if (typeof parsed === 'string') { currentCli = [parsed]; }
+      else throw new Error('Must be a string or array');
+      renderConfigTable();
+      document.getElementById('cli-status').innerHTML = '<span style="color:green;">OK</span>';
+      setTimeout(function() { document.getElementById('cli-modal').style.display = 'none'; }, 400);
+    } catch(e) {
+      currentCli = [raw];
+      renderConfigTable();
+      document.getElementById('cli-status').innerHTML = '<span style="color:green;">Saved (as single arg)</span>';
+      setTimeout(function() { document.getElementById('cli-modal').style.display = 'none'; }, 400);
+    }
+  }
+
+  window.removeCliItem = function(idx) {
+    currentCli.splice(idx, 1);
+    renderConfigTable();
+  };
+
+  // Render preset config JSON preview (what will be saved)
+  function renderPresetConfigPreview() {
+    var merged = {};
+    if (Object.keys(currentEnv).length > 0) merged.env = currentEnv;
+    if (currentCli.length > 0) merged.cli_opts = currentCli;
+    presetConfigOutput.textContent = JSON.stringify(merged, null, 2);
+  }
+
+  // Render merge chain view — shows all layers that contribute to final config
+  function renderMergeChainView() {
+    var rows = [];
+
+    // L1: Engine defaults — show what the engine provides
+    rows.push('<tr><td style="padding:3px;color:#4caf50;font-weight:bold;">L1 Engine Default</td><td style="padding:3px;">(loaded at deploy time)</td><td style="padding:3px;color:#888;">—</td></tr>');
+
+    // L3: Preset template — our current edits
+    var envKeys = Object.keys(currentEnv).sort();
+    if (envKeys.length > 0) {
+      rows.push('<tr style="border-top:1px solid #ddd;"><td colspan="3" style="padding:4px;font-weight:bold;color:#2196f3;">L3 Preset Template</td></tr>');
+      envKeys.forEach(function(k) {
+        rows.push(
+          '<tr><td style="padding:3px;color:#2196f3;">preset.env</td>' +
+          '<td style="padding:3px;"><code>' + escapeHtml(k) + '</code></td>' +
+          '<td style="padding:3px;"><code>' + escapeHtml(String(currentEnv[k])) + '</code></td></tr>');
+      });
+    }
+    if (currentCli.length > 0) {
+      currentCli.forEach(function(opt, idx) {
+        rows.push(
+          '<tr><td style="padding:3px;color:#2196f3;">preset.cli_opts[' + idx + ']</td>' +
+          '<td style="padding:3px;">—</td>' +
+          '<td style="padding:3px;"><code>' + escapeHtml(String(opt)) + '</code></td></tr>');
+      });
+    }
+
+    // L5: Instance override — placeholder (shown as "set per-instance at deploy time")
+    rows.push('<tr style="border-top:1px solid #ddd;"><td colspan="3" style="padding:4px;font-weight:bold;color:#ff9800;">L5 Instance Override</td></tr>');
+    rows.push('<tr><td style="padding:3px;color:#ff9800;">instance_override</td><td style="padding:3px;">(applied when instance uses this preset)</td><td style="padding:3px;color:#888;">—</td></tr>');
+
+    mergeChainBody.innerHTML = rows.join('');
+  }
+
+  // Add env var button
+  document.getElementById('add-env-btn').addEventListener('click', function() {
+    document.getElementById('env-modal-title').textContent = 'Edit Environment Variables';
+    var newKey = prompt('Enter variable key name (e.g. LLAMA_ARG_BATCH):');
+    if (!newKey) return;
+    var newValue = prompt('Enter value for ' + newKey + ':', '');
+    if (newValue !== null) {
+      currentEnv[newKey] = newValue === '' ? '' : newValue;
+      renderConfigTable();
+    }
+  });
+
+  // Add CLI option button
+  document.getElementById('add-cli-btn').addEventListener('click', function() {
+    var newOpt = prompt('Enter CLI option (e.g. --batch-size 512):');
+    if (!newOpt) return;
+    currentCli.push(newOpt);
+    renderConfigTable();
+  });
+
+  // Modal handlers
+  document.getElementById('env-cancel').addEventListener('click', function() {
+    document.getElementById('env-modal').style.display = 'none';
+    document.getElementById('env-save').onclick = saveEnvModal;
+    document.getElementById('env-modal-title').textContent = 'Edit Environment Variables';
+  });
+  document.getElementById('cli-cancel').addEventListener('click', function() {
+    document.getElementById('cli-modal').style.display = 'none';
+    document.getElementById('cli-save').onclick = saveCliModal;
+    document.getElementById('cli-modal-title').textContent = 'Edit CLI Options';
+  });
+
+  // Model selection
+  modelSelect.addEventListener('change', selectModelInfo);
+
+  // Form submission — build config_template from current state
   document.querySelector('#preset-form').addEventListener('submit', function(e) {
     e.preventDefault();
-    var submitBtn = this.querySelector('button[type="submit"]');
+    var submitBtn = document.getElementById('preset-save-btn');
     submitBtn.disabled = true;
     submitBtn.textContent = 'Saving...';
+
     var formData = {};
     formData.name = this.querySelector('[name="name"]').value;
     formData.category = this.querySelector('[name="category"]').value;
     formData.config_template = {
-      env: currentEnv,
-      cli_opts: currentCli
+      env: Object.keys(currentEnv).length > 0 ? currentEnv : {},
+      cli_opts: currentCli.length > 0 ? currentCli : []
     };
     formData.model_id = currentModelId;
-    formData.gpu_device = gpuSelect ? (gpuSelect.value || null) : null;
-    qrApi('/engine/{{ engine_type }}/presets/{{ preset_id }}', {
+    formData.gpu_device = gpuSelect.value || null;
+
+    qrApi('/engine/' + engineType + '/presets/' + presetId, {
       method: 'PUT',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(formData)
     }).then(function(data) {
-        console.log('Save response:', data);
         if (data.status === 'ok') {
           document.querySelector('form').innerHTML = '<p style="color:#4caf50;font-weight:bold;padding:16px;">Preset saved successfully.</p>';
           setTimeout(function() { window.location.reload(); }, 800);
@@ -327,5 +534,8 @@ modelSelect.addEventListener('change', function() {
         submitBtn.textContent = 'Save Preset';
       });
   });
+
+  // Load preset from API on page load
+  loadPreset();
 })();
 </script>

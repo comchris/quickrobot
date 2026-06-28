@@ -1,0 +1,89 @@
+# @name: Preflight Check
+# @playbook_id: preflight_check
+# @version: 4
+# @timeout: 60
+# preflight.yml — Read-only verification: connectivity, disk, stale service report
+- hosts: "{{ inventory_host | default('localhost') }}"
+  become: yes
+  gather_facts: no
+
+  vars:
+    _qr_base_dir: "/opt/quickrobot"
+
+  tasks:
+    - name: Create /opt/quickrobot base directory (with correct ownership)
+      file:
+        path: "{{ _qr_base_dir }}"
+        state: directory
+        owner: "{{ ansible_user | default('root') }}"
+        group: "{{ ansible_user | default('root') }}"
+        mode: '0755'
+      register: qr_dir_created
+      changed_when: false
+
+    - name: Verify write access to /opt/quickrobot
+      stat:
+        path: "{{ _qr_base_dir }}"
+      register: qr_dir_check
+
+    - name: Set directory writable flag from stat result
+      set_fact:
+        _dir_writable: "{{ (qr_dir_check.stat | default({})).get('writeable', false) }}"
+      changed_when: false
+
+    - name: Fail if /opt/quickrobot is not writable
+      fail:
+        msg: "/opt/quickrobot exists but is not writable by the ansible user. Check permissions."
+      when: not _dir_writable
+
+    - name: Log directory status
+      debug:
+        msg: "Base directory {{ _qr_base_dir }} verified (writable={{ _dir_writable }})"
+      changed_when: false
+
+    - name: Check host connectivity
+      ansible.builtin.ping:
+
+    - name: Verify systemd unit UUIDs match expected values
+      shell: >-
+        {% for unit_key, expected_uuid in (uuid_map | default({})).items() %}
+        actual=$(/bin/grep "QR_UUID={{ expected_uuid }}" /etc/systemd/system/{{ unit_key }}.service 2>/dev/null | /usr/bin/cut -d= -f2 || true);
+        if [ "$actual" != "{{ expected_uuid }}" ]; then
+          echo "UUID_MISMATCH: {{ unit_key }} expected={{ expected_uuid }} actual=${actual:-MISSING}";
+          exit 1;
+        fi
+        {% endfor %}
+        /usr/bin/echo "UUID check OK"
+      register: _uuid_verify
+      failed_when: '"UUID_MISMATCH" in (_uuid_verify.stdout | default(""))'
+      changed_when: false
+
+    - name: Check available disk space on root filesystem
+      shell: df -BG / | tail -1 | awk '{print $4}' | tr -d 'G'
+      register: disk_free_gb
+      changed_when: false
+
+    - name: Fail if insufficient disk space (< 5 GB free)
+      fail:
+        msg: "Insufficient disk space on root filesystem. Free: {{ disk_free_gb.stdout }} GB (need >= 5 GB)"
+      when: disk_free_gb.stdout | int < 5
+
+    - name: Log available disk space
+      debug:
+        msg: "Available disk space: {{ disk_free_gb.stdout }} GB"
+      changed_when: false
+
+    - name: Scan for stale QR services on remote node
+      shell: "ls /etc/systemd/system/qr-*.service 2>/dev/null || true"
+      register: existing_units
+      changed_when: false
+
+    - name: Report stale QR service files (read-only)
+      debug:
+        msg: "Stale QR units found: {{ existing_units.stdout_lines | default([]) | join(', ') }}"
+      when: existing_units.stdout_lines | default([]) | length > 0
+      changed_when: false
+
+    - name: Report preflight status
+      debug:
+        msg: "Preflight OK — disk={{ disk_free_gb.stdout }}GB, units_found={{ (existing_units.stdout_lines | default([]) | length) }}"

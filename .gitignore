@@ -8,11 +8,14 @@ dist/
 
 # Database files (all .db in data/)
 data/*.db
+data/quickrobot.pid
+data/quickrobot.db-wal
+data/quickrobot.db-shm
 
 # Opencode managed
 .opencode/node_modules/
-.opencode/*
-.opencode/agents/
+.opencode/*.*
+#.opencode/agents/
 
 # Environment / secrets
 .env
@@ -22,6 +25,9 @@ data/*.db
 # Editor configs
 .vscode/
 .idea/
+
+# Manifest log (append-only tracking)
+manifest.log
 
 # Runtime logs
 logs/*
@@ -35,3 +41,15 @@ Thumbs.db
 
 # Archived items
 OLD_ignore/
+
+# Webbrowser logs
+.playwright-cli/
+
+# Local site-specific data (hostnames, IPs — varies per deployment)
+docs/LOCALHOSTS.md
+docs/TODO.md
+docs/TODO_done.md
+docs/LOCALHOSTS.md
+docs/benchmarks.md
+docs/design/
+docs/workflows/

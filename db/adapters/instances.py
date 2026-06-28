@@ -23,7 +23,7 @@ All functions accept db_path as first positional argument.
 import json
 from datetime import datetime as _dt, timezone as _tz
 
-from lib.qr_engine_ids import get_id_by_name, QR_ENGINE_LLAMA_SERVER_NAME, QR_ENGINE_LLAMA_RPC_NAME
+from lib.qr_engine_ids import get_id_by_name, QR_ENGINE_LLAMA_SERVER_NAME, QR_ENGINE_LLAMA_RPC_NAME, QR_ENGINE_PORT_DEFAULTS
 from lib.lib_config_merge import _parse_config_override as _pcov
 
 
@@ -39,12 +39,11 @@ VALID_TRANSITIONS = {
     "deploying": ["deployed", "build_error", "error", "unconfigured", "stopping"],
     "build_error": ["configuring", "error", "unconfigured", "starting", "running", "updating", "stopping"],
     "deployed": ["starting", "running", "stopped", "error", "unconfigured", "updating", "build_error", "compiling", "stopping"],
-    "starting": ["loading", "running", "error", "timeout", "stopping"],
+    "starting": ["running", "error", "timeout", "stopping"],
     "running": ["stopping", "error", "test_mode", "updating", "compiling"],
     "stopping": ["stopped", "running", "starting", "deployed", "configuring", "error", "timeout"],
     "stopped": ["starting", "running", "configuring", "stopping", "error", "test_mode", "unconfigured", "compiling", "updating"],
-    "loading": ["running", "error", "stopping"],
-    "error": ["unconfigured", "configuring", "deploying", "starting", "stopping", "updating", "build_error", "compiling", "loading", "running"],
+    "error": ["unconfigured", "configuring", "deploying", "starting", "stopping", "updating", "build_error", "compiling", "running"],
     "timeout": ["error", "stopping"],
     "test_mode": ["running", "stopped", "error", "stopping"],
     "updating": ["running", "deployed", "build_error", "error", "timeout", "unconfigured", "stopping"],
@@ -275,10 +274,12 @@ def list_instances(db_path, engine_type_id=None, node_id=None, state=None, orpha
     """
     from db.sqlite import pool
     query = """SELECT i.*, et.name as engine_type_name, et.display_name as engine_display_name,
-               n.name as node_display_name, n.hostname as node_display_hostname
+               n.name as node_display_name, n.hostname as node_display_hostname,
+               ep.name as preset_name
                 FROM instances i
                 LEFT JOIN engine_types et ON i.engine_type_id = et.id
-                LEFT JOIN nodes n ON i.node_id = n.id"""
+                LEFT JOIN nodes n ON i.node_id = n.id
+                LEFT JOIN engine_presets ep ON i.preset_id = ep.id"""
     params = []
     conditions = []
 
@@ -756,10 +757,12 @@ def assign_port(db_path, node_id, engine_type_id=None, exclude_instance_id=None,
                 )
             return port_override
 
-        # Auto-allocate: get base port from engine_configs
-        # Try multiple config key names (LLAMA_ARG_PORT, base_port)
-        base_port = 8080  # default fallback
+        # Auto-allocate: get base port from engine_configs + SSOT lookup
         if engine_type_id is not None:
+            # Look up engine name from ID for SSOT port lookup
+            eng_row = conn.execute("SELECT name FROM engine_types WHERE id = ?", (engine_type_id,)).fetchone()
+            engine_name = eng_row["name"] if eng_row else ""
+            base_port = QR_ENGINE_PORT_DEFAULTS.get(engine_name, 8080) if engine_name else 8080
             bp_row = conn.execute(
                 "SELECT value FROM engine_configs "
                 "WHERE engine_type_id = ? AND key IN ('LLAMA_ARG_PORT', 'base_port')"
@@ -772,6 +775,9 @@ def assign_port(db_path, node_id, engine_type_id=None, exclude_instance_id=None,
                     base_port = int(bp_row[0])
                 except (ValueError, TypeError):
                     pass
+        else:
+            # Unknown engine type — default to llama_server base port as conservative fallback
+            base_port = QR_ENGINE_PORT_DEFAULTS.get("llama_server", 8080)
 
         # Find first free port starting from base_port
         candidate = base_port

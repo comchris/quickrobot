@@ -25,7 +25,7 @@ import json
 import os
 import sys
 
-from lib.qr_engine_ids import get_port_default
+from lib.qr_engine_ids import QR_DEFAULT_LOCALHOST, get_port_default
 
 
 def load_env_strict(env_path=".quickrobot.env"):
@@ -88,8 +88,8 @@ def load_env_strict(env_path=".quickrobot.env"):
     # ── MCP validation — host must not be 0.0.0.0, but missing is OK ──
     mcp_host = cfg.get("QUICKROBOT_MCP_HOST", "")
     if mcp_host and mcp_host in ("0.0.0.0", "::", "::0"):
-        print(f"[qr] WARNING: MCP host '{mcp_host}' is not a specific address — defaulting to 127.0.0.1")
-        cfg["QUICKROBOT_MCP_HOST"] = "127.0.0.1"
+        print(f"[qr] WARNING: MCP host '{mcp_host}' is not a specific address — defaulting to {QR_DEFAULT_LOCALHOST}")
+        cfg["QUICKROBOT_MCP_HOST"] = QR_DEFAULT_LOCALHOST
 
     return cfg
 
@@ -120,21 +120,18 @@ def load_system_engine_config():
     return (qr_env, _lc.QUICKROBOT_CONSOLE_DEBUG_LEVEL, ansible_level)
 
 
-def backup_database(db_path, skip_if_init=False):
+def backup_database(db_path):
     """Backup SQLite database using cp -n on process start.
 
     Keeps last `max_backups` copies. Removes oldest when limit exceeded.
 
     Args:
         db_path: Path to the SQLite database file.
-        skip_if_init: If True, skip backup during --init mode (first backup already done).
     """
-    if skip_if_init:
-        return
 
     import shutil
     from datetime import datetime
-    from quickrobot import _CONFIG, _project_root
+    from qr_api import _CONFIG, _project_root
 
     backup_dir = _CONFIG.get("backup_dir", os.path.join(_project_root, "data", "_backups"))
     max_keep = _CONFIG.get("max_backups", 3)
@@ -177,10 +174,10 @@ def resolve_seed_path(project_root=None):
     """
     global _seed_file_path
     if project_root is None:
-        from quickrobot import _project_root
+        from qr_api import _project_root
         project_root = _project_root
     if _seed_file_path is None:
-        _seed_file_path = os.path.join(project_root, "data", "_seed", "seed_v006.sql")
+        _seed_file_path = os.path.join(project_root, "data", "_seed", "seed_v007.sql")
     return _seed_file_path
 
 
@@ -190,22 +187,18 @@ def import_seed_file(db_path):
     Seed file contains INSERT OR REPLACE statements for models, presets,
     engine_types, engine_configs, playbook_registry, and benchmark_prompts.
 
-    In non-init mode (existing DB): skip — seed SQL only applied on fresh DB.
-    In --init mode: execute seed SQL. Checksum verified in main() before DB creation.
-
-    The seed file is required for --init mode — if missing, execution continues
-    but data will be empty (seed is expected to exist since checksum check passed).
+    Only runs on fresh DB creation (gated by _db_was_created flag).
+    Never re-imports on existing DB startup — seed is one-time only.
 
     Args:
         db_path: Path to the SQLite database.
     """
-    from quickrobot import _CONFIG
+    from qr_api import _CONFIG
     from db.sqlite import pool as _pool
     seed_path = resolve_seed_path()
-    init_mode = _CONFIG.get("init_mode", False)
 
-    # In non-init mode: skip seed SQL import (playbooks registered elsewhere)
-    if not init_mode:
+    # Only seed on fresh DB creation, never on existing DB startup
+    if not _CONFIG.get("_db_was_created", False):
         return
 
     # --- Init mode (fresh DB): execute seed SQL ---
@@ -225,16 +218,14 @@ def import_seed_file(db_path):
         print(f"[qr] WARNING: seed import failed: {exc}")
 
 
-def pre_validate_seed_checksum(env_cfg, init_mode=False):
+def pre_validate_seed_checksum(env_cfg):
     """Validate seed file integrity BEFORE any filesystem change.
 
-    Called in main() after args parse, before --init DB backup.
-    Exits on mismatch — filesystem is guaranteed untouched at call time.
+    Called during fresh DB creation — exits on mismatch since filesystem
+    is guaranteed untouched at call time.
 
     Args:
         env_cfg: Dict from load_env_config() (required keys already validated).
-        init_mode: If True, fail on mismatch via sys.exit(1).
-                   If False, warn only (for non-init startup checks).
     """
     seed_path = resolve_seed_path()
     if not os.path.isfile(seed_path):
@@ -245,21 +236,19 @@ def pre_validate_seed_checksum(env_cfg, init_mode=False):
         actual_checksum = hashlib.sha256(sf.read()).hexdigest()
     expected_checksum = env_cfg.get("QUICKROBOT_SEED_CHECKSUM", "")
     if actual_checksum != expected_checksum:
-        print(f"[qr] FATAL: Seed checksum mismatch (init mode)")
+        print(f"[qr] FATAL: Seed checksum mismatch")
         print(f"  expected: {expected_checksum[:32]}...")
         print(f"  actual:   {actual_checksum[:32]}...")
         print("[qr] Check .quickrobot.env QUICKROBOT_SEED_CHECKSUM and seed file integrity.")
-        if init_mode:
-            sys.exit(1)
+        sys.exit(1)
 
     expected_size = int(env_cfg.get("QUICKROBOT_SEED_FILESIZE", "0"))
     actual_size = os.path.getsize(seed_path)
     if actual_size != expected_size:
-        print(f"[qr] FATAL: Seed file size mismatch (init mode)")
+        print(f"[qr] FATAL: Seed file size mismatch")
         print(f"  expected: {expected_size}")
         print(f"  actual:   {actual_size}")
         print("[qr] Check .quickrobot.env QUICKROBOT_SEED_FILESIZE and seed file integrity.")
-        if init_mode:
-            sys.exit(1)
+        sys.exit(1)
 
 

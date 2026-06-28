@@ -1,3 +1,5 @@
+# @playbook_id: TEMPLATE_RPC_SERVICE
+# @version: 1
 # systemd service unit for rpc-server
 # QR_UUID={{ instance_uuid }}
 [Unit]
@@ -9,7 +11,7 @@ Type=simple
 User={{ remote_node_user | default('mepaw') }}
 WorkingDirectory=/opt/quickrobot/{{ unit_name }}
 EnvironmentFile={{ env_file }}
-ExecStart={{ binary_path }} {{ merged_cli_opts | join(' ') | default('') }}
+ExecStart={{ binary_path }} $QR_CLI_ARGS_JOINED
 Restart={{ restart_policy | default('no') }}
 RestartSec=5
 StandardOutput=journal

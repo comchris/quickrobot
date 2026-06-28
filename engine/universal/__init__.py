@@ -20,6 +20,7 @@ command or Ansible playbook on remote nodes, with per-instance lifecycle
 configuration stored in instances.config_override.
 """
 
+from lib.qr_engine_ids import QR_DEFAULT_LOCALHOST
 from engine.base import BaseEngine
 from lib.lib_constants import DEFAULT_ANSIBLE_USER
 
@@ -85,7 +86,7 @@ class UniversalEngine(BaseEngine):
                     }
 
                 unit_name = f"qr-{instance_id}-{row['engine_type_name']}"
-                node_host = row["node_host"] or "127.0.0.1"
+                node_host = row["node_host"] or QR_DEFAULT_LOCALHOST
                 node_user = (row["node_user"] if row["node_user"] else None) or DEFAULT_ANSIBLE_USER
 
                 result = self._check_remote_service(node_host, unit_name, node_user)
@@ -113,13 +114,13 @@ class UniversalEngine(BaseEngine):
     def _check_remote_service(self, node_host, unit_name, node_user=None):
         """Check remote systemd service and process stats via ansible playbook.
 
-        Uses INSTANCE_HEALTH_CHECK_V1 for unified, interlock-aware health checks.
+        Uses instance_health_check for unified, interlock-aware health checks.
         """
         import json as _json
 
         try:
-            from quickrobot import _execute_playbook as _ep
-            r = _ep("INSTANCE_HEALTH_CHECK_V1", resolver_type="playbook_id",
+            from qr_api import _execute_playbook as _ep
+            r = _ep("instance_health_check", resolver_type="playbook_id",
                     limit=node_host,
                     extra_vars={"inventory_host": node_host, "unit_name": unit_name},
                     action_type="health_check")
@@ -182,7 +183,7 @@ class UniversalEngine(BaseEngine):
     def query_status(self, instance_id, db_path=None):
         """Remote health check via ansible playbook.
 
-        Uses INSTANCE_HEALTH_CHECK_V1 for unified interlock-aware status checks.
+        Uses instance_health_check for unified interlock-aware status checks.
         """
         if db_path is None:
             return {"alive": False, "latency_ms": None,
@@ -205,19 +206,19 @@ class UniversalEngine(BaseEngine):
                 return {"alive": False, "latency_ms": None,
                         "error": f"Instance {instance_id} not found"}
 
-            node_host = row["node_host"] or "127.0.0.1"
+            node_host = row["node_host"] or QR_DEFAULT_LOCALHOST
             state = row["state"] or "unknown"
             eng = row["engine_type_name"] or "universal"
 
             if state not in ("running", "starting", "deployed", "stopped", "error",
                               "updating", "build_error", "configuring", "deploying",
-                              "compiling", "loading"):
+                              "compiling"):
                 return {"alive": False, "latency_ms": None,
                         "error": f"Instance not active (state={state})"}
 
             unit_name = f"qr-{instance_id}-{eng}"
-            from quickrobot import _execute_playbook as _ep
-            r = _ep("INSTANCE_HEALTH_CHECK_V1", resolver_type="playbook_id",
+            from qr_api import _execute_playbook as _ep
+            r = _ep("instance_health_check", resolver_type="playbook_id",
                     limit=node_host,
                     extra_vars={"inventory_host": node_host, "unit_name": unit_name},
                     action_type="health_check")
@@ -460,7 +461,7 @@ class UniversalEngine(BaseEngine):
 
         # Import _execute_playbook from quickrobot at call time to avoid circular imports
         try:
-            from quickrobot import _execute_playbook as _ep, _CONFIG
+            from qr_api import _execute_playbook as _ep, _CONFIG
         except Exception:
             # Fallback: direct run_playbook with dynamic inventory if quickrobot not available
             from lib.lib_ansible_runner import run_playbook
@@ -561,7 +562,6 @@ class UniversalEngine(BaseEngine):
         Returns:
             dict with execution result (success/failed + mode).
         """
-        from engine.base import BaseEngine
         co = kwargs.get("config_override") or {}
         node_id = kwargs.get("node_id")
 
@@ -570,7 +570,7 @@ class UniversalEngine(BaseEngine):
 
         # Resolve deploy playbook via _resolve_engine_playbook_by_id (mimic base pattern)
         try:
-            from quickrobot import _CONFIG
+            from qr_api import _CONFIG
             from engine.base import BaseEngine as _Base
             from db.adapters.playbooks import resolve_playbook_by_id
             import os as _os
@@ -599,12 +599,13 @@ class UniversalEngine(BaseEngine):
                 from db.adapters.nodes import get_node as _gn
                 nd = _gn(db_path, node_id)
                 if nd:
-                    extra_vars["host"] = (nd.get("ipv4_address") or "127.0.0.1").strip()
+                    # Prefer DNS hostname for stable SSH connections (AGENTS.md §9)
+                    extra_vars["host"] = (nd.get("hostname") or nd.get("ipv4_address") or QR_DEFAULT_LOCALHOST).strip()
                     extra_vars["port"] = kwargs.get("port_assigned", 0)
 
             # Use _execute_playbook from quickrobot
             try:
-                from quickrobot import _execute_playbook as _ep
+                from qr_api import _execute_playbook as _ep
                 r = _ep(pb_path, resolver_type="file_path",
                         inventory_data=kwargs.get("inventory_data"),
                         extra_vars=extra_vars,
@@ -656,7 +657,7 @@ class UniversalEngine(BaseEngine):
             }
 
             try:
-                from quickrobot import _execute_playbook as _ep
+                from qr_api import _execute_playbook as _ep
                 r = _ep(pb_path, resolver_type="file_path",
                         inventory_data=kwargs.get("inventory_data"),
                         extra_vars=extra_vars,
@@ -673,3 +674,76 @@ class UniversalEngine(BaseEngine):
 
         except Exception as exc:
             return {"success": False, "error": f"Undeploy setup failed: {exc}", "engine": self._name}
+
+    @classmethod
+    def get_instance_status(cls, db_path, instance_id):
+        """Unified status endpoint for universal instances (STATUS-1)."""
+        from db.sqlite import pool
+
+        with pool(db_path) as conn:
+            inst = conn.execute(
+                """SELECT i.id, i.name, i.state, i.port_assigned,
+                          i.node_id, i.config_override,
+                          e.name as engine_type_name,
+                          n.hostname as node_hostname
+                   FROM instances i
+                   JOIN engine_types e ON i.engine_type_id = e.id
+                   LEFT JOIN nodes n ON i.node_id = n.id
+                   WHERE i.id = ?""",
+                (instance_id,),
+            ).fetchone()
+
+        if not inst:
+            return None
+
+        engine_data = {"port_assigned": inst["port_assigned"], "node_hostname": inst["node_hostname"]}
+
+        # Include config_override highlights for universal
+        co_raw = inst.get("config_override") or {}
+        if isinstance(co_raw, str):
+            try:
+                import json as _jc
+                co_raw = _jc.loads(co_raw)
+            except Exception:
+                co_raw = {}
+        if isinstance(co_raw, dict) and co_raw:
+            engine_data["deploy_playbook"] = co_raw.get("deploy_playbook", "N/A")
+            engine_data["start_command"] = co_raw.get("start_command", "")[:100]
+
+        actions = cls._get_available_actions(inst["state"])
+        warnings = []
+        if inst["node_hostname"] and inst["state"] in ("running", "deployed"):
+            warnings.append({"type": "info", "message": f"Running on {inst['node_hostname']}"})
+
+        state_machine = cls.get_state_machine()
+        valid_next = state_machine.get(inst["state"], [])
+
+        return {
+            "id": inst["id"],
+            "state": inst["state"],
+            "engine_type_name": inst["engine_type_name"],
+            "engine_data": engine_data,
+            "actions": actions,
+            "warnings": warnings,
+            "_meta": {
+                "valid_next_states": valid_next,
+                "is_transitioning": inst["state"] in ("configuring",),
+            },
+        }
+
+    @classmethod
+    def _get_available_actions(cls, state):
+        """Map instance state to available actions."""
+        action_map = {
+            "unconfigured": [{"name": "deploy", "label": "Deploy"}],
+            "configuring": [{"name": "restart", "label": "Restart"}],
+            "deployed": [{"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "reconfigure", "label": "Reconfigure"}],
+            "starting": [{"name": "stop", "label": "Stop"}],
+            "running": [{"name": "stop", "label": "Stop"}, {"name": "restart", "label": "Restart"}, {"name": "reconfigure", "label": "Reconfigure"}],
+            "stopping": [{"name": "start", "label": "Start"}],
+            "stopped": [{"name": "start", "label": "Start"}, {"name": "rebuild", "label": "Rebuild"}],
+            "error": [{"name": "start", "label": "Start"}, {"name": "deploy", "label": "Deploy"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "stop", "label": "Stop"}],
+            "build_error": [{"name": "deploy", "label": "Deploy"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}],
+            "timeout": [{"name": "deploy", "label": "Deploy"}],
+        }
+        return action_map.get(state, [])

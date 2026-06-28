@@ -6,9 +6,143 @@ Agent-specific roles and workflows are defined in `.opencode/agents/*.md`.
 
 > **See also:** `SKILL.md` for API usage; `QUICKROBOT.md` for architecture and design patterns.
 
+### AGENTS.md Session Rule
+
+AGENTS.md is the source of truth for coding rules. During a session, agents MUST NOT modify this file directly — changes go into `AGENTS_new.md` (copy of current AGENTS.md with edits applied). The user reviews `AGENTS_new.md` and manually replaces `AGENTS.md` BEFORE the next session starts. This prevents rule drift mid-session.
+
 ---
 
-## 1. Safety & File Handling
+## 1. Hard Rules — Never Violate
+
+### 1a. No Silent Database Wipe
+**DB creation is automatic** on startup (no `--init` flag needed). If no `.db` file exists, quickrobot creates a fresh database with base schema + seed data — all instances, nodes, ansible actions, build history are lost. Existing DB is backed up first (timestamped copy) before in-place use.
+- Fresh DB creation fires without explicit confirmation when file doesn't exist. This IS the normal behavior — do NOT run `--init` just to "refresh" (it's a no-op now).
+- **--mode dev** = normal operation, playbook verification with warnings on mismatch. Use during development/playbook changes.
+- **--mode dev-update** = update current DB's `playbook_registry` checksums to match disk files, then continue running in prod mode (no longer exits). Does NOT touch seed file or `.quickrobot.env`.
+- Both `dev` and `dev-update` are **development tools** — only run on explicit USER REQUEST, not as automatic pre-flight.
+- **--init is deprecated (no-op).** DB creation is automatic based on file existence: no DB → warn + create fresh; DB exists → backup + reuse in-place.
+- When in doubt about `--mode dev-update`, the semantics are defined in `QUICKROBOT.md` §Seed File — they do not change.
+- **AGENTS.md is protected:** Agents MUST NOT edit `AGENTS.md` directly during a session. Changes go into `AGENTS_new.md`. The user reviews `AGENTS_new.md` and manually replaces `AGENTS.md` before the next session. This prevents rule drift mid-session.
+
+### 1b. No Force by Default
+Unless explicitly told, all actions must be **non-destructive**:
+- `deploy` (not `deploy --force`)
+- `start` (not `start --ignore-state`)
+- Check current state before acting; skip if already in target state
+
+### 1c. System Instance / Node Protection
+- **Node ID 1** is the localhost machine where the API runs. Never removable via API.
+- **System instances (IDs 1-4, `system_managed=1`):** api(1), webui(2), mcp(3), scheduler(4). Protected from delete/deploy/config-change (HTTP 409 `SYSTEM_MANAGED_INSTANCE`). Use `POST /instances/<id>/restart_system` for restart.
+- IDs < 10 with `system_managed=1` are protected. ID ranges are conventions, not DB-enforced constraints — always check the flag.
+- Node ID 1 is localhost — do NOT deploy remote instances to it unless explicitly requested.
+
+### 1d. Deployed-State Assumption
+When an RPC instance shows `"error"` state, it is **already deployed** — the issue is usually a crashed service or port conflict. Use `POST /instances/<id>/start` to restart, NOT `POST /instances/<id>/deploy` which regenerates unit file + env unnecessarily. Deploy only when: preset changed, RPC bindings changed, node IP changed, or config_override changed.
+
+---
+
+## 2. SSOT — Single Source of Truth
+
+### 2a. Constant Hierarchy
+Before writing code that references engine types, ports, versions, or job states:
+1. **Read `lib/qr_engine_ids.py`** — single source of truth for ALL entity constants
+2. **Read `lib/lib_constants.py`** — runtime defaults (not entity definitions)
+3. **Use SSOT constants** — see list below
+4. **Never hardcode** string literals like `"rpc"`, `"8040"`, `"v0.07"` in code
+
+**SSOT Constant Reference (all from `lib/qr_engine_ids.py`):**
+
+| What | Constant | Example |
+|------|----------|---------|
+| Engine ID | `QR_ENGINE_LLAMA_SERVER` = 21 | Use in port allocation, not `8080` literal |
+| Engine string name (DB compare) | `QR_ENGINE_LLAMA_SERVER_NAME` = `"llama_server"` | Use in DB queries, not `"llama_server"` literal |
+| System engine short alias | `QR_ENGINE_API`, `QR_ENGINE_WEBUI`, `QR_ENGINE_MCP` | Short names for lifecycle functions |
+| Port defaults | `QR_ENGINE_PORT_DEFAULTS["llama_server"]` = 8080 | Lookup map, not hardcoded port |
+| Job types | `QR_JOB_DEPLOY`, `QR_JOB_REBUILD`, `QR_JOB_RECONFIGURE`, `QR_JOB_BIND`, etc. | All job type comparisons must use these |
+| Stage names | `QR_STAGE_CONFIG_ENV`, `QR_STAGE_CONFIG_SVC`, `QR_STAGE_START`, `QR_STAGE_COMPILE`, `QR_STAGE_PREFLIGHT`, etc. | Staged chain stage references |
+| Stage → state map | `STAGE_STATE_MAP[QR_STAGE_START]` → `"running"` | Never hardcode state transition strings |
+| Skipable stages | `SKIPABLE_STAGES` = `{QR_STAGE_SOURCE, QR_STAGE_COMPILE}` | Binary-exists skip logic |
+| Timeout defaults | `QR_TIMEOUT_COMPILE` = 1800, `QR_TIMEOUT_SOURCE` = 600, `QR_TIMEOUT_DEFAULT` = 300 | Playbook execution timeouts |
+| Final states per job | `JOB_FINAL_STATES["deploy"]` → `"running"` | Post-job state resolution |
+| Version | `QUICKROBOT_VERSION` = `"v0.07"` | Display versions, not hardcoded strings |
+| Localhost fallback | `QR_DEFAULT_LOCALHOST` = `"127.0.0.1"` | Bind address fallbacks |
+| System instance ID lookup | `get_system_instance_id("webui")` → 2 | Use this function, not hardcoded instance IDs like `2`, `3`, `4` |
+| ID ↔ name conversion | `get_name_by_id(21)` → `"llama_server"` / `get_id_by_name("llama_rpc")` → 22 | Bidirectional lookup, handles hyphen/underscore aliases |
+
+### 2b. Anti-Pattern: Local Redefinition
+When the same concept is defined in two places (e.g., engine name in `qr_engine_ids.py` AND hardcoded as `"llama_server"` in a route handler), it is a bug waiting for drift. Every entity constant must be imported from SSOT, never redefined locally.
+
+**BAD — engine name comparison:**
+```python
+# Hardcoded string drift risk: what if someone changes "llama_server" here but not in qr_engine_ids.py?
+if engine_name == "llama_server": ...
+```
+**GOOD — SSOT import:**
+```python
+from lib.qr_engine_ids import QR_ENGINE_LLAMA_SERVER_NAME
+if engine_name == QR_ENGINE_LLAMA_SERVER_NAME: ...
+```
+
+**BAD — job type comparison:**
+```python
+if job_type == "reconfigure": ...  # Magic string, no sync mechanism
+```
+**GOOD — SSOT constant:**
+```python
+from lib.qr_engine_ids import QR_JOB_RECONFIGURE
+if job_type == QR_JOB_RECONFIGURE: ...
+```
+
+**BAD — stage state hardcoded:**
+```python
+# If STAGE_STATE_MAP changes but this doesn't, instance shows wrong state after deploy
+new_state = "running" if stage == "start" else "deployed"
+```
+**GOOD — SSOT lookup:**
+```python
+from lib.qr_engine_ids import QR_STAGE_START, STAGE_STATE_MAP
+new_state = STAGE_STATE_MAP.get(QR_STAGE_START, "deployed")
+```
+
+**BAD — timeout magic number:**
+```python
+timeout=1800  # What does 1800 mean? Compile timeout? Source timeout?
+```
+**GOOD — named constant:**
+```python
+from lib.qr_engine_ids import QR_TIMEOUT_COMPILE
+timeout = QR_TIMEOUT_COMPILE  # Clear: 30 min compile timeout
+```
+
+### 2c. Runtime Defaults (`lib/lib_constants.py`)
+Runtime operational defaults (not entity definitions) live in `lib/lib_constants.py`. Import these instead of hardcoding:
+- `QUICKROBOT_CONSOLE_DEBUG_LEVEL` = 10 (numeric, 0=quiet, >=10=verbose)
+- `QUICKROBOT_ANSIBLE_LOG_LEVEL` = `"errors"` (what gets persisted to ansible_actions table)
+- `GRACE_PERIOD_RUNNING` = 300 (seconds before crash-detection for large model loads)
+- `QUICKROBOT_PLAYBOOK_TIMEOUT` = 3600 (default playbook execution timeout)
+- `DEFAULT_ANSIBLE_USER` — current OS user via `getpass`
+
+### 2d. .quickrobot.env Is the Source of Truth for Network Config
+Host, port, and token configuration for ALL system-managed engines lives in `.quickrobot.env`. Never duplicate these values in code constants or the database:
+- API: `QUICKROBOT_API_HOST`, `QUICKROBOT_API_PORT`
+- WebUI: `QUICKROBOT_WEBUI_HOST`, `QUICKROBOT_WEBUI_PORT`, `QUICKROBOT_WEBUI_AUTOSTART`
+- MCP: `QUICKROBOT_MCP_HOST`, `QUICKROBOT_MCP_PORT`, `QUICKROBOT_MCP_*`
+- System instances get their host/port from `.env`, not `engine_configs` table
+
+### 2d. Code Reuse Rule
+When adding a feature that resembles existing code (another playbook, another engine handler, another UI page):
+1. Check if an existing implementation covers 80%+ of the need
+2. Extend or parameterize the existing code instead of writing a new one
+3. If creating a new playbook: it should share structure with existing playbooks, not reinvent task patterns
+
+**Concrete examples:**
+- Adding support for a new engine type: add one tuple to `_QR_ENGINES` in `qr_engine_ids.py`, create an engine subclass that inherits from `BaseEngine`, register its status handler. Do NOT duplicate the staged chain logic — it already exists in `lib_runner.py`.
+- Creating a new playbook: use the same `@playbook_id:` header format, follow the `set_fact` + template pattern of existing playbooks, register in `playbook_registry` with checksum in seed. Do NOT invent a new result format — `parse_ansible_json()` already normalizes all outputs.
+- WebUI page for a new engine config: use the shared `<span class="actions-render">` pattern from `instance_detail.html`, not inline button loops. The shared renderer is at `webui/base.html`.
+
+---
+
+## 3. Safety & File Handling
 
 ### Backup Before Every Edit
 Before editing ANY file < 10MB in this project:
@@ -16,17 +150,9 @@ Before editing ANY file < 10MB in this project:
 cp -n -v <filename> <filename>_backup_TIMESTAMP
 ```
 - `-n` prevents overwrites, `-v` shows written files
-- Backup files are **excluded** from the manifest (see §6)
+- Backup files are **excluded** from the manifest
 
-**YAML/JSON naming:** For `.yml` and `.yaml` files, append timestamp AFTER the extension: `<name>.yml_backup_TIMESTAMP` or `<name>.yaml_backup_TIMESTAMP`. For `.json`: `<name>.json_backup_TIMESTAMP`. This keeps backups out of glob results (`*.yml`, `*.json`).
-
-**YAML naming enforcement:** Old-style `<name>_backup_TIMESTAMP.yml` files must be renamed to `<name>.yml_backup_TIMESTAMP`. Files like `deploy_rpc_backup_20260525_231400.yml` match `*.yml` glob results and pollute playbook discovery.
-
-**Examples:**
-- WRONG: `deploy_llama_server_backup_20260606T144327.yml`
-- RIGHT: `deploy_llama_server.yml_backup_20260606T144327`
-
-**Backup file count note:** When verifying full project backups via `tar -czf`, the archived file count will be significantly lower than the source file count. This is expected: `.opencode/node_modules/` contains ~3400 files excluded from the tarball, plus `__pycache__/` and `OLD_ignore/`. A full project backup should be 5-15 MB. Trust archive integrity (exit code 0) and approximate size.
+**YAML/JSON naming:** Append timestamp AFTER the extension. `deploy_llama_server.yml_backup_20260606T144327` — NOT `deploy_llama_server_backup_20260606T144327.yml`. Old-style backups pollute glob results and playbook discovery.
 
 ### Read Before Write
 Always read the entire file before attempting an edit. Never write blindly.
@@ -35,14 +161,13 @@ Always read the entire file before attempting an edit. Never write blindly.
 Never use `rm`, `rm -f`, `rm -rf`, or `2>/dev/null`. Move unwanted files to `./OLD_ignore/` instead.
 
 ### File Naming
-- Only **ONE dot** in filenames (e.g., `server_backup_20260511_1430.py`)
+- Only **ONE dot** in filenames (e.g., `qr_api_server.py`)
 - Max **30 characters** per filename (before extension)
 - Use project prefixes: `QR_*`, `app_*`, `lib_*`
-- No generic names (e.g., prefer `qr_api_server.py` over `main.py`)
 
 ---
 
-## 2. Tool Execution
+## 4. Tool Execution
 
 ### Bash Chains
 Limit to **3-4 operators** (`&&`, `||`, `|`). Prefer dedicated tools over shell chaining.
@@ -53,63 +178,219 @@ Never use `pkill -f "pattern"`. Query exact PID first:
 ps aux | grep exact_filename.py | grep -v grep | awk '{print $2}'
 ```
 
-### JSON Files
-The `edit` and `write` tools handle JSON correctly. Use them directly for creating/modifying JSON files. Reserve `jq` only for filtering/path extraction in bash pipelines.
-
 ### No `cat` on Binary Files
-Never use `cat` on binary files (SQLite databases, images, compiled artifacts). The binary output corrupts terminal state. Use `file <filename>` to check type first, then use the `Read` tool for text files or `xxd <file> | head` for binary inspection.
+Never use `cat` on binary files (SQLite databases, images). Use `file <filename>` to check type, then `Read` tool for text or `xxd <file> | head` for binary inspection.
 
 ### Ansible Locale Requirement
-All ansible subprocess calls MUST have `LC_ALL` and `LANG` set to `en_US.UTF-8`. The tmux session has no locale set by default — ansible fails with `unsupported locale setting` if not provided. If adding new ansible subprocess calls, always include:
+All ansible subprocess calls MUST have `LC_ALL` and `LANG` set to `en_US.UTF-8`. Missing locale causes rc=1, empty stdout → parsed as `{"plays": []}` → API reports "ok" with no data. Silent failure.
+
 ```python
 env["LC_ALL"] = "en_US.UTF-8"
 env["LANG"] = "en_US.UTF-8"
 ```
-Missing locale causes rc=1, empty stdout → parsed as `{"plays": []}` → API reports "ok" with no data. Silent failure.
 
 ### Ansible Output Format
-The `ansible_actions.task_summary` column stores the full parsed JSON from ansible-playbook (typically 2-44KB). All playbook types now properly capture output after the locale fix. See `docs/ansible_output_format.md` for normalization details.
+The `ansible_actions.task_summary` column stores the full parsed JSON from ansible-playbook (typically 2-44KB). See `docs/ansible_output_format.md` for normalization details.
 
 ### Mandatory Syntax Check After Edit
 After editing any file that supports syntax checking, you MUST run a single-command syntax check:
 - **Python** (.py): `python3 -c "import py_compile; py_compile.compile('<filepath>', doraise=True)"`
 - **JSON** (.json): `python3 -c "import json; json.load(open('<filepath>'))"`
 - **YAML** (.yml/.yaml): `python3 -c "import yaml; yaml.safe_load(open('<filepath>'))"`
-- **JavaScript in Python strings**: Verify `curl | grep '{{' | wc -l` — non-f-string JS must NOT contain double braces `{{`; they render literally and break JS.
 
 ---
 
-## 3. Project Constraints
+## 5. Startup & Lifecycle Discipline
 
-### No Git
-This project has **no git repository**. Never run `git status`, `git diff`, `git log`, `git add`, `git commit`, or any git command. Use `stat` or `find -newer` for file history.
+### 5a. API Server — tmux Session
+The API runs in a dedicated tmux session (`qr_api`) with explicit socket path (avoids stale `/tmp/tmux-1001` permission issues in this environment). Production deployment uses systemd.
 
-### .opencode Folder Rules
-- **Agents may read and write** `.opencode/agents/*.md` (agent protocol files)
-- **Agents must ignore** all other `.opencode/` subfolders: `node_modules/`, `skills/`, `context/`, etc.
-- When scanning directories, exclude `.opencode/` entirely except `.opencode/agents/`
-- Never install dependencies or run commands that touch `.opencode/node_modules/`
+**Socket:** `-S /tmp/qr.sock`  
+**Session:** `qr_api`  
+- `remain-on-exit on` — survives process crashes
 
-### No Dependency Installation
-Never install dependencies (`pip`, `npm`, `apt`) without explicit user confirmation.
+**Create session:** `tmux -S /tmp/qr.sock new-session -d -s qr_api`  
+**Check status:** `tmux -S /tmp/qr.sock has-session -t qr_api 2>&1` (exit 0 = exists)  
+**Start:** `tmux -S /tmp/qr.sock send-keys -t qr_api 'cd /CORE/projects/quickrobot && python3 quickrobot.py' C-m`  
+**Stop:** Query PID via `ps aux`, then `kill <PID>`, wait 1s, verify dead.
 
-### Pip Flag Rule — ALWAYS Ask Before Using --break-system-packages
-On Debian/Ubuntu with Python 3.12+, pip uses PEP 668 externally-managed-environment by default.
-- If pip raises `externally-managed-environment`, you must **ask the user** before using `--break-system-packages`.
-- Do NOT silently add `--break-system-packages`. Preferred alternatives: create a venv, use pipx, or ask the user.
+**Reading output:** Use `-S -` to scrape full scrollback buffer, not just visible screen:
+```bash
+tmux -S /tmp/qr.sock capture-pane -t qr_api -p -S - | tail -60
+```
 
-### No Hardcoded Values in WebUI or API Responses
-ALL displayed values must come from actual data sources (DB, config_override, API response):
-- **IP addresses:** Read from `config_override.host`, not `"0.0.0.0"` or `"127.0.0.1"` hardcoded as fallbacks
-- **Ports:** Read from `config_override.web_port`, `port_assigned`, or `engine_configs.base_port` — never hardcoded in templates
-- **Hostnames:** Read from DB node records or `gethostname()` — never `"localhost"` as default fallback
-- **Service binding addresses:** Must return the ACTUAL bind address, not a hardcoded string
+### 5a. Loading State Transition — SSE Model Load (v0.07)
+After a `start` or `restart` job completes, instance state transitions to `"loading"` (from `JOB_FINAL_STATES`). The WebUI monitors this state and:
 
-**Rule:** If a value is displayed to the user, trace its source. If it originates from a literal string in code rather than a DB column, config key, or API response field, it is a bug.
+1. **llama_server only** — connects to `GET /api/v1/instances/<id>/models-sse` which proxies the remote llama.cpp `/models/sse` endpoint
+2. SSE events contain `model_status` with values: `loading`, `loaded`, `sleeping`, `unloaded`
+3. When SSE reports `loaded` or `sleeping`: WebUI shows progress bar complete, then `location.reload()` after 2s
+4. **Server-side transition** — `api_model_load_sse()` SSE proxy detects `status=loaded`/`status=sleeping` events and transitions DB state `"loading"` → `"running"` directly
+
+**RPC behavior:** `llama_rpc` start/restart jobs go directly to `"running"` (engine-aware check in `_finalize_job()`, uses SSOT constant `QR_ENGINE_LLAMA_RPC_NAME`). No SSE loading state for RPC since it has no `/models/sse` endpoint.
+
+### 5g. CONFIG-1 — Env-Driven CLI Args (No Daemon-Reload)
+Systemd ExecStart reads CLI args from `$QR_CLI_ARGS_JOINED` in the env file:
+```ini
+ExecStart=... $QR_CLI_ARGS_JOINED
+```
+Preset changes, cluster config updates, and model param changes only modify the env file — no `systemctl daemon-reload` needed. Config changes via `PUT /instances/<id>` with `skip_build=true` use the BC-1 fast path (config_env + service_start stages) which is fast (<100ms) because it skips git clone and cmake build.
+
+### 5h. MCP SSE Session Stale After API Restart (v0.08 DESIGN NEEDED)
+When the API restarts, it kills the old MCP process and starts a new one with a new PID. The opencode harness has cached the old MCP's SSE session ID — every subsequent tool call fails with `MCP error -32602: Invalid request parameters`.
+
+**Workaround:** Restart opencode context to refresh tool schema after API restart.
+**Root cause:** `_quickrobot_mcp/__init__.py` kills orphaned MCP (PPID=1) and restarts it even when parent API just died. Options for v0.08: accept orphaned MCP, opencode auto-reconnect, session ID persistence, or dual-engine pattern.
+
+### 5b. WebUI & MCP — Subprocess Lifecycle
+Both WebUI and MCP run as API subprocesses (not tmux):
+- Restart via API: `POST /instances/2/restart_system` (WebUI) or `/instances/3/restart_system` (MCP)
+- For WebUI-only changes: restart via API, then verify PID changed (confirms reload)
+- Children are isolated in own process groups (`start_new_session=True`) — survive API death as zombies but don't conflict on ports
+
+### 5c. Port Resolution — Never Hardcoded
+Ports come from `.quickrobot.env`, not code:
+- API: `QUICKROBOT_API_PORT`
+- WebUI: `QUICKROBOT_WEBUI_PORT`  
+- MCP: `QUICKROBOT_MCP_PORT`
+- Instance allocation: derives from `QR_ENGINE_PORT_DEFAULTS.get(engine_name)` in SSOT, auto-increments. Do NOT use hardcoded `8080` or `9000` — look up via `lib.qr_engine_ids.QR_ENGINE_PORT_DEFAULTS`.
+
+### 5d. Process Kill Guard
+NO agent may kill the API process without explicit user confirmation. Killing the API also kills all running ansible-playbook subprocesses (compiles, deploys in progress). The `update_and_compile` playbook can take 15-30 minutes. Before killing: verify no instances in `updating`, `configuring`, `deploying`, `starting`, `stopping`, `loading`, or `compiling` states.
+
+### 5e. Compile Verification Rule
+When instances show state `deploying` (or `updating` via legacy path) after triggering a build: **do NOT assume the build is stuck.** The shared cmake build can take up to 30 minutes. SSH to remote nodes and check for active compile processes (`ps aux | grep cmake`) before declaring stuck. Only declare stuck if no active compile processes after 15+ minutes.
+
+**Parallel compiles:** Compiles run in parallel across different nodes (dllama1/2/3 all compile simultaneously). Each node processes only one compile at a time (per-node build lock, SESSION-1 fix). Next instance on that node stays `unconfigured` until current chain completes.
+
+### 5f. System Engine Pre-Flight Scan (Startup)
+On API restart, each system engine undergoes a pre-flight port + process scan before auto-start:
+1. **Port check** via `ss -tlnp` — verifies assigned port is free (WebUI 8038, MCP 8040; Scheduler N/A)
+2. **Process scan** via `ps aux` — grep for known Python file names
+3. **DB PID check** — verifies `pid_last_known` status
+
+If any conflict: FATAL messages logged, engine auto-start **aborted** (does NOT kill or restart). Agent reads report, kills conflicting processes, then restarts API. The scan patterns are defined in `_ENGINE_SCAN_PATTERNS`:
+- webui: port 8038, `quickrobot_webui.py`
+- mcp: port 8040, `qr_mcp_server.py`
+- scheduler: no port, `quickrobot_scheduler` / `engine.quickrobot_scheduler`
+
+**Note:** This is startup-only behavior. Explicit `/instances/<id>/start` and `/instances/<id>/restart_system` endpoints use the existing DB PID check logic (unchanged).
 
 ---
 
-## 4. Communication
+## 6. Connection Method Priority
+
+The project provides three parallel control paths — **use the right one for the task**:
+
+A) **MCP tools (primary)** — Direct function calls in every agent's context. ~26 tools organized by read/write/proxy categories. Use for all routine operations — fast (no HTTP overhead), type-safe (parsed JSON). Example: `quickrobot_run_benchmark(instance_id=108, prompt_id=1)`.
+
+B) **API server (HTTP REST)** — Full Flask API via `curl` on port 8039. Use when you need exact HTTP semantics (status codes, headers, custom auth tokens), endpoints not exposed as MCP tools, or debugging the API layer.
+
+C) **WebUI (browser)** — HTML/JS SPA. Use Playwright skill for UI testing during development. For quick health checks: `curl -s http://127.0.0.1:<WEBUI_PORT>/`.
+
+D) **SQLite CLI** — Only for schema inspection (`PRAGMA table_info`), one-shot seed file generation, or when explicitly debugging a DB-level issue. Do NOT use to check state (bypasses API guards).
+
+**Rule of thumb:** MCP → API → WebUI → SQLite. Default to the fastest path that solves the task.
+
+---
+
+## 7. Playbook Rationale: Why Playbooks Drive Config Changes
+
+Playbooks are not just deployment scripts — they are the mechanism for **configuring user-space settings on remote nodes**:
+- `deploy_config_env.yml` (no-become) writes env files as SSH user, enabling preset/cluster config changes without root privileges
+- `deploy_config_service.yml` (become: yes) writes systemd unit files when root is needed
+- The split enables **fast userspace reconfigs**: preset changes, cluster binding updates only need `config_env`, no systemctl reload
+- Full deploys use both playbooks in staged chains; config-only changes use just `config_env`
+
+**Why this matters for agents:** When a user wants to change a preset or cluster config, the correct action is `PUT /instances/<id>` with the new preset_id — NOT creating a new playbook. The existing `deploy_config_env.yml` handles it.
+
+---
+
+## 8. Configuration Hierarchy
+
+Configuration resolves through layers: L3 (instance override) > L2 (engine type config) > L1 (.env / defaults):
+- **L1:** `.quickrobot.env` (system-level, human-edited) or `engine_configs` table (type-level, API-mutable)
+- **L2:** `engine_configs` table keyed by `engine_type_id`
+- **L3:** `config_override` JSON column in `instances` table (single instance, API-mutable)
+
+System-managed instances (IDs 1-4) skip L3 entirely.
+
+---
+
+## 9. Database Rules
+
+### General
+- DO NOT run raw SQL directly on `data/quickrobot.db` without explicit user authorization.
+- Quickrobot is a REST API server. The API is the interface under test — query and mutate via API endpoints, not sqlite CLI.
+- sqlite CLI is acceptable only for schema inspection (`PRAGMA table_info`), one-shot seed file generation, or when explicitly debugging a DB-level issue.
+
+### Seed File
+- **Location:** `data/_seed/seed_v007.sql` (relative to project root)
+- **Format:** `INSERT OR REPLACE` statements — fully idempotent
+- **Verification:** `.quickrobot.env` keys `QUICKROBOT_SEED_CHECKSUM` + `QUICKROBOT_SEED_FILESIZE` are validated on fresh DB creation (automatic, no `--init` flag needed).
+- After any schema change: seed file must be regenerated and checksum updated in `.quickrobot.env`
+
+### DB Manipulation via sqlite3 CLI
+Before any `DELETE`/`UPDATE`/`INSERT`: state exact rows affected and get user confirmation. Prefer API endpoints which have proper guards (system-managed checks, FK constraints).
+
+---
+
+## 10. Ansible Template Gotchas
+
+### Jinja2 Whitespace
+Ansible's `template` module consumes **ALL surrounding whitespace** around Jinja2 control tags. Pre-compute lines via `set_fact` before template render when needed.
+
+### ExecStart Last in [Service]
+Put `ExecStart=` as the last configurable directive in `[Service]`, followed by an empty blank line, then static lines. The empty line prevents Ansible from consuming the final newline.
+
+---
+
+## 11. Coding Integration — 4-Layer Sync
+
+Every feature touches 4 layers that must stay in sync:
+1. **Ansible playbook** — YAML with `@playbook_id:` header + checksum in seed
+2. **API handler** (`qr_api/routes_*.py`) — parses playbook result JSON, calls DB adapter
+3. **DB adapter** (`db/adapters/*.py`) — INSERT/UPDATE with dynamic column detection
+4. **WebUI** (`webui/*.html`) — renders API response via JavaScript
+
+**Integration rule:** When adding a new field, update ALL 4 layers. Changing DB schema without updating seed file means fresh DB creation (automatic) loses the new data.
+
+---
+
+## 12. API Testing Discipline
+
+### Read State Before Writing
+Before ANY write action (deploy, build, create, reboot): read current state (`state`, `is_active`, `node_build_state`), decide if action makes sense, execute ONE action, verify result.
+
+### One Action Per Test Command
+Each write action is a separate command. See the raw JSON response. Do NOT chain multiple writes — you lose per-call status/error details.
+
+### Use Inactive Nodes for Destructive Tests
+When testing actions that change state, use nodes with `is_active=0` and no live instances.
+
+### Ask Before Bulk Testing
+If the test involves more than one write action, or targets a live/active node, ask the user first.
+
+### No Sleep >10 Seconds
+Always poll API endpoints instead of sleeping. Return to user for manual polling during long operations (5-30 min compiles).
+
+---
+
+## 13. Response Format Patterns
+
+- **Single resource:** `{ "status": "ok", "data": { ... } }` → `resp.get("data", {})`
+- **List resources:** `{ "status": "ok", "total": N, "items": [...] }` → `resp.get("items", [])`
+- **Error:** `{ "status": "error", "code": "...", "message": "..." }`
+
+**Always check `response.get("status")` first.** A 404 returns error status with `RESOURCE_NOT_FOUND` — do NOT interpret empty `items` array as "zero results" when the response is actually an error.
+
+**Nested fields:** Fields like `pid`, `version` live INSIDE `data`, not at top level: `resp.get("data",{}).get("pid")`.
+
+**Instance objects:** Fields are `engine_type_name` (NOT `engine_type`) and `node_hostname` (NOT `node_name`).
+
+---
+
+## 14. Communication
 
 - Report task completion or failure with a structured summary
 - Report blockers immediately — do not continue past them
@@ -118,366 +399,135 @@ ALL displayed values must come from actual data sources (DB, config_override, AP
 
 ---
 
-## 5. File Manifest Tracking
+## 15. File Manifest Tracking
 
-All **writable agents** must log every file modification to `./manifest.log`.
+All writable agents must log every file modification to `./manifest.log`.
 
 ### Format (append-only, pipe-delimited)
 ```
 <filepath> | <timestamp> | <agentname> | <backup_filename> | <reason>
 ```
 
-### Timestamp Generation
-Timestamps MUST be generated dynamically at log time:
-```bash
-TIMESTAMP=$(date +%Y-%m-%dT%H:%M:%S)
-echo "<filepath> | ${TIMESTAMP} | <agentname> | <backup_filename> | <reason>" >> manifest.log
-```
-
-### Rules
-- **Append only** — Never read/rewrite the manifest.
-- Backup files are excluded from tracking.
-- Timestamp format: ISO 8601 (`YYYY-MM-DDTHH:MM:SS`)
-- Agentname must match the agent's identity (e.g., "coder", "designer")
-- **Use relative paths** from project root (e.g., `lib/lib_ssh.py` not `/project/root/lib/lib_ssh.py`)
-- All five fields must always be present and non-empty
-
-### Backup Locations
-- Manifest backups → `./OLD_ignore/`
-- Full project tar.gz backups → `<project_root>/BACKUPS/` (or configured backup directory)
+Timestamps generated dynamically: `TIMESTAMP=$(date +%Y-%m-%dT%H:%M:%S)`  
+Use relative paths from project root. All five fields must be present and non-empty.
 
 ---
 
-## 6. Server Configuration
-
-See `QUICKROBOT.md` §Server Configuration for full details. Quick reference:
-
-### Service Architecture
-Three separate servers — all controlled via tmux (API) or API endpoint (WebUI/MCP):
-
-| Server | File | Tmux Session | Restart |
-|--------|------|-------------|---------|
-| API | `quickrobot.py` | `qr_api` | `kill <pid>` or `POST /instances/1/restart_system` |
-| WebUI | `quickrobot_webui.py` | API subprocess | `POST /instances/2/restart_system` |
-| MCP | `engine/qr_mcp_server.py` | API subprocess | `POST /instances/3/restart_system` |
-
-**Start:** `tmux send-keys -t qr_api 'python3 quickrobot.py' C-m`
-**Check:** `tmux has-session -t qr_api 2>&1` (exit 0 = exists)
-**Stop:** Query PID, then `kill <PID>`, wait 1s, verify dead.
-
-### Configuration Hierarchy — 3 Layers
-| Layer | Source | Scope | Mutable via API? |
-|-------|--------|-------|------------------|
-| L1 | `.quickrobot.env` (system) / `engine_configs` defaults (user) | System-wide / engine-type-wide | No |
-| L2 | `engine_configs` table, keyed by `engine_type_id` | All instances of one type | Yes |
-| L3 | `config_override` JSON column in `instances` table | Single instance only | Yes |
-
-Resolution: L3 wins > L2 > L1. System-managed instances (IDs 1-3) skip L3 entirely.
-
-### Operational Rules
-- **--init Guard:** NO agent may use `--init` without explicit user confirmation. Creates fresh DB — all data lost. See `QUICKROBOT.md` §Operational Rules.
-- **Process Kill Guard:** NO agent may kill the API process without explicit user confirmation. Kills running ansible-playbook subprocesses (compiles, deploys in progress). Before killing: verify no instances in `updating`, `configuring`, `deploying`, `starting`, `stopping`, `loading`, or `compiling` states.
-- **Compile Verification:** Shared cmake build takes up to 30 min. SSH to check for active `cmake` processes before declaring stuck.
-
-### Ansible Playbook Lifecycle During API Restart
-Ansible-playbook subprocesses **survive** API death — they are independent processes. Builds continue to completion on remote nodes. Caveat: `_run_compile()` daemon thread uses `subprocess.run()` (blocking) — if main process exits during this, the subprocess IS terminated.
-
-### Three Control Paths for Agent Operations
-
-The opencode harness connects to the quickrobot project via **MCP** and exposes 14 direct function-call tools (listed in §11 API Testing Discipline). Agents have three parallel control paths that all converge on the same SQLite database — each path serves a different operational need:
-
-A) **MCP Tools (primary, 14 functions)** — Direct function calls available in every agent's context window. These are `quickrobot_list_instances_summary`, `quickrobot_list_nodes_summary`, `quickrobot_list_models_summary`, `quickrobot_list_presets_summary`, `quickrobot_list_benchmark_prompts`, `quickrobot_run_benchmark`, `quickrobot_get_instance_status`, `quickrobot_get_model`, `quickrobot_get_preset`, `quickrobot_list_instances`, `quickrobot_list_nodes`, `quickrobot_list_models`, `quickrobot_list_presets`, `quickrobot_list_benchmark_results`. Use these for **all routine operations** — they are fast (no HTTP overhead), type-safe (parsed JSON), and support both read and write paths. Example: `quickrobot_run_benchmark(instance_id=108, prompt_id=1)` starts a benchmark without writing a single curl command.
-
-B) **API Server (HTTP REST, port 8039)** — Full Flask API accessible via `curl` from bash. Use when you need **exact HTTP semantics** (specific status codes, headers, custom auth tokens), need to test endpoints not exposed as MCP tools, or are debugging the API layer itself. Base URL: `http://127.0.0.1:<API_PORT>/api/v1/` where `<API_PORT>` comes from `.quickrobot.env`. Example: `curl -s http://127.0.0.1:8039/api/v1/app/status` verifies the API process is alive and returns PID + uptime.
-
-C) **WebUI (browser frontend, port 8038)** — Flask app serving HTML/JS SPA. Use when verifying **UI rendering** or testing end-to-end user flows. Also curl-able for quick health checks: `curl -s http://127.0.0.1:8038/` returns the redirect page.
-
-**Path selection rules:**
-- Default to **MCP tools** — they are the fastest, most reliable, and always available in context.
-- Use **API** when you need raw HTTP behavior (status codes, response headers, auth token validation).
-- Use **WebUI** only when the question is specifically about rendered output or user interaction.
-- All three paths share the same DB — reads from one are immediately visible to the others (no caching layer between them).
-- Write operations via MCP tools (`run_benchmark`, etc.) have the same effect as equivalent API calls — the tool IS a thin wrapper around the API handler.
-
----
-
-## 7. Ansible Template Gotchas
-
-### Jinja2 Whitespace in Ansible
-Ansible's `template` module consumes **ALL surrounding whitespace** around Jinja2 control tags (`{% if %}`, `{% endif %}`, `{% for %}`). This means:
-
-```jinja2
-# DANGEROUS — tags consume preceding newlines:
-{% if merged_env %}EnvironmentFile={{ env_file }}
-{% endif %}ExecStart=...Vulkan0   # newline after endif consumed!
-```
-
-**Fix:** Pre-compute lines via `set_fact` in a separate Ansible task before template render:
-```yaml
-- name: Build ExecStart line
-  set_fact:
-    exec_start_line: >-
-      ExecStart={{ binary_path }} -H {{ host | default('0.0.0.0') }}
-      -p {{ port }} -d {{ device | default('CPU') }}
-      {% if cli_opts %} {{ cli_opts | join(' ') }}{% endif %}
-```
-
-### Extra Vars — No `from_json` Needed
-Ansible 2.10+ **auto-parses JSON** passed via `--extra-vars`. Extra vars arrive as proper Python types — do NOT use `| from_json` on them. Using `from_json` on an already-parsed list causes errors.
-
-**Correct pattern:** Use extra_vars directly:
-```yaml
-{% if merged_cli_opts is defined and merged_cli_opts %} {{ merged_cli_opts | join(' ') }}{% endif %}
-loop: "{{ instance_env_vars | default([]) }}"
-```
-
-**When `from_json` IS needed:** Only when a value was explicitly stored as a JSON-encoded string (e.g., in `config_override` JSON column). Check type first:
-```yaml
-- debug: msg="type={{ merged_cli_opts | type_debug }}"
-# If "str" → use from_json; if "list" → use directly
-```
-
-### ExecStart Last in [Service]
-Put `ExecStart=` as the last configurable directive in `[Service]`, followed by an empty blank line, then static lines. The empty line prevents Ansible from consuming the final newline.
-
----
-
-## 8. Forbidden Actions
+## 16. Forbidden Actions
 
 The following are forbidden for ALL agents:
-- `rm`, `rm -f`, `rm -rf` (anywhere, any scope)
+- `rm`, `rm -f`, `rm -rf` (anywhere)
 - Wildcard process kills (`pkill -f`, `killall`)
 - Installing dependencies without user confirmation
 - Modifying files outside the project directory without explicit authorization
 - Restoring full project backups from tar.gz without Design Agent approval
-
-### No Restore From Backup Without Explicit Confirmation
-NO agent may restore ANY file from ANY backup location without explicit user confirmation. The agent must state which file(s), from where, and why, and wait for approval.
-
-### NEVER DELETE OLD BACKUPS — Absolute Rule
-**UNDER NO CIRCUMSTANCES EVER delete old backup files.** Applies to ALL locations:
-- Full project tar.gz backups (configured backup directory)
-- `./OLD_ignore/` — old-style backup files
-- `./backups/` — staging directory backups
-- `./data/_backups/` — database backups
-- Any `_backup_*` file anywhere in the project
-
-Forbidden: `rm`, `rm -f`, `rm -rf`, `find ... -delete`, `find ... -exec rm`, glob cleanup like `rm OLD_ignore/*`. The user may clean backups manually.
+- **NEVER DELETE OLD BACKUPS** — absolute rule for ALL backup locations
 
 ---
 
-## 9. SSH Host Key Checking Policy
+## 17. SSH Host Key Policy
 
-**Do NOT use `-o StrictHostKeyChecking=no` as default.** It silently accepts any host key change (MITM attack vector). Preferred order:
-1. `StrictHostKeyChecking=yes` — prompts on first connect, verifies on subsequent
-2. `StrictHostKeyChecking=accept-new` — headless-friendly, auto-accepts new hosts, rejects changed keys
-3. `StrictHostKeyChecking=ask` — interactive
-
-**`accept-new` is FORBIDDEN in runtime code unless explicitly authorized.** Per-user per-case approval required.
-
-### SSH Hostname Preference
-Prefer **DNS names** over raw IPs for SSH connections and Ansible inventory:
-- Use `ssh user@hostname.domain` instead of `ssh user@192.168.1.42`
-- DNS names are stable even if IP changes (DHCP reassignment)
-- The Ansible dynamic inventory already uses `.lan` FQDNs from the nodes table
+Prefer DNS names over raw IPs for SSH connections. Use `StrictHostKeyChecking=accept-new` (headless-friendly, rejects changed keys). Do NOT use `-o StrictHostKeyChecking=no` as default.
 
 ---
 
-## 10. Coding Integration Insights
+## 18. Instance Creation & Deploy Workflow
 
-### Playbook → API → DB → WebUI Data Flow
-Every feature touches 4 layers that must stay in sync:
-1. **Ansible playbook** — gathers data from remote nodes, writes YAML with `@playbook_id:` header + checksum in seed
-2. **API handler** (`quickrobot/routes_*.py`) — parses playbook result JSON, calls DB adapter
-3. **DB adapter** (`db/adapters/*.py`) — INSERT/UPDATE with dynamic column detection (`PRAGMA table_info`)
-4. **WebUI** (`webui/*.html`) — renders API response via JavaScript
+### Create → Auto-Deploy → Auto-Start (Single Step)
+`POST /instances` (or MCP `create_instance`) **auto-deploys and auto-starts** the instance in one call. No separate deploy/start needed:
 
-**Integration rule:** When adding a new field, update ALL 4 layers. Changing DB schema without updating seed file → fresh `--init` loses the new data. Seed file must be regenerated after any schema change.
+1. **Create instance** → API creates DB record, assigns port, creates a deploy job, and begins the staged chain
+2. **Check jobs** → Query `GET /jobs` to see active deploy jobs with status (`queued`, `running`, `completed`, `failed`). Jobs stay `'queued'` until the scheduler claims them (JOB-STATE-1 fix).
+3. **Check instances** → Query `GET /instances` for current state (`unconfigured` → `configuring` → `deploying` → `loading` → `running`)
+4. **Report to user** → Summarize final state: success (all running), partial (some failed), or total failure
 
-### Timestamp Handling — UTC Everywhere
-- **SQLite** `strftime('%Y-%m-%dT%H:%M:%S','now')` returns UTC (no 'Z' suffix)
-- **Python** `_dt.now(_dt.timezone.utc).replace(tzinfo=None)` strips tzinfo for naive comparison
-- **WebUI** `qrFmtRelative()` receives naive UTC strings, displays relative time in user's browser timezone
+**No need to call:** `POST /instances/<id>/deploy` or `POST /instances/<id>/start` after creation. The create endpoint handles the full lifecycle.
 
-**Gotcha:** `created_at` default captures **import timestamp**, not file age. For tracking download age, capture file mtime from playbook and store in a separate column.
+### Job Duration Accuracy
+Job duration = actual execution time only (`started_at` set when scheduler claims first task, not at creation). Global per-job timeout: 2h (7200s, JOB-TIMEOUT). Jobs older than `created_at + timeout` get reset — running tasks → queued, job status → `'error'` with expiry message.
 
----
-
-## 11. API Testing Discipline
-
-### Rule — Read State Before Writing State
-Before ANY write action (deploy, build, create, update-build, reboot, apt-update):
-1. **Read current state** — check instance `state`, node `is_active`, `node_build_state`
-2. **Plan** — based on state, decide if action makes sense (running + no config change → skip deploy; node_build_state == "running" → skip builds)
-3. **Execute ONE action**, verify result
-
-### Rule — One Action Per Test Command
-Do NOT chain multiple write actions in a single command. Each test:
-```bash
-# GOOD — single action, clear result
-curl -s -X POST http://127.0.0.1:<API_PORT>/api/v1/instances/<id>/reconfigure
-
-# BAD — three writes in one shot, cascading side effects
-echo "=== 1 ===" && curl -s POST ... && echo "=== 2 ===" && curl -s POST ...
+### Example Workflow
+```
+1. quickrobot_create_instance(name="node1-rpc", preset_id=10, node_id=2, engine_type_id=22)
+2. → Returns instance ID (e.g., 105) with state "unconfigured"
+3. quickrobot_list_instances_summary()
+4. → After 1-2s: state transitions to "configuring" / "deploying" / "loading" / "running"
+5. Report: "Instance 105 deployed and running on dllama1.lan:port 50052"
 ```
 
-### Rule — Use Inactive Nodes for Destructive Tests
-When testing actions that change state (deploy, rebuild, reboot), use nodes known to be inactive (`is_active=0`) with no live instances.
+### Multi-Instance Deployment
+When creating multiple instances (e.g., cluster RPC nodes):
+- Create all instances first (parallel OK — they queue independently)
+- Check job status via `GET /api/v1/jobs?status=running` or MCP `list_instances_summary`
+- Report per-instance status: running, configuring, deploying, error
 
-### Rule — Ask Before Bulk Testing
-If the test involves more than one write action, or targets a live/active node, **ask the user first**.
+### When to Call Deploy Explicitly
+Only use `POST /instances/<id>/deploy` when:
+- Preset changed and config needs regenerating
+- RPC bindings changed (use bind-rpc then deploy)
+- Node IP changed or config_override changed
+- Instance in "unconfigured" state after manual creation with `start_after_deploy=false`
 
-### Rule — No Testing Without Verification
-After every test action: read the response, check resulting state. If unexpected, STOP and report — do NOT chain more actions.
-
-### API Endpoint Quick Reference
-**Base URL:** `http://127.0.0.1:<API_PORT>/api/v1/` where `<API_PORT>` = `QUICKROBOT_API_PORT` from `.quickrobot.env`.
-
-#### Core CRUD Endpoints
-| Purpose | Method | Path | Response key |
-|---------|--------|------|-------------|
-| List instances | GET | `/instances` | `items` |
-| Get instance | GET | `/instances/<id>` | `data` |
-| Create instance | POST | `/instances` | `data` |
-| Update instance | PUT | `/instances/<id>` | `data` |
-| Delete instance | DELETE | `/instances/<id>` | `data` |
-| Deploy instance | POST | `/instances/<id>/deploy` | `data` |
-| Start/Stop/Restart | POST | `/instances/<id>/start`, `stop`, `restart` | `data` |
-| Undeploy instance | POST | `/instances/<id>/undeploy` | `data` |
-| Restart system instance | POST | `/instances/<id>/restart_system` | `data` |
-| List nodes | GET | `/nodes` | `items` |
-| Get node | GET | `/nodes/<id>` | `data` |
-| Create node | POST | `/nodes` | `data` |
-| Node actions | POST | `/nodes/<id>/reboot`, `shutdown`, `apt-update`, `discover` | `data` |
-
-#### Engine & Preset Endpoints
-| Purpose | Method | Path |
-|---------|--------|------|
-| List engine configs | GET | `/engine/<type>/config` |
-| Set engine config | PUT | `/engine/<type>/config/<key>` |
-| Delete engine config | DELETE | `/engine/<type>/config/<key>` |
-| List presets | GET | `/engine/<type>/presets` |
-| Create preset | POST | `/engine/<type>/presets` |
-| Update preset | PUT | `/engine/<type>/presets/<id>` |
-| Delete preset | DELETE | `/engine/<type>/presets/<id>` |
-| List models | GET | `/models` or `/engine/<type>/models` |
-| Scan models | POST | `/models/scan?node=<id>` |
-
-#### Other Endpoints
-| Purpose | Method | Path |
-|---------|--------|------|
-| Benchmark run | POST | `/benchmarks/run` |
-| List benchmarks | GET | `/benchmarks/results?instance_id=<id>` |
-| Ansible actions | GET | `/ansible_actions?instance_id=<id>&limit=5` |
-| Playbooks list | GET | `/playbooks` |
-| Health check | POST | `/health/check` |
-| App status | GET | `/app/status` |
-
-#### Response Format
-- **Single resource:** `{ "status": "ok", "data": { ... } }` → access via `resp.get("data", {})`
-- **List resources:** `{ "status": "ok", "total": N, "items": [...] }` → access via `resp.get("items", [])`
-- **Error:** `{ "status": "error", "code": "...", "message": "..." }`
-
-**Always check `response.get("status")` first.** A 404 returns error status with `RESOURCE_NOT_FOUND` code — do NOT interpret empty `items` array as "zero results" when the response is actually an error.
-
-#### Engine Names (NOT IDs) — Use in API Paths
-| Name | ID | Usage |
-|------|-----|-------|
-| quickrobot-api | 1 | `/engine/quickrobot-api/config/*` |
-| quickrobot-webui | 2 | `/engine/quickrobot-webui/config/*` |
-| quickrobot-mcp | 3 | `/engine/quickrobot-mcp/config/*` |
-| universal | 11 | `/engine/universal/config/*` |
-| subprocess | 12 | `/engine/subprocess/config/*` |
-| llama_server | 21 | `/engine/llama_server/config/*` |
-| llama_rpc | 22 | `/engine/llama_rpc/config/*` |
-| iperf3 | 31 | `/engine/iperf3/config/*` |
-
-**⚠ Old names (`qr_api`, `qr_webui`, `qr_mcp`) return HTTP 400. Always use DB engine names above.**
-
-#### Response Parsing Patterns
-- Instance objects: fields are `engine_type_name` (NOT `engine_type`) and `node_hostname` (NOT `node_name`)
-- Single-resource parsing: `d = json.load(r); i = d.get("data", {}); print(i.get("state"))`
-- List parsing: `d = json.load(r); [print(f'  ID={i["id"]} state={i["state"]}') for i in d.get("items", [])]`
-- System-managed engine config endpoints: `GET /api/v1/engines/quickrobot-webui/settings` (host, web_port), `GET /api/v1/engines/quickrobot-api/status` (pid, rss_bytes, uptime)
+### State Transition Quick Reference
+| State | Meaning |
+|-------|---------|
+| `unconfigured` | Just created, no deploy job yet (or job queued) |
+| `configuring` | Writing env/service files via playbooks |
+| `deploying` | Deploy chain active (may be compiling, installing deps) |
+| `loading` | Service started, model loading in progress |
+| `running` | Fully operational |
+| `error` | Failure detected (check jobs/tasks for details) |
 
 ---
 
-## 12. Database Reference
-
-### DB File Location
-- **File:** `data/quickrobot.db` (relative to project root, ~6-13 MB)
-- **NOT** `qr.db` — that's a 0-byte decoy file sometimes created by hand
-- **Query:** `sqlite3 data/quickrobot.db "SQL"`
-- **Backup dir:** `data/_backups/`
-
-### All Tables (16)
-| Table | Purpose | Key Columns |
-|-------|---------|-------------|
-| `engine_types` | Engine type definitions | id, name, display_name, capabilities (JSON), base_port |
-| `engine_configs` | Per-engine-type config | engine_type_id, key, value, default_value |
-| `nodes` | Remote node inventory | id, name, hostname, ipv4_address, ping_state, is_active |
-| `instances` | Deployed instances | id, name, engine_type_id, node_id, state, port_assigned, config_override (JSON) |
-| `engine_models` | Discovered models | id, engine_type_id, name, model_path, is_active, preset_count |
-| `engine_presets` | Engine presets | id, engine_type_id, name, category, config_template (JSON), model_id |
-| `benchmark_prompts` | Prompt templates for benchmarks | id, name, content, max_tokens |
-| `benchmark_results` | Benchmark run results | id, instance_id, prompt_id, success, tokens_per_sec, response_json |
-| `playbook_registry` | Playbook metadata + checksums | id, file_path, playbook_id, checksum_sha256, file_size |
-| `ansible_actions` | Ansible playbook execution logs | id, node_id, instance_id, action_type, task_summary (JSON), status |
-| `qr_actions` | Framework-level operation logs | id, action_type, node_id, instance_id, actor, details (JSON) |
-| `groups` / `group_members` | Instance grouping (many-to-many) | groups: id, name; group_members: group_id, instance_id |
-| `node_configs` | Per-node config overrides | node_id, key, value |
-| `config_global` | Global system config | key, value |
-| `applied_migrations` | Migration version tracking | migration_name, applied_at |
-| `request_log` | HTTP request audit log | id, method, path, status, ip, timestamp |
-| `instance_logs` | Per-instance log entries | id, instance_id, level, message, created_at |
-
-### Engine Type IDs (SOT in `lib/qr_engine_ids.py`)
-| ID | Name | Display | Port Default | Lifecycle |
-|----|------|---------|-------------|-----------|
-| 1 | quickrobot-api | Quickrobot API | 8039 | tmux `qr_api` |
-| 2 | quickrobot-webui | Quickrobot WebUI | 8038 | subprocess (PID-in-DB) |
-| 3 | quickrobot-mcp | Quickrobot MCP Server | 8040 | subprocess (PID-in-DB) |
-| 11 | universal | Universal Engine | 0 | systemd playbook |
-| 12 | subprocess | Subprocess | — | PIDs tracked in DB |
-| 21 | llama_server | LLAMA.cpp | 8080 | systemd playbook |
-| 22 | llama_rpc | LLAMA.RPC Server | 50052 | systemd playbook |
-| 31 | iperf3 | Iperf3 | 9900 | systemd playbook |
-
-### Seed File
-- **Location:** `data/_seed/seed_v006.sql` (relative to project root)
-- **Format:** `INSERT OR REPLACE` statements — fully idempotent
-- **Contents:** engine_types, node stub, engine_configs, benchmark_prompts, playbook_registry, models, presets, sample instance
-- **Verification keys in `.quickrobot.env`:**
-  - `QUICKROBOT_SEED_CHECKSUM` — SHA256 of the file
-  - `QUICKROBOT_SEED_FILESIZE` — file size in bytes
-  - `QUICKROBOT_SEED_MAX_ID` — max ID range (default 1000)
-- **--init flow:** pre-validate checksum+size → backup old DB → delete → create fresh → run migrations → import seed → auto-provision system instances
-
-### SQLite Query Tips
-- **List tables:** `sqlite3 data/quickrobot.db ".tables"`
-- **Schema for one table:** `sqlite3 data/quickrobot.db "PRAGMA table_info(table_name);"`
-- **Row count:** `sqlite3 data/quickrobot.db "SELECT COUNT(*) FROM table_name;"`
-- **Filter active:** `sqlite3 data/quickrobot.db "SELECT * FROM engine_models WHERE is_active=1 ORDER BY id;"`
-- **JSON columns:** `config_override`, `capabilities`, `task_summary` — stored as JSON strings, read with `json_extract()` or load via Python
-
-### Common Patterns for DB Tasks
-A) Export data to seed-compatible SQL: use Python `sqlite3` with `row_factory=sqlite3.Row`, format values with type-aware quoting (integers unquoted, strings single-quoted, None→NULL keyword).
-B) Verify SQL syntax: `sqlite3 /tmp/test.db < seed_file.sql` — "no such table" errors are expected on empty DB; look for actual parse errors.
-C) Checksum update after edit: `sha256sum data/_seed/seed_v006.sql` + `wc -c data/_seed/seed_v006.sql`, then update `.quickrobot.env`.
-
----
-
-## 13. Cross-Reference Map
+## 19. Cross-Reference Map
 
 | Topic | See |
 |-------|-----|
-| Database structure, tables, engine IDs, seed file | §12 (this section) |
+| Instance creation & deploy workflow | §18 above (auto-deploy, job checking, state transitions) |
+| Database structure, tables, engine IDs, seed file | `QUICKROBOT.md` §Database + §Seed File |
+| Security (root guards, snakeoil model) | `QUICKROBOT.md` §Security |
 | API endpoint reference + MCP tools | `SKILL.md` |
 | Architecture, merge chains, playbook registry | `QUICKROBOT.md` |
 | Task list (open items) | `docs/TODO.md` |
-| Task list (full history) | `docs/TODO_v005.md` |
+| Full task history | `docs/TODO_done.md` |
 | Ansible JSON format details | `docs/ansible_output_format.md` |
 | Sortable table pattern | `docs/sortable_tables.md` |
-| Changelog | `CHANGELOG.md`, `CHANGELOG_v005.md` |
+| Changelog | `CHANGELOG.md` |
 
-## CODE FREEZE IN PROGRESS: NO SOURCE EDITS OR CODE MODS WITHOUT EXPLICIT USER AUTH!
+---
+
+## 20. API Endpoint Creation Rule — No Silent Additions
+
+### Rule: No new API endpoints without explicit user auth
+
+Before adding any **new** API endpoint (route registration in `__init__.py`), the agent MUST:
+1. State the endpoint path, HTTP method, and what it does
+2. List the files that will be modified
+3. Wait for user confirmation before writing code
+
+**Rationale:** Each new endpoint adds attack surface, increases API surface area, and needs to be documented in SKILL.md + MCP tools. Silent additions break the 4-layer sync rule (§11).
+
+**Exceptions (no auth needed):**
+- Bug fixes to **existing** endpoints (same path, same method)
+- Parameter additions to existing endpoints (new query params, new request body keys)
+- WebUI-only changes that call existing endpoints
+
+**Examples of what needs auth:**
+- `POST /api/v1/tasks/<id>/cancel` — NEW endpoint → needs auth
+- `POST /api/v1/tasks/<id>/delete` — NEW endpoint → needs auth
+- Adding `?include=playbook_output` query param to existing `GET /api/v1/tasks/<id>` — NO auth needed
+
+### Task Cancel Design (v0.07)
+
+The user prefers a **single** centralized cancel mechanism rather than per-task endpoints:
+- One API endpoint for canceling tasks (not per-task)
+- The scheduler handles the full lifecycle: stops ansible, marks state, cleans up
+- Later cleanup (via stale task detection or manual job cleanup) removes completed/failed task records
+
+This means the UI can have visual cancel/delete buttons, but they should either:
+A) Call a single `POST /tasks/cancel` with `{task_id: N}` in the body, OR
+B) Simply reset the DB state directly (since WebUI runs on the same host), OR
+C) Just be visual indicators until the user approves adding the endpoint
+
+**Current approach for v0.07:** Add UI buttons as placeholders (visual only or direct DB manipulation) until the user explicitly authorizes new API endpoints.

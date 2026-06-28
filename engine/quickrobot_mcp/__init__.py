@@ -247,7 +247,13 @@ class QrMcpEngine(BaseEngine):
                 return {"alive": False, "latency_ms": None, "error": f"Instance {instance_id} not found"}
             pid = inst.get("pid_last_known")
             port = inst.get("port_assigned")
-            host = inst.get("config_override", {}).get("mcp_host") or os.environ.get("QUICKROBOT_MCP_HOST") or _CONFIG.get("host")
+            co = inst.get("config_override") or {}
+            if isinstance(co, str):
+                try:
+                    co = json.loads(co)
+                except Exception:
+                    co = {}
+            host = co.get("mcp_host") or os.environ.get("QUICKROBOT_MCP_HOST") or _CONFIG.get("host")
 
             if pid:
                 try:
@@ -406,30 +412,19 @@ class QrMcpEngine(BaseEngine):
             # Resolve interpreter (reads current config value — stays in module)
             python_exe = self._resolve_python_interpreter(db_path, et_id) or self._mcp_python or sys.executable
 
-            # Build CLI flags for MCP server
-            extra_flags = []
-            if reads_val == "true":
-                extra_flags.append("--read")
-            if writes_val == "true":
-                extra_flags.append("--write")
-            if proxy_val == "true":
-                extra_flags.append("--proxy")
-
-            # WRITE and PROXY imply READ per design
+            # Flags are now handled via env vars only (QUICKROBOT_MCP_* names harmonized)
+            # CLI flags --read/--write/--proxy removed from qr_mcp_server.py
             reads_effective = "true" if (reads_val == "true" or writes_val == "true" or proxy_val == "true") else "false"
-            write_implied_read = "true" if ((writes_val == "true" or proxy_val == "true") and reads_val != "true") else "false"
-            if write_implied_read == "true":
-                print(f"[qr] MCP started with WRITE flag — READ is implied")
 
             try:
-                cmd = _build_command("mcp", env_config, api_host, api_port, extra_flags)
+                cmd = _build_command("mcp", env_config, api_host, api_port)
             except Exception as exc:
                 _log_lifecycle("mcp", "start", {"error": str(exc)})
                 return {"error": f"Failed to build command: {exc}", "action": command}
 
             try:
                 # Consolidated env whitelist builder (Phase 1)
-                from lib.lib_system_engine import build_subprocess_env
+                from lib.lib_system_engine import build_subprocess_env, _register_child
                 env = build_subprocess_env(
                     engine_name="mcp",
                     env_config=env_config,
@@ -446,9 +441,16 @@ class QrMcpEngine(BaseEngine):
                     print(f"[qr] ENV: subprocess env reduced {os_env_count} → {child_env_count} keys (whitelist)")
 
                 # Build command: replace sys.executable with resolved interpreter
-                cmd = _build_command("mcp", env_config, api_host, api_port, extra_flags)
+                cmd = _build_command("mcp", env_config, api_host, api_port)
                 cmd[0] = python_exe  # Use pipx/python interpreter instead of sys.executable
-                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, cwd=os.getcwd())
+                # Unified log file (same pattern as WebUI)
+                log_path = os.path.join(os.getcwd(), "logs", "mcp.log")
+                os.makedirs(os.path.dirname(log_path), exist_ok=True)
+                _logf = open(log_path, "a")
+                proc = subprocess.Popen(cmd, stdout=_logf, stderr=_logf, env=env, cwd=os.getcwd(), start_new_session=True)
+                # C5-REG: Auto-terminate on parent death (survives SIGKILL, not just SIGTERM)
+                import ctypes as _ctypes
+                _ctypes.CDLL("libc.so.6").prctl(1, 15)  # PR_SET_PDEATHSIG=1, SIGTERM=15
             except OSError as exc:
                 _log_lifecycle("mcp", "start", {"error": str(exc)})
                 return {"error": f"Failed to start MCP server: {exc}", "action": command}
@@ -457,14 +459,19 @@ class QrMcpEngine(BaseEngine):
             import time as _time; _time.sleep(1)
             retcode = proc.poll()
             if retcode is not None:
-                stdout, stderr = proc.communicate()
-                _out = (stdout or b"").decode("utf-8", errors="replace").strip()[:500]
-                _err = (stderr or b"").decode("utf-8", errors="replace").strip()[:500]
-                err_msg = _err if _err else _out
+                # Read last lines from log file since output went there, not PIPE
+                err_msg = "see logs/mcp.log"
+                try:
+                    with open(log_path, "r") as lf:
+                        lines = [l.strip() for l in lf.readlines() if l.strip()]
+                        err_msg = "\n".join(lines[-5:]) if lines else "no output"
+                except Exception:
+                    pass
                 _log_lifecycle("mcp", "start", {"crashed": True, "returncode": retcode, "error": err_msg})
                 return {"error": f"MCP crashed immediately (rc={retcode}): {err_msg}", "action": command}
 
             new_pid = proc.pid
+            _register_child(new_pid)  # Isolates child in own process group (C1 fix)
             update_instance(db_path, instance_id, pid_last_known=new_pid)
             try:
                 # Transition through proper state chain: unconfigured→deployed→starting→running
@@ -475,7 +482,7 @@ class QrMcpEngine(BaseEngine):
                 transition_state(db_path, instance_id, "running")
             except Exception:
                 pass
-            _log_lifecycle("mcp", "start", {"pid": new_pid, "interpreter": python_exe, "flags": f"r={reads_val} w={writes_val} p={proxy_val}", "effective_flags": f"r={reads_effective} w={writes_val} p={proxy_val}", "write_implied_read": write_implied_read, "api_host": api_host, "api_port": api_port, "mcp_host": mcp_listen_host, "mcp_port": mcp_listen_port})
+            _log_lifecycle("mcp", "start", {"pid": new_pid, "interpreter": python_exe, "reads_val": reads_val, "writes_val": writes_val, "proxy_val": proxy_val, "effective_flags": f"r={reads_effective} w={writes_val} p={proxy_val}", "api_host": api_host, "api_port": api_port, "mcp_host": mcp_listen_host, "mcp_port": mcp_listen_port})
             return {"action": "start", "port": mcp_listen_port, "pid": new_pid, "status": "started"}
 
         elif command == "stop":
@@ -495,6 +502,7 @@ class QrMcpEngine(BaseEngine):
             return {"action": "stop", "pid": pid}
 
         elif command == "restart":
+            # Full restart cycle: kill → port-wait → start
             # Transition to stopping for visible state change in UI
             try:
                 transition_state(db_path, instance_id, "stopping")
@@ -502,14 +510,23 @@ class QrMcpEngine(BaseEngine):
                 pass
 
             old_pid = inst.get("pid_last_known")
+
+            # Clear PID from DB FIRST — prevents race condition where stale PID
+            # is detected as "running" during the kill window
+            try:
+                update_instance(db_path, instance_id, pid_last_known=None)
+            except Exception:
+                pass
+
             if old_pid and _get_pid_status(old_pid):
                 try:
                     import psutil as _psutil
-                    _psutil.Process(old_pid).terminate()
+                    # SIGKILL for immediate death — no graceful shutdown delay
+                    _psutil.Process(old_pid).kill()
                 except (_psutil.NoSuchProcess, _psutil.AccessDenied):
                     pass
 
-            # Dead-check loop
+            # Wait for process to die (shorter timeout since we use SIGKILL)
             timeout = int(env_config.get("QUICKROBOT_SERVER_SPAWN_TIMEOUT", 5))
             deadline = __import__("time").time() + timeout
             dead_verified = False
@@ -520,14 +537,27 @@ class QrMcpEngine(BaseEngine):
                 __import__("time").sleep(0.5)
 
             if not dead_verified:
-                print(f"[qr] mcp restart: old PID {old_pid} didn't exit within {timeout}s, force killing")
+                print(f"[qr] mcp restart: old PID {old_pid} didn't exit within {timeout}s")
+                # Already used SIGKILL, just continue — stale PID cleared above
+
+            # Wait for port to be fully released before spawning new process
+            import socket as _socket
+            mcp_port = int(inst.get("port_assigned") or env_config["QUICKROBOT_MCP_PORT"])
+            port_wait_start = __import__("time").time()
+            port_timeout = 3
+            while __import__("time").time() < port_wait_start + port_timeout:
                 try:
-                    import psutil as _psutil
-                    if _get_pid_status(old_pid):
-                        _psutil.Process(old_pid).kill()
-                        __import__("time").sleep(1)
+                    sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+                    sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+                    sock.connect(("127.0.0.1", mcp_port))
+                    sock.close()
+                    # Port still in use — old process lingering
+                    __import__("time").sleep(0.2)
+                except ConnectionRefusedError:
+                    # Port is free — we can start
+                    break
                 except Exception:
-                    pass
+                    break
 
             # Start new process
             return self.execute(instance_id, "start", db_path)

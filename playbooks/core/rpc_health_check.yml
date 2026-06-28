@@ -1,0 +1,34 @@
+# @name: RPC Health Check
+# @playbook_id: rpc_health_check
+# @version: 2
+# @timeout: 30
+# rpc_health_check.yml — Check systemd state of a single RPC instance.
+# Input variables: unit_name (e.g., qr-105-llama_rpc), rpc_id, inventory_host
+# Output: task results contain parsed JSON in debug msg → parsed by run_playbook()
+
+- hosts: "{{ inventory_host | default('localhost') }}"
+  become: yes
+  gather_facts: no
+
+  vars:
+    _unit_name: "{{ unit_name }}"
+
+  tasks:
+    - name: Get RPC service state from systemctl
+      shell: |
+        systemctl show "{{ _unit_name }}" \
+          -p ActiveState -p SubState -p MainPID 2>/dev/null || true
+      register: _svc_show
+      changed_when: false
+
+    - name: Extract service fields
+      set_fact:
+        _svc_state: >-
+          {{ (_svc_show.stdout | regex_findall('ActiveState=(.*)') | first | trim) | default('unknown') }}
+        _main_pid_raw: >-
+          {{ (_svc_show.stdout | regex_findall('MainPID=(.*)') | first | trim) | default('0') }}
+
+    - name: Output health result as JSON
+      debug:
+        msg: '{"rpc_id":{{ rpc_id|default(0) }}, "unit":"{{ _unit_name }}", "state":"{{ _svc_state }}", "pid":"{{ _main_pid_raw }}"}'
+      changed_when: false

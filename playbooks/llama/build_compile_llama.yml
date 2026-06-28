@@ -1,0 +1,71 @@
+# @name: Compile Build
+# @playbook_id: build_compile_llama
+# @version: 4
+# @timeout: 1800
+# compile.yml — Pull latest source, configure and build llama.cpp (cmake)
+- hosts: "{{ inventory_host | default('localhost') }}"
+  become_user: "{{ remote_node_user | default(omit) }}"
+  gather_facts: no
+
+  vars:
+    # These MUST be provided via extra_vars (from engine_configs or preset).
+    # No defaults — if missing, playbook fails with clear error.
+    cmake_configure_cmd: "{{ node_build_set_cmd }}"
+    cmake_build_cmd: "{{ node_build_run_cmd }}"
+
+  tasks:
+    - name: Pull latest source before compile (ensure upgrade on rebuild)
+      shell: "git pull || true"
+      args:
+        chdir: "{{ node_src_dir }}"
+      register: git_pull_compile
+      changed_when: "'Already up to date' not in (git_pull_compile.stdout | default(''))"
+      failed_when: false
+
+    - name: Check no stale cmake running before build
+      shell: pgrep -x cmake || true
+      register: cmake_pgrep
+      changed_when: false
+
+    - name: Fail if cmake already running on this node
+      fail:
+        msg: "cmake is already running on this node (PID {{ cmake_pgrep.stdout }}). Wait for it to finish."
+      when: cmake_pgrep.stdout | length > 0
+
+    - name: Ensure build directory exists
+      file:
+        path: "{{ node_build_dir | default('/opt/quickrobot/llama.cpp/build') }}"
+        state: directory
+        mode: '0755'
+
+    - name: Configure cmake for llama.cpp
+      shell: "{{ cmake_configure_cmd }}"
+      args:
+        chdir: "{{ node_src_dir | default('/opt/quickrobot/llama.cpp') }}"
+      register: cmake_configure_result
+      changed_when: "'-- Configuring' in cmake_configure_result.stdout"
+
+    - name: Build llama.cpp
+      shell: "{{ cmake_build_cmd }}"
+      args:
+        chdir: "{{ node_src_dir | default('/opt/quickrobot/llama.cpp') }}"
+      register: cmake_build_result
+      changed_when: false
+
+    - name: Verify binary was created
+      stat:
+        path: "{{ node_build_dir | default('/opt/quickrobot/llama.cpp/build') }}/bin/llama-server"
+      register: new_binary
+
+    - name: Fail if binary not found after build
+      fail:
+        msg: "Build failed — llama-server not found in {{ node_build_dir | default('/opt/quickrobot/llama.cpp/build') }}"
+      when: not new_binary.stat.exists
+
+    - name: Report compile status
+      debug:
+        msg: "compile built, binary_exists={{ new_binary.stat.exists | default(false) }}"
+
+    - name: Report git pull status
+      debug:
+        msg: "git_pull={{ 'pulled' if git_pull_compile.changed else 'up_to_date' }} ({{ git_pull_compile.stdout | default('') | trim | truncate(80) }})"

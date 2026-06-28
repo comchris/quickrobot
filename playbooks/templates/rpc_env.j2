@@ -1,2 +1,4 @@
+# @playbook_id: TEMPLATE_RPC_ENV
+# @version: 1
 {% for k, v in (merged_env | default({})).items() %}{% if v is not none and v != '' %}{{ k }}="{{ v | replace('"', '\\"') }}"
-{% endif %}{% endfor %}
+{% endif %}{% endfor %}QR_CLI_ARGS_JOINED="{{ cli_args_joined | default('') | replace('"', '\\"') }}"

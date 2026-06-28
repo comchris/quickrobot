@@ -1,0 +1,52 @@
+# @name: Deploy Config — Environment File
+# @playbook_id: deploy_config_env
+# @version: 2
+# @timeout: 60
+# deploy_config_env.yml — Write engine-specific env file from template
+# Runs as SSH user (no become). Directory creation is defensive idempotent.
+- hosts: "{{ inventory_host | default('localhost') }}"
+  # No become — SSH user owns /etc/quickrobot/{unit_name} from service playbook
+  gather_facts: no
+
+  vars:
+    unit_name: "qr-{{ instance_id }}-{{ engine_type }}"
+    env_file: "/etc/quickrobot/{{ unit_name }}.env"
+    # Template routing — mirrors lib/qr_engine_ids.py:_QR_ENGINES order
+    _qr_template_map:
+      llama_server: { env: "../templates/llama_server_env.j2",   svc: "../templates/llama_server_service.j2" }
+      llama_rpc:    { env: "../templates/rpc_env.j2",            svc: "../templates/rpc_service.j2" }
+      iperf3:       { env: "../templates/iperf3_env.j2",         svc: "../templates/iperf3_service.j2" }
+      universal:    { env: "../templates/universal_env.j2",      svc: "../templates/universal_service.j2" }
+
+  tasks:
+    - name: Create /etc/quickrobot directory (defensive, idempotent)
+      file:
+        path: "/etc/quickrobot"
+        state: directory
+        mode: '0755'
+      ignore_errors: yes
+
+    - name: Build CLI args string (CONFIG-1)
+      set_fact:
+        cli_args_joined: "{{ merged_cli_opts | default('') }}"
+
+    - name: Select env template from engine type
+      set_fact:
+        env_template: "{{ _qr_template_map[engine_type].env if engine_type in _qr_template_map else _qr_template_map['llama_server'].env }}"
+
+    - name: Write environment file from template
+      template:
+        src: "{{ env_template }}"
+        dest: "{{ env_file }}"
+        mode: '0644'
+
+    - name: Report env config status
+      debug:
+        msg: "env file written -- env_file={{ env_file }}"
+
+    - name: Verify permissions after env deploy (no-become context)
+      ansible.builtin.include_tasks: "verify_file_permissions.yml"
+      vars:
+        qr_verify_paths:
+          - { path: "/etc/quickrobot", expected_type: directory, expected_mode: '0755', expected_owner: "{{ remote_node_user | default(ansible_user) }}", expected_group: "{{ remote_node_user | default(ansible_user) }}" }
+          - { path: "{{ env_file }}", expected_type: file, expected_mode: '0644', expected_owner: "{{ remote_node_user | default(ansible_user) }}", expected_group: "{{ remote_node_user | default(ansible_user) }}" }

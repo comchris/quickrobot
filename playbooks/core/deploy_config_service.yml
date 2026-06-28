@@ -1,0 +1,67 @@
+# @name: Deploy Config — Service Unit
+# @playbook_id: deploy_config_service
+# @version: 2
+# @timeout: 60
+# deploy_config_service.yml — Create directories, write systemd service unit, reload daemon, set boot state
+# Runs as root (become: yes). No env file writing.
+- hosts: "{{ inventory_host | default('localhost') }}"
+  become: yes
+  gather_facts: no
+
+  vars:
+    unit_name: "qr-{{ instance_id }}-{{ engine_type }}"
+    env_file: "/etc/quickrobot/{{ unit_name }}.env"
+    # Template routing — mirrors lib/qr_engine_ids.py:_QR_ENGINES order
+    _qr_template_map:
+      llama_server: { env: "../templates/llama_server_env.j2",   svc: "../templates/llama_server_service.j2" }
+      llama_rpc:    { env: "../templates/rpc_env.j2",            svc: "../templates/rpc_service.j2" }
+      iperf3:       { env: "../templates/iperf3_env.j2",         svc: "../templates/iperf3_service.j2" }
+      universal:    { env: "../templates/universal_env.j2",      svc: "../templates/universal_service.j2" }
+
+  tasks:
+    - name: Create /etc/quickrobot directory
+      file:
+        path: "/etc/quickrobot"
+        state: directory
+        mode: '0755'
+        owner: "{{ remote_node_user | default(ansible_user) }}"
+        group: "{{ ansible_env.SUDO_USER | default(remote_node_user | default(ansible_user)) }}"
+
+    - name: Create per-instance unit directory
+      file:
+        path: "/opt/quickrobot/{{ unit_name }}"
+        state: directory
+        mode: '0755'
+        owner: "{{ remote_node_user | default(ansible_user) }}"
+        group: "{{ ansible_env.SUDO_USER | default(remote_node_user | default(ansible_user)) }}"
+
+    - name: Select service template from engine type
+      set_fact:
+        service_template: "{{ _qr_template_map[engine_type].svc if engine_type in _qr_template_map else _qr_template_map['llama_server'].svc }}"
+
+    - name: Generate systemd service unit from template
+      template:
+        src: "{{ service_template }}"
+        dest: "/etc/systemd/system/{{ unit_name }}.service"
+
+    - name: Reload systemd daemon
+      systemd:
+        name: "{{ unit_name }}"
+        daemon_reload: yes
+
+    - name: Set service boot state (start_on_boot)
+      systemd:
+        name: "{{ unit_name }}"
+        enabled: "{{ (start_on_boot is defined and start_on_boot) | bool }}"
+
+    - name: Report service config status
+      debug:
+        msg: "service config created -- unit_name={{ unit_name }}"
+
+    - name: Verify permissions after service deploy
+      ansible.builtin.include_tasks: "verify_file_permissions.yml"
+      vars:
+        qr_verify_paths:
+          - { path: "/etc/quickrobot", expected_type: directory, expected_mode: '0755', expected_owner: "{{ remote_node_user | default(ansible_user) }}", expected_group: "{{ remote_node_user | default(ansible_user) }}" }
+          - { path: "/opt/quickrobot/{{ unit_name }}", expected_type: directory, expected_mode: '0755', expected_owner: "{{ remote_node_user | default(ansible_user) }}", expected_group: "{{ remote_node_user | default(ansible_user) }}" }
+          - { path: "/etc/systemd/system/{{ unit_name }}.service", expected_type: file, expected_mode: '0644', expected_owner: root, expected_group: root }

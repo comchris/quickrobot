@@ -76,13 +76,45 @@
         .then(function(r) { return r.json(); })
         .then(function(data) {
           let p = data.data || {};
-          let modelPath = p.model_path || '';
-          let msg = 'Switch to preset "' + (p.name || 'preset #' + newPreset) + '"?\n\n';
-          if (modelPath) msg += 'Model: ' + modelPath + '\n';
-          if (p.category) msg += 'Category: ' + p.category + '\n';
-          if (p.tags) msg += 'Tags: ' + p.tags + '\n';
-          if (!confirm(msg)) { return; }
-          doPresetChange(instId, newPreset);
+          let details = [];
+          details.push('Switch to preset ' + p.id + ': "' + (p.name || '') + '"');
+          // Fetch model details if preset references a model
+          if (p.model_id) {
+            return fetch(API_BASE + "/engine/" + encodeURIComponent(engineType) + "/models/" + p.model_id)
+              .then(function(r) { return r.json(); })
+              .then(function(modelData) {
+                let m = modelData.data || {};
+                if (m.id && m.name) {
+                  var sizeStr = '';
+                  if (m.size_bytes !== undefined && m.size_bytes !== null) {
+                    var gb = (m.size_bytes / (1024*1024*1024));
+                    sizeStr = ' ' + gb.toFixed(2) + ' GB';
+                  }
+                  details.push('Model ' + m.id + ': "' + m.name + '" ' + (m.quantization || '') + sizeStr);
+                }
+                let instName = '';
+                if (instId) {
+                  var tr = document.querySelector('tr[data-inst-id="' + instId + '"]');
+                  if (tr) instName = tr.getAttribute('data-inst-name') || '';
+                }
+                details.push('On Instance: ' + instName);
+                if (p.category) details.push('Category: ' + p.category);
+                let msg = details.join('\n');
+                if (!confirm(msg)) return;
+                doPresetChange(instId, newPreset);
+              });
+          } else {
+            let instName = '';
+            if (instId) {
+              var tr2 = document.querySelector('tr[data-inst-id="' + instId + '"]');
+              if (tr2) instName = tr2.getAttribute('data-inst-name') || '';
+            }
+            details.push('On Instance: ' + instName);
+            if (p.category) details.push('Category: ' + p.category);
+            let msg = details.join('\n');
+            if (!confirm(msg)) return;
+            doPresetChange(instId, newPreset);
+          }
         }).catch(function() {
           if (!confirm('Switch to preset #' + newPreset + '?')) return;
           doPresetChange(instId, newPreset);
@@ -326,7 +358,9 @@
   function startAutoRefresh() {
     if (autoRefreshInterval) clearInterval(autoRefreshInterval);
     autoRefreshInterval = setInterval(function() {
-      loadResults();
+      let sortKey = qrSettings.get('benchmark', 'sort_col', '');
+      let sortDir = qrSettings.get('benchmark', 'sort_dir', 'desc');
+      loadResults(sortKey, sortDir);
     }, 5000);
   }
 
@@ -344,7 +378,7 @@
     let sel = document.getElementById("bench-filter");
     while (sel.options.length > 1) sel.remove(1);
     allInstances.forEach(function(inst) {
-      if (inst.state !== 'running' && inst.state !== 'loading') return;
+      if (inst.state !== 'running') return;
       if (inst.engine_type_name !== 'llama_server' && inst.engine_type_name !== 'llama.cpp') return;
       let opt = document.createElement("option");
       opt.value = inst.id;
@@ -364,7 +398,7 @@
   });
 
 // --- Load results table (consolidated: running first, then completed/failed) ---
-  function loadResults() {
+  function loadResults(sortKey, sortDir) {
     let filterVal = document.getElementById("bench-filter").value;
     let limitVal = document.getElementById("result-limit").value;
     let url = API_BASE + "/benchmarks/results?instance_id=" + encodeURIComponent(filterVal) + "&limit=" + encodeURIComponent(limitVal);
@@ -376,12 +410,12 @@
         // Running: success is 0 or missing (incomplete); Done: success=1 or success=-1
         let running = all.filter(function(r){ return r.success === BENCH_RUNNING || r.success == null; });
         let done = all.filter(function(r){ return r.success !== BENCH_RUNNING && r.success != null; });
-        renderResultsTable(running.concat(done), "results-body");
+        renderResultsTable(running.concat(done), "results-body", sortKey, sortDir);
       });
   }
 
   // --- Render results table ---
-  function renderResultsTable(items, tbodyId) {
+  function renderResultsTable(items, tbodyId, sortKey, sortDir) {
     let tbody = document.getElementById(tbodyId);
     tbody.innerHTML = "";
     if (items.length === 0) {
@@ -396,6 +430,11 @@
 
     running.forEach(function(r) { renderRow(r, tbody, true); });
     done.forEach(function(r) { renderRow(r, tbody, false); });
+
+    // Re-apply sort if we have saved sort state (auto-refresh or manual re-sort)
+    if (sortKey && sortDir) {
+      _applyTableSort(tbody, sortKey, sortDir);
+    }
   }
 
   function renderRow(r, tbody, isRunning) {
@@ -417,11 +456,11 @@
     let instName = _instMap[r.instance_id]?.name || '?';
 
     let timeStr = (r.started_at || '-');
-    tr.innerHTML = '<td>' + (r.run_id || '?') + '</td>' +
-                   '<td>' + timeStr + '</td>' +
+    tr.innerHTML = '<td>' + timeStr + '</td>' +
                    '<td class="bench-inst-name" style="cursor:pointer;color:#1565c0;" title="Click to select instance">' + instName + '</td>' +
                    '<td>' + (r.prompt_name || '-') + '</td>' +
                    '<td>' + (r.model_name || '-') + '</td>' +
+                   '<td>' + (r.preset_name || '-') + '</td>' +
                    '<td>' + dur + '</td>' +
                    '<td>' + pps + '</td>' +
                    '<td>' + ops + '</td>' +
@@ -429,8 +468,8 @@
                    '<td><button class="btn btn-primary" style="font-size:0.8em;padding:2px 6px;" onclick="viewResult(\'' + r.run_id + '\')">View</button> <button class="btn btn-danger bench-del-btn" data-id="' + r.run_id + '" title="Delete this result" style="font-size:0.7em;padding:1px 4px;">&#10006;</button></td>';
     tbody.appendChild(tr);
 
-    // Add click handler on instance name cell to select the instance (now col 2)
-    let instCell = tr.cells[2];
+    // Add click handler on instance name cell to select the instance (now col 1)
+    let instCell = tr.cells[1];
     instCell.addEventListener('click', function() {
       document.getElementById("instance-select").value = r.instance_id;
       document.getElementById("instance-select").dispatchEvent(new Event('change'));
@@ -445,8 +484,13 @@
         fetch(API_BASE + '/benchmarks/results/' + rid, { method: 'DELETE' })
           .then(function(r) { return r.json(); })
           .then(function(data) {
-            if (data.status === 'ok') { loadResults(); }
-            else { alert('Delete failed: ' + (data.message || JSON.stringify(data))); }
+            if (data.status === 'ok') {
+              let sortKey = qrSettings.get('benchmark', 'sort_col', '');
+              let sortDir = qrSettings.get('benchmark', 'sort_dir', 'desc');
+              loadResults(sortKey, sortDir);
+            } else {
+              alert('Delete failed: ' + (data.message || JSON.stringify(data)));
+            }
           })
           .catch(function(e) { alert('Error: ' + e); });
       });
@@ -523,17 +567,59 @@
 
   // --- Results table sorting (standard data-col pattern from sortable_tables.md) ---
   // Column index map by name — if columns reorder, update this mapping only
-  let _SORT_COLS = {id:0, time:1, instance:2, prompt:3, model:4, duration:5, pps:6, ops:7};
+  let _SORT_COLS = {time:0, instance:1, prompt:2, model:3, preset:4, duration:5, pps:6, ops:7};
   // Numeric-sortable column indices
-  let _NUM_COLS = {0: true, 5: true, 6: true, 7: true};
+  let _NUM_COLS = {5: true, 6: true, 7: true};
+
+  // Apply sort to existing table rows (used by auto-refresh to restore sort state)
+  function _applyTableSort(tbody, sortKey, sortDir) {
+    let col = _SORT_COLS[sortKey];
+    if (col === undefined) return;
+    let rows = Array.from(tbody.rows);
+    if (rows.length <= 1) return;
+
+    rows.sort(function(a, b) {
+      let cellA = a.cells[col] ? a.cells[col].textContent.trim() : '';
+      let cellB = b.cells[col] ? b.cells[col].textContent.trim() : '';
+      if (col in _NUM_COLS) {
+        let na = parseFloat(cellA.replace(/[^0-9.]/g, '')) || 0;
+        let nb = parseFloat(cellB.replace(/[^0-9.]/g, '')) || 0;
+        return sortDir === 'asc' ? na - nb : nb - na;
+      }
+      return sortDir === 'asc' ? cellA.localeCompare(cellB) : cellB.localeCompare(cellA);
+    });
+
+    rows.forEach(function(row) { tbody.appendChild(row); });
+  }
+
+  // Restore saved sort headers on page load
+  (function() {
+    let savedCol = qrSettings.get('benchmark', 'sort_col', '');
+    let savedDir = qrSettings.get('benchmark', 'sort_dir', 'desc');
+    if (!savedCol) return;
+
+    document.querySelectorAll('#results-table .sortable').forEach(function(t) {
+      t.textContent = t.textContent.replace(/\s*[\u2191\u2193]\s*$/, '').trim();
+    });
+    let targetTh = document.querySelector('#results-table .sortable[data-col="' + _SORT_COLS[savedCol] + '"]');
+    if (targetTh) {
+      let arrow = savedDir === 'asc' ? ' \u2191' : ' \u2193';
+      targetTh.textContent = targetTh.textContent.trim() + arrow;
+    }
+  })();
 
   document.querySelectorAll('#results-table .sortable').forEach(function(th) {
     th.style.cursor = 'pointer';
     th.addEventListener('click', function() {
       let col = parseInt(this.getAttribute('data-col'), 10);
-      let key = 'sort_bench_' + col;
-      let dir = sessionStorage.getItem(key) === 'desc' ? 'asc' : 'desc';
-      sessionStorage.setItem(key, dir);
+      let key = '';
+      for (let k in _SORT_COLS) { if (_SORT_COLS[k] === col) { key = k; break; } }
+      if (!key) return;
+
+      let dir = qrSettings.get('benchmark', 'sort_dir', 'desc');
+      dir = dir === 'desc' ? 'asc' : 'desc';
+      qrSettings.set('benchmark', 'sort_col', key);
+      qrSettings.set('benchmark', 'sort_dir', dir);
 
       // Update arrows on all sortable headers
       document.querySelectorAll('#results-table .sortable').forEach(function(t) {
@@ -544,23 +630,7 @@
 
       // Sort tbody rows in place
       let tbody = document.getElementById('results-body');
-      let rows = Array.from(tbody.rows);
-      if (rows.length <= 1) return;
-
-      rows.sort(function(a, b) {
-        let cellA = a.cells[col] ? a.cells[col].textContent.trim() : '';
-        let cellB = b.cells[col] ? b.cells[col].textContent.trim() : '';
-        // Numeric sort: ID(0), Duration(5), Prompt/s(6), Pred/s(7)
-        if (col in _NUM_COLS) {
-          let na = parseFloat(cellA.replace(/[^0-9.]/g, '')) || 0;
-          let nb = parseFloat(cellB.replace(/[^0-9.]/g, '')) || 0;
-          return dir === 'asc' ? na - nb : nb - na;
-        }
-        // String sort with direction from sessionStorage
-        return dir === 'asc' ? cellA.localeCompare(cellB) : cellB.localeCompare(cellA);
-      });
-
-      rows.forEach(function(row) { tbody.appendChild(row); });
+      _applyTableSort(tbody, key, dir);
     });
   });
 
@@ -571,7 +641,9 @@
 
   // --- Refresh button ---
   document.getElementById("refresh-results-btn").addEventListener("click", function() {
-    loadResults();
+    let sortKey = qrSettings.get('benchmark', 'sort_col', '');
+    let sortDir = qrSettings.get('benchmark', 'sort_dir', 'desc');
+    loadResults(sortKey, sortDir);
   });
 
   // --- Clear results button ---

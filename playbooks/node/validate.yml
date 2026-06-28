@@ -1,17 +1,20 @@
-# @name: Validate
-# @playbook_id: NODE_VALIDATE_V1
-# @version: 1
+# @name: Validate Node
+# @playbook_id: node_validate
+# @version: 2
 # @timeout: 300
-# validate_node.yml — Collect full node inventory (IPs, CPU, RAM, OS)
+# validate_node.yml — Collect full node inventory (IPs, CPU, RAM, OS, GPU)
 # Used during node creation to verify SSH and gather hardware info
+# RUNNER-1 compatible structured output via set_fact + debug
+
 - hosts: all
   gather_facts: no
   become: yes
-  tasks:
-    - name: Check connectivity
+  pre_tasks:
+    - name: Verify host is reachable
       ansible.builtin.ping:
 
-    - name: Ensure /opt/quickrobot is owned by ansible user
+  tasks:
+    - name: Ensure /opt/quickrobot exists
       ansible.builtin.file:
         path: "/opt/quickrobot"
         state: directory
@@ -19,7 +22,7 @@
         group: "{{ ansible_user }}"
         mode: '0755'
 
-    - name: Get all interface IPs (IPv4 + IPv6)
+    - name: Collect IPs (IPv4 + IPv6)
       ansible.builtin.command: ip addr show scope global
       register: _ip_output
       changed_when: false
@@ -136,17 +139,26 @@
       changed_when: false
       failed_when: false
 
+    # Accept binary_path override via extra_vars; fallback to convention defaults
+    - name: Set binary paths (dynamic from extra_vars or default)
+      set_fact:
+        _bin_llama: "{{ binary_path | default('') }}"
+        _bin_rpc: "{{ binary_path | default('') }}"
+        _fallback_ls: "/opt/quickrobot/llama.cpp/build/bin/llama-server"
+        _fallback_rs: "/opt/quickrobot/llama.cpp/build/bin/ggml-rpc-server"
+      changed_when: false
+
     - name: Check binary existence (llama-server + rpc-server)
       ansible.builtin.shell: |
-        _ls=/opt/quickrobot/llama.cpp/build/bin/llama-server
-        _rs=/opt/quickrobot/llama.cpp/build/bin/rpc-server
+        _ls={{ _bin_llama if (engine_type | default('')) == 'llama_server' else _fallback_ls }}
+        _rs={{ _bin_rpc if (engine_type | default('')) == 'rpc' else _fallback_rs }}
         [ -x "$_ls" ] && echo "ls=OK" || echo "ls=MISSING"
         [ -x "$_rs" ] && echo "rs=OK" || echo "rs=MISSING"
       register: _binary_check
       changed_when: false
       failed_when: false
 
-    - name: Determine GPU info
+    - name: Set structured GPU facts
       ansible.builtin.set_fact:
         _gpu_name: >-
           {% if _nvidia_output.stdout and _nvidia_output.stdout | length > 0 %}
@@ -168,7 +180,7 @@
           {% endif %}
         _gpu_memory_mb: "{{ (_nvidia_output.stdout.split(',')[1] | trim | int if (_nvidia_output.rc == 0 and _nvidia_output.stdout | length > 0) else None) }}"
 
-    - name: Output inventory JSON
+    - name: Output structured inventory
       ansible.builtin.debug:
         msg:
           connectivity: ok

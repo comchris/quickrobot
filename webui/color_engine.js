@@ -244,6 +244,28 @@ function discoStart(mood) {
       }
     },
 
+    // Re-apply button colors from CSS variables — called by base.html on slider change
+    refreshButtons: function() {
+      var btns = document.querySelectorAll('.inst-action');
+      for (var i = 0; i < btns.length; i++) {
+        var cls = btns[i].className;
+        var colorKey = null;
+        if (cls.indexOf('btn-primary') !== -1) colorKey = 'btn-primary';
+        else if (cls.indexOf('btn-danger') !== -1) colorKey = 'btn-danger';
+        else if (cls.indexOf('btn-success') !== -1) colorKey = 'btn-success';
+        else if (cls.indexOf('btn-warning') !== -1) colorKey = 'btn-warning';
+        else if (cls.indexOf('btn-secondary') !== -1) colorKey = 'btn-secondary';
+        if (!colorKey) continue;
+        try {
+          var bg = getComputedStyle(document.documentElement).getPropertyValue('--' + colorKey).trim();
+          btns[i].style.setProperty('background', bg || '', '');
+          if (colorKey === 'btn-primary') {
+            btns[i].style.setProperty('color', '#1a1a2e', '');
+          }
+        } catch(e) {}
+      }
+    },
+
     generateCSS: function() {
       var rules = [];
       var mappings = [
@@ -450,6 +472,7 @@ function discoStart(mood) {
           rafPending = false;
           var colors = self.compute(currentP, currentM);
           self.apply(colors);
+          self.refreshButtons(); // update dynamic action button colors
           self.save(currentP, currentM);
           updateDisplay();
         });

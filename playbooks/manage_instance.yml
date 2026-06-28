@@ -1,6 +1,6 @@
 # @name: Manage Instance
-# @playbook_id: MANAGE_INSTANCE_V1
-# @version: 1
+# @playbook_id: manage_instance
+# @version: 2
 # @timeout: 120
 # manage_instance.yml — Universal start/stop/restart for any engine type
 - hosts: "{{ inventory_host }}"

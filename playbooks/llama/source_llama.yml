@@ -1,0 +1,50 @@
+# @name: Source Clone / Update
+# @playbook_id: source_llama
+# @version: 3
+# @timeout: 600
+# source.yml — Clone or update llama.cpp source code on the node
+- hosts: "{{ inventory_host | default('localhost') }}"
+  become_user: "{{ remote_node_user | default(omit) }}"
+  gather_facts: no
+
+  vars:
+    # These MUST be provided via extra_vars. No defaults — fail if missing.
+    git_repo_url: "{{ git_clone_url }}"
+    _node_src_dir: "{{ node_src_dir }}"
+
+  tasks:
+    - name: Check if source directory is a git repo
+      stat:
+        path: "{{ _node_src_dir }}/.git"
+      register: git_repo_exists
+
+    - name: Clone llama.cpp to shared node source dir
+      ansible.builtin.git:
+        repo: "{{ git_repo_url }}"
+        dest: "{{ _node_src_dir }}"
+        version: master
+      when: not git_repo_exists.stat.exists
+      register: git_clone_result
+      retries: 2
+      delay: 10
+
+    - name: Pull latest source
+      shell: "{{ node_git_pull_cmd }}"
+      args:
+        chdir: "{{ _node_src_dir }}"
+      when: git_repo_exists.stat.exists
+      register: git_pull_result
+      changed_when: "'Already up to date' not in git_pull_result.stdout"
+      failed_when: false
+
+    - name: Get short commit hash
+      shell: git rev-parse --short=7 HEAD
+      args:
+        chdir: "{{ _node_src_dir }}"
+      become_user: "{{ remote_node_user | default(omit) }}"
+      register: commit_hash
+      changed_when: false
+
+    - name: Report source status
+      debug:
+        msg: "source action={{ 'cloned' if not git_repo_exists.stat.exists else 'pulled' }}, commit={{ commit_hash.stdout | default('N/A') }}"

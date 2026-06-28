@@ -1,6 +1,6 @@
 # @name: Update Config
-# @playbook_id: UPDATE_CONFIG_V1
-# @version: 1
+# @playbook_id: update_config
+# @version: 2
 # @timeout: 600
 # update_config.yml — Config-only update for llama_server and rpc instances
 # Writes env file, regenerates systemd unit, reloads + restarts service.
@@ -49,6 +49,11 @@
         state: directory
         mode: '0755'
 
+    # Build CLI args string (CONFIG-1) — converts list to space-joined string for env templates
+    - name: Build CLI args string (CONFIG-1)
+      set_fact:
+        cli_args_joined: "{{ merged_cli_opts | default('') }}"
+
     # --- Write env file (engine-specific template) ---
     - name: Write environment file from template (llama_server)
       when: engine_type == "llama_server"
@@ -68,7 +73,7 @@
     - name: Build ExecStart line (rpc)
       when: engine_type == "llama_rpc"
       set_fact:
-        exec_start_line: "ExecStart={{ binary_path }}{% if merged_cli_opts is defined and merged_cli_opts %} {{ merged_cli_opts | join(' ') }}{% endif %}"
+        exec_start_line: "ExecStart={{ binary_path }}{% if merged_cli_opts is defined and merged_cli_opts %} {{ merged_cli_opts }}{% endif %}"
 
     - name: Generate systemd service unit (llama_server)
       when: engine_type == "llama_server"
@@ -100,3 +105,12 @@
     - name: Record update success
       set_fact:
         update_success: true
+
+    - name: Verify permissions after config update
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/core/verify_file_permissions.yml"
+      vars:
+        qr_verify_paths:
+          - { path: "/etc/quickrobot", expected_type: directory, expected_mode: '0755', expected_owner: root, expected_group: root }
+          - { path: "/opt/quickrobot/{{ unit_name }}", expected_type: directory, expected_mode: '0755', expected_owner: "{{ remote_node_user }}", expected_group: "{{ remote_node_user }}" }
+          - { path: "{{ env_file }}", expected_type: file, expected_mode: '0644', expected_owner: root, expected_group: root }
+          - { path: "/etc/systemd/system/{{ unit_name }}.service", expected_type: file, expected_mode: '0644', expected_owner: root, expected_group: root }

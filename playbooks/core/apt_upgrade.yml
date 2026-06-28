@@ -1,0 +1,14 @@
+# @name: Apt Upgrade
+# @playbook_id: apt_upgrade
+# @version: 2
+# @timeout: 900
+# apt_upgrade.yml — Run apt upgrade on a remote node (RUNNER-1 compatible)
+- hosts: "{{ inventory_host }}"
+  become: yes
+  gather_facts: no
+  tasks:
+    - name: Run apt upgrade (non-interactive)
+      ansible.builtin.apt:
+        upgrade: dist
+        update_cache: yes
+        force_apt_get: yes

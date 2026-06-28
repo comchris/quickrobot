@@ -23,8 +23,9 @@
   <!-- LEFT PANEL: Llama-server list -->
   <div class="herd-panel herd-left" id="herd-left-panel">
     <div class="herd-panel-header">
-      <h2 style="margin:0;font-size:1.3em;">Herd — Llama-servers</h2>
-      <small style="color:#888;">Click a row to manage cluster bindings</small>
+      <h2 style="margin:0;font-size:1.3em;display:inline-block;">Herd — Llama-servers</h2>
+      <button id="herd-refresh-btn" class="btn btn-primary" style="padding:3px 8px;font-size:0.8em;" title="Refresh herd data">↻ Refresh</button>
+      <small style="color:#888;display:block;margin-top:4px;">Click a row to manage cluster bindings</small>
     </div>
     <table class="herd-server-table" id="herd-server-table">
       <thead>
@@ -32,14 +33,15 @@
           <th class="sortable" data-col="0">ID</th>
           <th class="sortable" data-col="1">Name</th>
           <th class="sortable" data-col="2">Host</th>
-          <th class="sortable" data-col="3">State</th>
-          <th class="sortable" data-col="4">Mode</th>
-          <th class="sortable" data-col="5">RPC</th>
-          <th class="sortable" data-col="6">Tensor Split</th>
+          <th class="sortable" data-col="3">Mode</th>
+          <th class="sortable" data-col="4">RPC</th>
+          <th class="sortable" data-col="5">Tensor Split</th>
+          <th class="sortable" data-col="6">State</th>
+          <th class="sortable" data-col="7">Actions</th>
         </tr>
       </thead>
       <tbody id="herd-servers-tbody">
-        <tr><td colspan="7" style="text-align:center;color:#888;">Loading...</td></tr>
+        <tr><td colspan="8" style="text-align:center;color:#888;">Loading...</td></tr>
       </tbody>
     </table>
   </div>
@@ -63,19 +65,19 @@
       <table class="herd-bindings-table" id="herd-bindings-table">
         <thead>
           <tr>
-            <th>ID</th>
-            <th>Name</th>
-            <th>Host</th>
-            <th>Port</th>
-            <th>Split</th>
-            <th>Experts</th>
-            <th>Draft</th>
-            <th>State</th>
-            <th>Action</th>
-          </tr>
+             <th>ID</th>
+             <th>Name</th>
+             <th>Host</th>
+             <th>Port</th>
+             <th>Split</th>
+             <th>Expert-Split</th>
+             <th>Draft-offload</th>
+             <th>State</th>
+             <th>Actions</th>
+           </tr>
         </thead>
         <tbody id="herd-bindings-tbody">
-          <tr><td colspan="9" style="text-align:center;color:#888;">No bindings</td></tr>
+          <tr><td colspan="9" style="text-align:center;color:#888;">No RPC bindings</td></tr>
         </tbody>
       </table>
       <div style="display:flex;gap:8px;align-items:center;margin-top:8px;padding-top:8px;border-top:1px solid #eee;">
@@ -86,9 +88,10 @@
       </div>
     </div>
 
-   <!-- Split configuration -->
-     <div class="detail-card" style="margin-bottom:12px;">
-       <label>Split Configuration</label>
+     <!-- Tensor split & device settings -->
+      <details class="detail-card" open style="margin-bottom:12px;">
+        <summary style="cursor:pointer;color:#aaa;font-size:0.95em;padding:4px 0;">Tensor Split & Device Settings</summary>
+        <div style="margin-top:8px;">
        <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
          <div>
            <label style="font-size:0.8em;color:#666;display:block;margin-bottom:2px;">Split Mode</label>
@@ -98,25 +101,21 @@
              <option value="tensor">Tensor</option>
            </select>
          </div>
-         <div style="min-width:180px;">
-           <label style="font-size:0.8em;color:#666;display:block;margin-bottom:2px;">Split Value (GPU slot contribution)</label>
-           <input type="text" id="herd-split-value-input" placeholder="Select or type 0-100" style="width:180px;padding:4px;border:1px solid #ccc;border-radius:3px;" title="Preset: None/0/1/2/3/4/5/10/25/50/75/100, or custom value">
-           <div style="display:flex;gap:4px;margin-top:4px;">
-             <button onclick="setSplitPreset('')" style="font-size:0.7em;padding:2px 6px;border:1px solid #ccc;border-radius:2px;background:#fff;cursor:pointer;">None</button>
-             <button onclick="setSplitPreset('0')" style="font-size:0.7em;padding:2px 6px;border:1px solid #ccc;border-radius:2px;background:#fff;cursor:pointer;">0</button>
-             <button onclick="setSplitPreset('1')" style="font-size:0.7em;padding:2px 6px;border:1px solid #ccc;border-radius:2px;background:#fff;cursor:pointer;">1</button>
-             <button onclick="setSplitPreset('5')" style="font-size:0.7em;padding:2px 6px;border:1px solid #ccc;border-radius:2px;background:#fff;cursor:pointer;">5</button>
-             <button onclick="setSplitPreset('10')" style="font-size:0.7em;padding:2px 6px;border:1px solid #ccc;border-radius:2px;background:#fff;cursor:pointer;">10</button>
-             <button onclick="setSplitPreset('25')" style="font-size:0.7em;padding:2px 6px;border:1px solid #ccc;border-radius:2px;background:#fff;cursor:pointer;">25</button>
-             <button onclick="setSplitPreset('50')" style="font-size:0.7em;padding:2px 6px;border:1px solid #ccc;border-radius:2px;background:#fff;cursor:pointer;">50</button>
-             <button onclick="setSplitPreset('75')" style="font-size:0.7em;padding:2px 6px;border:1px solid #ccc;border-radius:2px;background:#fff;cursor:pointer;">75</button>
-             <button onclick="setSplitPreset('100')" style="font-size:0.7em;padding:2px 6px;border:1px solid #ccc;border-radius:2px;background:#fff;cursor:pointer;">100</button>
-           </div>
-         </div>
-         <div style="flex:1;min-width:120px;">
-            <label style="font-size:0.8em;color:#666;display:block;margin-bottom:2px;">Tensor Split (computed)</label>
-            <span id="herd-tensor-split" style="display:inline-block;background:#f5f5f5;padding:3px 6px;border-radius:3px;font-size:0.85em;white-space:nowrap;font-family:Cascadia Code,Consolas,Monaco,monospace;">-</span>
+          <div style="min-width:340px;display:flex;align-items:flex-end;gap:6px;">
+            <div>
+              <label style="font-size:0.8em;color:#666;display:block;margin-bottom:2px;">Split Value</label>
+              <input type="text" id="herd-split-value-input" placeholder="0-100" style="width:70px;padding:3px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;" title="GPU slot contribution (0-100), or empty for None">
+            </div>
+            <div style="display:flex;gap:4px;padding-bottom:2px;">
+              <button onclick="setSplitPreset('0')" style="font-size:0.75em;padding:3px 8px;border:1px solid #bbb;border-radius:3px;background:#fff;cursor:pointer;">0</button>
+              <button onclick="setSplitPreset('100')" style="font-size:0.75em;padding:3px 8px;border:1px solid #bbb;border-radius:3px;background:#fff;cursor:pointer;">100</button>
+              <button onclick="setSplitNone()" style="font-size:0.75em;padding:3px 10px;border:1px solid #bbb;border-radius:3px;background:#fff;cursor:pointer;font-weight:bold;color:#d32f2f;" title="Clear split value — CPU-only mode">None</button>
+            </div>
           </div>
+          <div style="flex:1;min-width:200px;">
+             <label style="font-size:0.8em;color:#666;display:block;margin-bottom:2px;">LLAMA_ARG_TENSOR_SPLIT</label>
+             <span id="herd-tensor-split" style="display:inline-block;background:#f5f5f5;padding:3px 6px;border-radius:3px;font-size:0.85em;white-space:nowrap;font-family:Cascadia Code,Consolas,Monaco,monospace;">-</span>
+           </div>
           <div style="min-width:80px;flex:0 0 auto;">
             <label style="font-size:0.8em;color:#666;display:block;margin-bottom:2px;">Device Flags</label>
             <span id="herd-dev-flag" style="display:inline-block;background:#fff3e0;padding:3px 6px;border-radius:3px;font-size:0.85em;white-space:nowrap;color:#e65100;font-family:Cascadia Code,Consolas,Monaco,monospace;word-break:break-all;">-</span>
@@ -130,24 +129,70 @@
            </div>
            <span id="herd-gpu-override-status" style="font-size:0.8em;color:#888;display:block;margin-top:2px;"></span>
        </div>
-     </div>
+      </div>
+      </details>
 
-   <!-- CLI Flags (per-instance command-line injection) -->
-     <div class="detail-card" style="margin-bottom:12px;">
-       <label>CLI Flags <span id="herd-flags-count" style="color:#888;font-weight:normal;font-size:0.85em;">(0)</span></label>
-       <p style="color:#888;font-size:0.8em;margin-bottom:8px;">Toggle CLI flags for llama-server. Check a flag to enable it, uncheck to disable.</p>
-       <div id="herd-flags-grid">
-         <!-- Flags injected as .herd-flag-row by JS -->
-       </div>
-       <div style="display:flex;gap:8px;align-items:center;border-top:1px solid #eee;padding-top:8px;margin-top:4px;">
-         <button class="btn btn-primary" onclick="herdSaveCliFlags()" id="herd-flags-save-btn" style="width:auto;font-size:0.85em;">Save Flags</button>
-         <span id="herd-flags-status" style="color:#888;font-size:0.85em;"></span>
-       </div>
-     </div>
+      <!-- Expert Split Configuration -->
+      <details class="detail-card" open style="margin-bottom:12px;">
+        <summary style="cursor:pointer;color:#aaa;font-size:0.95em;padding:4px 0;">Expert Split Configuration for MoE Models</summary>
+        <div style="margin-top:8px;">
+          <p style="color:#888;font-size:0.8em;margin-bottom:8px;">Configure how expert layers are distributed across bound RPC nodes for MoE (Mixture-of-Experts) models. Set "Expert-Split" value > 0 in the table above to enable for each RPC.</p>
+        <!-- Template row -->
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;padding:6px;background:#f9f9f9;border-radius:4px;">
+          <label style="font-size:0.8em;color:#666;min-width:80px;">Prefix:</label>
+          <input type="text" id="herd-es-prefix" value="blk." style="width:80px;padding:3px;border:1px solid #ccc;border-radius:3px;font-family:monospace;" placeholder="e.g. blk.">
+          <label style="font-size:0.8em;color:#666;min-width:80px;">Suffix:</label>
+          <input type="text" id="herd-es-suffix" value="ffn_(up|gate|down|gate_up)_exps.*" style="width:400px;padding:3px;border:1px solid #ccc;border-radius:3px;font-family:monospace;" placeholder="e.g. ffn_(up|gate|down|gate_up)_exps.*">
+          <button class="btn btn-primary" onclick="saveExpertSplitTemplate()" style="font-size:0.75em;padding:3px 8px;">Save</button>
+          <span style="color:#ccc;">|</span>
+          <label style="font-size:0.8em;color:#666;">All RPCs:</label>
+          <select id="herd-es-all-mode" onchange="setAllExpertModes(this.value)" style="width:130px;padding:3px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+            <option value="">— keep current —</option>
+            <option value="a">A — Stride</option>
+            <option value="b">B — Block</option>
+            <option value="c">C — Load-Dist</option>
+            <option value="f">F — Freeform</option>
+          </select>
+        </div>
+        <!-- Per-RPC expert config -->
+        <table style="width:100%;border-collapse:collapse;">
+          <thead>
+            <tr style="border-bottom:1px solid #ddd;">
+              <th style="text-align:left;padding:4px;font-size:0.8em;color:#666;">RPC</th>
+              <th style="text-align:left;padding:4px;font-size:0.8em;color:#666;">Experts</th>
+              <th style="text-align:left;padding:4px;font-size:0.8em;color:#666;">Mode</th>
+              <th style="text-align:left;padding:4px;font-size:0.8em;color:#666;">Preview</th>
+            </tr>
+          </thead>
+          <tbody id="herd-expert-split-tbody"></tbody>
+        </table>
+        <!-- Live -ot flag preview -->
+        <div style="margin-top:8px;padding:6px;background:#fff3e0;border-radius:4px;">
+          <label style="font-size:0.8em;color:#e65100;display:block;margin-bottom:2px;">Generated -ot Flags (preview)</label>
+          <div id="herd-expert-flags-preview" style="font-family:Cascadia Code,Consolas,Monaco,monospace;font-size:0.8em;white-space:pre-wrap;color:#bf360c;">(no bindings with expert-split enabled)</div>
+        </div>
+        </div>
+      </details>
 
-    <!-- ENV Overrides (per-instance environment variable overrides) -->
-    <div class="detail-card" style="margin-bottom:12px;">
-      <label>ENV Overrides <span id="herd-ov-count" style="color:#888;font-weight:normal;font-size:0.85em;">(0 active)</span></label>
+    <!-- CLI Flags (per-instance command-line injection) -->
+     <details class="detail-card" open style="margin-bottom:12px;">
+       <summary style="cursor:pointer;color:#aaa;font-size:0.95em;padding:4px 0;">CLI Flags <span id="herd-flags-count" style="color:#888;font-weight:normal;font-size:0.85em;">(0 active)</span></summary>
+       <div style="margin-top:8px;">
+        <p style="color:#888;font-size:0.8em;margin-bottom:8px;">Toggle CLI flags for llama-server. Check a flag to enable it, uncheck to disable.</p>
+        <div id="herd-flags-grid">
+          <!-- Flags injected as .herd-flag-row by JS -->
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;border-top:1px solid #eee;padding-top:8px;margin-top:4px;">
+          <button class="btn btn-primary" onclick="herdSaveCliFlags()" id="herd-flags-save-btn" style="width:auto;font-size:0.85em;">Save Flags</button>
+          <span id="herd-flags-status" style="color:#888;font-size:0.85em;"></span>
+        </div>
+       </div>
+     </details>
+
+     <!-- ENV Overrides (per-instance environment variable overrides) -->
+    <details class="detail-card" open style="margin-bottom:12px;">
+      <summary style="cursor:pointer;color:#aaa;font-size:0.95em;padding:4px 0;">ENV Overrides <span id="herd-ov-count" style="color:#888;font-weight:normal;font-size:0.85em;">(0 active)</span></summary>
+      <div style="margin-top:8px;">
       <p style="color:#888;font-size:0.8em;margin-bottom:8px;">Environment variable overrides that take effect on next deploy/restart. Unchecked = uses preset/engine default.</p>
       <div id="herd-env-overrides-grid">
         <!-- ENV override rows injected by JS -->
@@ -156,18 +201,25 @@
         <button class="btn btn-primary" onclick="herdSaveEnvOverrides()" id="herd-env-save-btn" style="width:auto;font-size:0.85em;">Save ENV Overrides</button>
         <span id="herd-env-status" style="color:#888;font-size:0.85em;"></span>
       </div>
-    </div>
+      </div>
+    </details>
 
     <!-- Deploy action (buttons inline, restart merged into same row) -->
     <div class="detail-card">
       <label>Update</label>
-      <div style="display:flex;gap:8px;align-items:center;">
-        <button class="btn btn-primary" onclick="showDeployPreview()" id="herd-preview-btn" style="width:auto;">CLI & Env Preview</button>
-        <button class="btn btn-success" onclick="herdDeploy()" id="herd-deploy-btn">Deploy config</button>
-        <button class="btn btn-primary" onclick="herdRestart()" id="herd-restart-btn" style="width:auto;">Restart to apply</button>
-        <span id="herd-deploy-status" style="color:#888;font-size:0.85em;margin-left:8px;flex:1;"></span>
-      </div>
-      <pre id="herd-preview-output" style="background:#1e1e1e;color:#d4d4d4;padding:12px;border-radius:4px;font-size:0.8em;max-height:300px;overflow:auto;display:none;white-space:pre-wrap;word-break:break-all;font-weight:normal;font-family:Cascadia Code,Consolas,Monaco,monospace;margin-top:8px;"></pre>
+       <div style="display:flex;gap:8px;align-items:center;">
+         <button class="btn btn-primary" onclick="showDeployPreview()" id="herd-preview-btn" style="width:auto;">CLI & Env Preview</button>
+         <button class="btn btn-warning" onclick="showLayerBreakdown()" id="herd-layers-btn" style="width:auto;">Debug / Layers</button>
+          <button class="btn btn-success" onclick="herdDeploy()" id="herd-deploy-btn">Deploy Config & Restart</button>
+         <span id="herd-deploy-status" style="color:#888;font-size:0.85em;margin-left:8px;flex:1;"></span>
+       </div>
+       <pre id="herd-preview-output" style="background:#1e1e1e;color:#d4d4d4;padding:12px;border-radius:4px;font-size:0.8em;max-height:300px;overflow:auto;display:none;white-space:pre-wrap;word-break:break-all;font-weight:normal;font-family:Cascadia Code,Consolas,Monaco,monospace;margin-top:8px;"></pre>
+       <div id="herd-layers-output" style="display:none;margin-top:8px;">
+         <table style="font-size:0.8em;width:100%;border-collapse:collapse;">
+           <thead><tr style="border-bottom:1px solid #555;"><th style="text-align:left;padding:3px;">Key</th><th style="text-align:left;padding:3px;">Value</th><th style="text-align:left;padding:3px;">Source Layer</th></tr></thead>
+           <tbody id="herd-layers-body"></tbody>
+         </table>
+       </div>
       <span id="herd-restart-status" style="color:#888;font-size:0.85em;margin-left:8px;display:none;"></span>
       <small style="color:#888;margin-top:6px;display:block;">Updates systemd unit + env file (no rebuild). Restart server to apply changes.</small>
     </div>
@@ -194,9 +246,12 @@ var HERD_CLI_FLAGS = [
   {id: 'spec-type',        label: '--spec-type',         type: 'toggle-select', options: ['none','draft-simple','draft-eagle3','draft-mtp','ngram-simple','ngram-map-k','ngram-map-k4v','ngram-mod','ngram-cache']},
   {id: 'spec-draft-n-max', label: '--spec-draft-n-max',  type: 'toggle-select'},
   {id: 'spec-draft-n-min', label: '--spec-draft-n-min',  type: 'toggle-select'},
-  {id: 'spec-draft-ngl',   label: '--spec-draft-ngl',    type: 'toggle-select'},
-  {id: 'verbose',          label: '-v',                  type: 'toggle'},
+   {id: 'spec-draft-ngl',   label: '--spec-draft-ngl',    type: 'toggle-select'},
+   {id: 'cache-type-k',     label: '--cache-type-k',      type: 'toggle-select', options: ['f32','f16','bf16','q8_0','q4_0','q4_1','iq4_nl','q5_0','q5_1']},
+   {id: 'cache-type-v',     label: '--cache-type-v',      type: 'toggle-select', options: ['f32','f16','bf16','q8_0','q4_0','q4_1','iq4_nl','q5_0','q5_1']},
+   {id: 'verbose',          label: '-v',                  type: 'toggle'},
   {id: 'device-draft',     label: '--device-draft',      type: 'toggle-select', options: ['Vulkan0','CUDA0','CUDA1','CUDA2','CUDA3','CUDA4','CUDA5','CUDA6','CUDA7']},
+  {id: 'tools',            label: '--tools',              type: 'toggle-multi', options: ['all','read_file','file_glob_search','grep_search','exec_shell_command','write_file','edit_file','apply_diff','get_datetime']},
   {id: 'custom-cli',       label: '--CUSTOM-cli',         type: 'toggle-fulltext'},
 ];
 
@@ -222,9 +277,16 @@ function buildFlagsGrid() {
       else if (f.id === 'spec-draft-ngl') optsArr = _genRange(100);
       for (var oi = 0; oi < optsArr.length; oi++) { opts += '<option value="' + optsArr[oi] + '">' + optsArr[oi] + '</option>'; }
       html += '<div class="herd-flag-row"><input type="checkbox" class="herd-flag-cb herd-spec-cb" data-flag="' + f.label + '"> <span style="font-size:0.85em;color:#333;">' + f.label + '</span> <select class="herd-spec-val" data-parent="' + f.label + '" style="width:120px;padding:2px;border:1px solid #ccc;border-radius:2px;font-size:0.85em;">' + opts + '</select></div>';
-} else if (f.type === 'toggle-fulltext') {
-       html += '<div class="herd-flag-row"><input type="checkbox" class="herd-flag-cb herd-fulltext-cb" data-flag="' + f.label + '" onchange="toggleFulltextCb(this, \'' + f.label + '\')"> <span style="font-size:0.85em;color:#333;font-weight:bold;">' + f.label + '</span> <div style="flex:1;"><textarea class="herd-fulltext-val" data-parent="' + f.label + '" placeholder="Paste CLI args here — one arg per line, or multi-arg string. Quotes preserved as-is." rows="5" style="width:100%;font-family:monospace;font-size:0.8em;padding:6px;border:1px solid #ccc;border-radius:4px;resize:both;display:none;min-height:80px;"></textarea><small style="color:#888;font-size:0.75em;display:block;margin-top:2px;">Each line → separate CLI arg entry. Example: -ot "blk.*" -ot "ctx.*"</small></div></div>';
+} else if (f.type === 'toggle-multi') {
+        var subOpts = f.options || [];
+        var subCheckboxes = '';
+        for (var si = 0; si < subOpts.length; si++) {
+           subCheckboxes += '<label style="display:inline-flex;align-items:center;gap:2px;margin:0 6px 4px 0;font-size:0.8em;"><input type="checkbox" class="herd-flag-cb herd-tools-cb" data-tool="' + subOpts[si] + '" disabled style="opacity:0.4;"> ' + subOpts[si] + '</label> ';
         }
+        html += '<div class="herd-flag-row"><input type="checkbox" class="herd-flag-cb herd-tools-cb-main" data-flag="' + f.label + '" onchange="toggleToolsCb(this)"> <span style="font-size:0.85em;color:#333;font-weight:bold;">' + f.label + '</span> <span class="herd-tools-sub" style="display:inline-block;width:100%;margin-left:4px;">' + subCheckboxes + '</span></div>';
+      } else if (f.type === 'toggle-fulltext') {
+        html += '<div class="herd-flag-row"><input type="checkbox" class="herd-flag-cb herd-fulltext-cb" data-flag="' + f.label + '" onchange="toggleFulltextCb(this, \'' + f.label + '\')"> <span style="font-size:0.85em;color:#333;font-weight:bold;">' + f.label + '</span> <div style="flex:1;"><textarea class="herd-fulltext-val" data-parent="' + f.label + '" placeholder="Paste CLI args here — one arg per line, or multi-arg string. Quotes preserved as-is." rows="5" style="width:100%;font-family:monospace;font-size:0.8em;padding:6px;border:1px solid #ccc;border-radius:4px;resize:both;display:none;min-height:80px;"></textarea></div></div>';
+         }
        });
       grid.innerHTML = html;
     }
@@ -269,19 +331,55 @@ function buildFlagsGrid() {
         }
       }
     }
-    // Handle "bare" values not matched to any checkbox — assign to toggle-fulltext
-    for (var i = 0; i < currentFlags.length; i++) {
-      if (consumed.indexOf(i) >= 0) continue;
-      var bareVal = currentFlags[i];
-      var fulltextCbs = document.querySelectorAll('.herd-fulltext-cb');
-      for (var j = 0; j < fulltextCbs.length; j++) {
-        if (!fulltextCbs[j].checked) {
-          fulltextCbs[j].checked = true;
-          var txt = document.querySelector('.herd-fulltext-val[data-parent="' + fulltextCbs[j].getAttribute('data-flag') + '"]');
-          if (txt) { txt.value = bareVal; txt.style.display = 'inline'; }
-          break; // only one fulltext input in current setup
+    // Handle --tools multi-selector: flags like "--tools read_file,exec_shell_command"
+    var mainToolCb = document.querySelector('.herd-tools-cb-main[data-flag="--tools"]');
+    if (mainToolCb) {
+      var toolFlags = [];
+      for (var ti = 0; ti < currentFlags.length; ti++) {
+        var tf = currentFlags[ti];
+        if (typeof tf === 'string' && tf.indexOf('--tools ') === 0) {
+          // Parse: "--tools read_file,exec_shell_command" → ["read_file", "exec_shell_command"]
+          var toolsStr = tf.substring(8).trim(); // strip "--tools "
+          var toolNames = toolsStr.split(',').map(function(t){return t.trim();}).filter(function(t){return t.length > 0;});
+          if (toolNames.length > 0) {
+            mainToolCb.checked = true;
+            toolFlags.push.apply(toolFlags, toolNames);
+            consumed.push(ti); // mark consumed
+            // Enable sub-checkboxes since main is checked
+            var row = mainToolCb.closest('.herd-flag-row');
+            if (row) {
+              var subs = row.querySelectorAll('.herd-tools-cb:not(.herd-tools-cb-main)');
+              subs.forEach(function(sc) { sc.disabled = false; sc.style.opacity = '1'; });
+            }
+          }
         }
       }
+      // Check matching sub-checkboxes
+      toolFlags.forEach(function(tName) {
+        var subCb = document.querySelector('.herd-tools-cb[data-tool="' + tName + '"]');
+        if (subCb) subCb.checked = true;
+      });
+    }
+    // Handle "bare" values not matched to any checkbox — accumulate into toggle-fulltext textarea
+    var bareValues = [];
+    for (var i = 0; i < currentFlags.length; i++) {
+      if (consumed.indexOf(i) >= 0) continue;
+      bareValues.push(currentFlags[i]);
+    }
+    if (bareValues.length > 0) {
+      var fulltextCbs = document.querySelectorAll('.herd-fulltext-cb');
+      for (var j = 0; j < fulltextCbs.length; j++) {
+        fulltextCbs[j].checked = true;
+        var txt = document.querySelector('.herd-fulltext-val[data-parent="' + fulltextCbs[j].getAttribute('data-flag') + '"]');
+        if (txt) { txt.value = bareValues.join('\n'); txt.style.display = 'inline'; }
+        break; // only one fulltext input in current setup
+      }
+    }
+    // Update active count display
+    var flagsCountEl = document.getElementById('herd-flags-count');
+    if (flagsCountEl) {
+      var checkedCount = document.querySelectorAll('.herd-flag-cb:checked').length;
+      flagsCountEl.textContent = '(' + checkedCount + ' active)';
     }
   }
 
@@ -339,6 +437,19 @@ function toggleFulltextCb(cb, flagLabel) {
   }
 }
 
+// Toggle tools multi-selector: enable/disable sub-checkboxes on main toggle
+function toggleToolsCb(cb) {
+  var flagLabel = cb.getAttribute('data-flag');
+  var container = cb.closest('.herd-flag-row').querySelector('.herd-tools-sub');
+  if (!container) return;
+  var subCbs = container.querySelectorAll('.herd-tools-cb:not(.herd-tools-cb-main)');
+  subCbs.forEach(function(sc) { sc.disabled = !cb.checked; });
+  // On uncheck: auto-save to clear tools from DB
+  if (!cb.checked) {
+    herdSaveCliFlagsSilent();
+  }
+}
+
 
 // Populate ENV overrides from actual_overrides data
 function populateEnvOverrides(actualOv) {
@@ -387,15 +498,17 @@ function herdSaveEnvOverrides() {
 
   herdEnvOverrides = overrides;
 
-  qrApi('/instances/' + herdCurrentLlamaId, {
+  qrApi('/instances/' + herdCurrentLlamaId + '/herd-config', {
     method: 'PUT',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({config_override: JSON.stringify(overrides)})
+    body: JSON.stringify({env: overrides})
   }).then(function(data) {
       if (data.status === 'ok') {
         status.textContent = 'Saved ' + Object.keys(overrides).length + ' ENV overrides';
         btn.textContent = 'Save ENV Overrides';
         populateEnvOverrides(overrides);
+        loadHerdServers();
+        showHerdDetail(herdCurrentLlamaId);
         setTimeout(function() { status.textContent = ''; }, 3000);
       } else {
         status.textContent = 'Error: ' + (data.message || 'Unknown');
@@ -414,6 +527,21 @@ function collectCliFlags() {
   document.querySelectorAll('.herd-flag-cb').forEach(function(cb) {
     if (cb.checked) {
       var flagLabel = cb.getAttribute('data-flag');
+      // Skip sub-checkboxes (use data-tool, not data-flag) — they're handled by their parent
+      if (!flagLabel || flagLabel === 'null') return;
+      // toggle-multi (tools): collect checked sub-values, join with commas
+      if (cb.classList.contains('herd-tools-cb-main')) {
+        var row = cb.closest('.herd-flag-row');
+        if (row) {
+          var subCbs = row.querySelectorAll('.herd-tools-cb:not(.herd-tools-cb-main):checked');
+          if (subCbs.length > 0) {
+            var toolVals = [];
+            subCbs.forEach(function(sc) { toolVals.push(sc.getAttribute('data-tool')); });
+            flags.push(flagLabel + ' ' + toolVals.join(','));
+          }
+        }
+        return;
+      }
       // toggle-fulltext: split multi-line input, each line → separate flag entry
       if (cb.classList.contains('herd-fulltext-cb')) {
         var txt = document.querySelector('.herd-fulltext-val[data-parent="' + flagLabel + '"]');
@@ -508,10 +636,284 @@ function herdSaveCliFlagsSilent() {
     method: 'PUT',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({flags: flags})
-  }).then(function(data) {
+ }).then(function(data) {
     if (data.status !== 'ok') console.log('[herd] silent save failed:', data.message || '');
   }).catch(function() {
     console.log('[herd] silent save network error');
+  });
+}
+
+// ---- Expert Split Configuration ----
+
+// Cached expert-split config to avoid redundant API calls
+var _expertSplitCache = null;
+
+// Load expert-split config and render per-RPC rows.
+// Optional 'bindings' param: when provided (from rpccluster/summary), avoids a redundant deploy-preview fetch.
+function loadExpertSplitConfig(llamaId, bindings) {
+  qrApi('/instances/' + llamaId + '/expert-split-config')
+    .then(function(data) {
+      if (data.status !== 'ok') {
+        console.warn('[herd] expert-split config load failed:', data.message);
+        return;
+      }
+      // Merge new expert_split into existing cache — preserves _bindings across saves
+      var es = data.data.expert_split || {};
+      if (!_expertSplitCache) {
+        _expertSplitCache = es;
+      } else {
+        for (var k in es) { _expertSplitCache[k] = es[k]; }
+      }
+      if (!_expertSplitCache._rpc_modes) _expertSplitCache._rpc_modes = {};
+
+      // Use provided bindings or fall back to deploy-preview fetch
+      if (bindings && bindings.length > 0) {
+        _expertSplitCache._bindings = bindings;
+      } else if (!_expertSplitCache._bindings) {
+        qrApi('/instances/' + llamaId + '/deploy-preview')
+          .then(function(preview) {
+            if (preview.status === 'ok' && preview.data.rpc_bindings) {
+              _expertSplitCache._bindings = preview.data.rpc_bindings;
+            }
+            renderExpertSplitRows(llamaId, _expertSplitCache);
+          });
+        return;
+      }
+      // Load prefix/suffix display values
+      document.getElementById('herd-es-prefix').value = _expertSplitCache.template_prefix || 'blk.';
+      document.getElementById('herd-es-suffix').value = _expertSplitCache.template_suffix || 'ffn_(up|gate|down|gate_up)_exps.*';
+      renderExpertSplitRows(llamaId, _expertSplitCache);
+    })
+    .catch(function(e) {
+      console.error('[herd] expert-split config load error:', e);
+    });
+}
+
+// Render per-RPC expert split rows in the ES table.
+// Always fetches fresh bindings + expert_flags from deploy-preview (authoritative source).
+// Uses cached _rpc_modes from expertConfig for mode values.
+function renderExpertSplitRows(llamaId, expertConfig) {
+  var tbody = document.getElementById('herd-expert-split-tbody');
+  if (!tbody) return;
+
+  // Always re-fetch bindings from deploy-preview to avoid stale cached data
+  qrApi('/instances/' + llamaId + '/deploy-preview')
+    .then(function(preview) {
+      if (preview.status !== 'ok') return;
+      var previewFlags = preview.data.expert_flags || [];
+      var bindings = preview.data.rpc_bindings || [];
+
+      // Update cached _bindings to match deploy-preview (keeps them in sync)
+      if (!_expertSplitCache) _expertSplitCache = {};
+      _expertSplitCache._bindings = bindings;
+
+      // Show generated flags preview
+      document.getElementById('herd-expert-flags-preview').textContent =
+        previewFlags.length > 0 ? previewFlags.join('\n') : '(no RPCs with expert-split > 0)';
+
+      if (bindings.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="4" style="padding:8px;text-align:center;color:#888;font-size:0.85em;">No RPC bindings — expert-split flags appear when RPCs are bound</td></tr>';
+        return;
+      }
+
+      var rpcModes = (expertConfig && expertConfig._rpc_modes) || {};
+      var html = '';
+      // Only show RPCs with Expert-Split > 0 (experts enabled)
+      bindings.forEach(function(b) {
+        var rpcId = b.id;
+        var expertsVal = parseInt(b.experts, 10) || 0;
+        if (expertsVal <= 0) return; // Skip RPCs with expert-split disabled
+        var modeCfg = rpcModes[String(rpcId)] || {mode: 'a'};
+        var mode = modeCfg.mode || 'a';
+
+        // Mode dropdown
+        var modeOpts = '<option value="a"' + (mode === 'a' ? ' selected' : '') + '>A — Stride</option>' +
+           '<option value="b"' + (mode === 'b' ? ' selected' : '') + '>B — Block</option>' +
+           '<option value="c"' + (mode === 'c' ? ' selected' : '') + '>C — Load-Dist</option>' +
+           '<option value="f"' + (mode === 'f' ? ' selected' : '') + '>F — Freeform</option>';
+
+         // Freeform index pattern input — always visible, disabled when mode != F
+         var fpDisabled = (mode !== 'f') ? 'disabled' : '';
+          var fpInput = '<input type="text" id="herd-es-fp-' + rpcId + '" value="' + (modeCfg.index_pattern || '') + '" placeholder="e.g. 0|2|4|6" style="flex:1;min-width:200px;max-width:300px;padding:2px;border:1px solid #ccc;border-radius:3px;font-size:0.8em;opacity:' + ((mode === 'f') ? '1' : '0.5') + ';"' + (mode !== 'f' ? ' disabled' : '') + ' onchange="setRpcExpertPattern(' + llamaId + ',' + rpcId + ',this.value)" title="Pipe-separated expert indices for freeform mode">';
+
+        // Preview
+        var esPreview = expertsVal > 0 ? '<span style="font-family:monospace;font-size:0.8em;color:#e65100;">-ot "blk.(...)=RPC0[' + (b.hostname||'?') + ':' + (b.port_assigned||'?') + ']"</span>' : '<span style="color:#aaa;font-size:0.8em;">disabled</span>';
+
+        html += '<tr><td style="font-size:0.85em;padding:3px;">' + b.name + '</td>';
+        html += '<td style="font-size:0.85em;padding:3px;">' + expertsVal + '</td>';
+        html += '<td style="padding:2px;">' +
+          '<select onchange="onRpcExpertModeChange(' + llamaId + ',' + rpcId + ',this.value)" style="width:130px;padding:2px;border:1px solid #ccc;border-radius:3px;font-size:0.8em;">' + modeOpts + '</select>' +
+          fpInput + '</td>';
+        html += '<td style="padding:3px;">' + esPreview + '</td></tr>';
+      });
+      tbody.innerHTML = html;
+    })
+    .catch(function(e) {
+      console.error('[herd] render ES rows error:', e);
+    });
+}
+
+// Handle mode dropdown change — enable/disable freeform input field
+function onRpcExpertModeChange(llamaId, rpcId, mode) {
+   // Enable/disable freeform text input based on mode
+   var fpInput = document.getElementById('herd-es-fp-' + rpcId);
+   if (fpInput) {
+     fpInput.disabled = (mode !== 'f');
+     fpInput.style.opacity = (mode === 'f') ? '1' : '0.5';
+   }
+
+   // Save mode (atomic — merges into existing _rpc_modes)
+   setRpcExpertMode(llamaId, rpcId, mode);
+ }
+
+// Set ALL RPCs to same mode
+function setAllExpertModes(mode) {
+  if (!mode) return;
+
+  function applyToAll(es, bindings) {
+    // Always use the full bindings list (not just existing _rpc_modes entries)
+    es._rpc_modes = {};
+    bindings.forEach(function(b) {
+      var rpcId = String(b.id);
+      // Preserve existing patterns for C mode only
+      var existing = es._rpc_modes[rpcId] || (b.expert_mode ? {} : {});
+      if (mode === 'c' && b.expert_mode === 'c') {
+        es._rpc_modes[rpcId] = {mode: mode, index_pattern: b.index_pattern || ''};
+      } else {
+        es._rpc_modes[rpcId] = {mode: mode};
+      }
+    });
+    qrApi('/instances/' + herdCurrentLlamaId + '/expert-split-config', {
+      method: 'PUT', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({expert_split: es})
+    }).then(function() { loadExpertSplitConfig(herdCurrentLlamaId, bindings); });
+  }
+
+  // Fetch current bindings from deploy-preview (authoritative source)
+  qrApi('/instances/' + herdCurrentLlamaId + '/deploy-preview')
+    .then(function(preview) {
+      var bindings = (preview.data && preview.data.rpc_bindings) || [];
+      if (bindings.length === 0) return;
+
+      // Load current expert_split config to preserve non-mode fields
+      return qrApi('/instances/' + herdCurrentLlamaId + '/expert-split-config')
+        .then(function(getData) {
+          _expertSplitCache = getData.data.expert_split || {};
+          if (!_expertSplitCache._rpc_modes) _expertSplitCache._rpc_modes = {};
+          // Cache bindings for later use
+          _expertSplitCache._bindings = bindings;
+          applyToAll(_expertSplitCache, bindings);
+        });
+    });
+}
+
+// Set per-RPC expert-split value from bindings table input
+function setRpcExpertSplit(llamaId, rpcId, val) {
+  var expertsVal = parseInt(val, 10);
+  if (isNaN(expertsVal)) return;
+  qrApi('/instances/' + rpcId + '/experts', {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({experts: expertsVal})
+  }).then(function(data) {
+    if (data.status === 'ok') {
+      loadExpertSplitConfig(llamaId);
+    }
+  }).catch(function(e) {
+    console.error('[herd] set RPC expert-split error:', e);
+  });
+}
+
+// Atomic save: read current config, merge new mode, write back
+function setRpcExpertMode(llamaId, rpcId, mode) {
+  // Read current cache first (to preserve other RPC modes)
+  if (!_expertSplitCache || !_expertSplitCache._rpc_modes) {
+    qrApi('/instances/' + llamaId + '/expert-split-config')
+      .then(function(getData) {
+        _expertSplitCache = getData.data.expert_split || {};
+        if (!_expertSplitCache._rpc_modes) _expertSplitCache._rpc_modes = {};
+        _expertSplitCache._rpc_modes[String(rpcId)] = {mode: mode};
+        return qrApi('/instances/' + llamaId + '/expert-split-config', {
+          method: 'PUT',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({expert_split: _expertSplitCache})
+        });
+      })
+      .then(function(updateData) {
+        if (updateData.status === 'ok') renderExpertSplitRows(llamaId, _expertSplitCache);
+      });
+  } else {
+    _expertSplitCache._rpc_modes[String(rpcId)] = {mode: mode};
+    qrApi('/instances/' + llamaId + '/expert-split-config', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({expert_split: _expertSplitCache})
+    }).then(function(updateData) {
+      if (updateData.status === 'ok') renderExpertSplitRows(llamaId, _expertSplitCache);
+    });
+  }
+}
+
+// Set per-RPC freeform index pattern
+function setRpcExpertPattern(llamaId, rpcId, pattern) {
+  // Preserve bindings before cache is replaced by GET
+  var cachedBindings = _expertSplitCache ? _expertSplitCache._bindings : null;
+  if (!_expertSplitCache || !_expertSplitCache._rpc_modes) {
+    qrApi('/instances/' + llamaId + '/expert-split-config')
+      .then(function(getData) {
+        _expertSplitCache = getData.data.expert_split || {};
+        if (!_expertSplitCache._rpc_modes) _expertSplitCache._rpc_modes = {};
+        return _expertSplitCache;
+      })
+      .then(function(es) {
+        es._rpc_modes[String(rpcId)] = {mode: 'f', index_pattern: pattern};
+        return qrApi('/instances/' + llamaId + '/expert-split-config', {
+          method: 'PUT',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({expert_split: es})
+        });
+      })
+      .then(function(updateData) {
+        if (updateData.status === 'ok') loadExpertSplitConfig(llamaId, cachedBindings);
+      });
+  } else {
+    if (!_expertSplitCache._rpc_modes) _expertSplitCache._rpc_modes = {};
+    _expertSplitCache._rpc_modes[String(rpcId)] = {mode: 'f', index_pattern: pattern};
+    qrApi('/instances/' + llamaId + '/expert-split-config', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({expert_split: _expertSplitCache})
+    }).then(function(updateData) {
+      if (updateData.status === 'ok') loadExpertSplitConfig(llamaId, cachedBindings);
+    });
+  }
+}
+
+// Save template prefix/suffix with visual feedback
+function saveExpertSplitTemplate() {
+  var btn = event.target;
+  var origText = btn.textContent;
+  btn.textContent = 'Saving...';
+  btn.disabled = true;
+  var prefix = document.getElementById('herd-es-prefix').value.trim() || 'blk.';
+   var suffix = document.getElementById('herd-es-suffix').value.trim() || 'ffn_(up|gate|down|gate_up)_exps.*';
+  qrApi('/instances/' + herdCurrentLlamaId + '/expert-split-config', {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({expert_split: {template_prefix: prefix, template_suffix: suffix}})
+  }).then(function(data) {
+    if (data.status === 'ok') {
+      btn.textContent = 'Saved ✓';
+      setTimeout(function() { btn.textContent = origText; btn.disabled = false; }, 1500);
+      loadExpertSplitConfig(herdCurrentLlamaId, _expertSplitCache ? _expertSplitCache._bindings : null);
+    } else {
+      btn.textContent = 'Error';
+      setTimeout(function() { btn.textContent = origText; btn.disabled = false; }, 1500);
+    }
+  }).catch(function(e) {
+    console.error('[herd] expert-split template save error:', e);
+    btn.textContent = 'Error';
+    setTimeout(function() { btn.textContent = origText; btn.disabled = false; }, 1500);
   });
 }
 
@@ -521,39 +923,18 @@ function herdSaveGpuOverride() {
   var status = document.getElementById('herd-gpu-override-status');
   var override = input.value.trim();
 
-  // Load existing config_override to preserve other overrides, then merge LLAMA_ARG_DEVICE
-  qrApi('/instances/' + herdCurrentLlamaId, { method: 'GET' })
-    .then(function(data) {
-      var oldCo = data.data && data.data.config_override ? data.data.config_override : {};
-      var newCo = typeof oldCo === 'string' ? JSON.parse(oldCo) : (oldCo || {});
-
-      if (override) {
-        newCo["LLAMA_ARG_DEVICE"] = override;
-      } else {
-        delete newCo["LLAMA_ARG_DEVICE"];
-      }
-
-      return qrApi('/instances/' + herdCurrentLlamaId, {
-        method: 'PUT',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({config_override: newCo})
-      });
-    })
-    .then(function(data) {
+  // Use dedicated /gpu-override endpoint — pure DB write, no reconfigure trigger
+  qrApi('/instances/' + herdCurrentLlamaId + '/gpu-override', {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({gpu_override: override})
+  }).then(function(data) {
       if (data.status === 'ok') {
         status.textContent = 'GPU override set to: ' + (override || '(cleared)');
         btn.textContent = 'Saved';
         setTimeout(function() { btn.textContent = 'Save'; }, 2000);
-        // Refresh deploy preview to show new -dev flag
-        qrApi('/instances/' + herdCurrentLlamaId + '/deploy-preview')
-          .then(function(preview) {
-            if (preview.status === 'ok') {
-              var cli = preview.data.cli_args || '';
-              var devMatch = cli.match(/-dev\s+(\S+)/);
-              document.getElementById('herd-dev-flag').textContent = devMatch ? '-dev ' + devMatch[1] : '-';
-            }
-          })
-          .catch(function(e) { console.error('preview error:', e); });
+        loadHerdServers();
+        showHerdDetail(herdCurrentLlamaId);
       } else {
         status.textContent = 'Error: ' + (data.message || 'Unknown');
       }
@@ -574,28 +955,56 @@ function loadHerdServers() {
       var servers = data.data.llama_servers || [];
       var tbody = document.getElementById('herd-servers-tbody');
       if (servers.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#888;">No llama-server instances found</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:#888;">No llama-server instances found</td></tr>';
         return;
       }
       var html = '';
-      servers.forEach(function(s) {
-        var stateColor = s.state === 'running' ? '#4caf50' : (s.state === 'deployed' ? '#2196f3' : (s.state === 'stopped' ? '#ff9800' : '#f44336'));
-        var selClass = (herdCurrentLlamaId === s.id) ? ' selected-row' : '';
-        html += '<tr class="herd-server-row' + selClass + '" data-inst-id="' + s.id + '" onclick="showHerdDetail(' + s.id + ')">';
-        html += '<td>' + s.id + '</td>';
-        html += '<td><a class="row-link" href="/webui/instances/' + s.id + '">' + s.name + '</a></td>';
-        html += '<td>' + (s.node_hostname ? '<a href="/webui/nodes/' + s.node_id + '">' + s.node_hostname + '</a>' : '-') + '</td>';
-        html += '<td class="state-cell" data-sort="' + (s.state || '') + '"><span style="color:' + stateColor + '">' + (s.state || 'unknown') + '</span></td>';
-        html += '<td><span class="split-mode-badge" style="display:inline-block;padding:1px 6px;background:' + getSplitModeBg(s.split_mode) + ';color:' + getSplitModeTxt(s.split_mode) + ';border-radius:3px;font-size:0.8em;">' + s.split_mode + '</span></td>';
-        html += '<td class="rpc-count-cell" data-sort="' + (s.bind_count || 0) + '">' + (s.bind_count || 0) + '</td>';
-        html += '<td><code style="background:#f5f5f5;padding:2px 6px;border-radius:3px;font-size:0.8em;font-weight:normal;font-family:Cascadia Code,Consolas,Monaco,monospace;">' + (s.tensor_split || '-') + '</code></td>';
-        html += '</tr>';
-      });
+       servers.forEach(function(s) {
+         var stateColor = s.state === 'running' ? '#4caf50' : (s.state === 'deployed' ? '#2196f3' : (s.state === 'stopped' ? '#ff9800' : '#f44336'));
+         var selClass = (herdCurrentLlamaId === s.id) ? ' selected-row' : '';
+         html += '<tr class="herd-server-row' + selClass + '" data-inst-id="' + s.id + '" onclick="showHerdDetail(' + s.id + ')">';
+         html += '<td>' + s.id + '</td>';
+         html += '<td><a class="row-link" href="/webui/instances/' + s.id + '">' + s.name + '</a></td>';
+         html += '<td>' + (s.node_hostname ? '<a href="/webui/nodes/' + s.node_id + '">' + s.node_hostname + '</a>' : '-') + '</td>';
+         html += '<td><span class="split-mode-badge" style="display:inline-block;padding:1px 6px;background:' + getSplitModeBg(s.split_mode) + ';color:' + getSplitModeTxt(s.split_mode) + ';border-radius:3px;font-size:0.8em;">' + s.split_mode + '</span></td>';
+         html += '<td class="rpc-count-cell" data-sort="' + (s.bind_count || 0) + '">' + (s.bind_count || 0) + '</td>';
+         html += '<td><code style="background:#f5f5f5;padding:2px 6px;border-radius:3px;font-size:0.8em;font-weight:normal;font-family:Cascadia Code,Consolas,Monaco,monospace;">' + (s.tensor_split || '-') + '</code></td>';
+         html += '<td class="state-cell" data-sort="' + (s.state || '') + '"><span style="color:' + stateColor + '">' + (s.state || 'unknown') + '</span></td>';
+         html += '<td><span class="actions-render" data-inst-id="' + s.id + '"></span></td>';
+         html += '</tr>';
+       });
       tbody.innerHTML = html;
-    })
+       // Render action buttons for each server row
+       renderHerdActions(servers);
+     })
     .catch(function() {
-      document.getElementById('herd-servers-tbody').innerHTML = '<tr><td colspan="7" style="text-align:center;color:#f44336;">Failed to load cluster data</td></tr>';
+      document.getElementById('herd-servers-tbody').innerHTML = '<tr><td colspan="8" style="text-align:center;color:#f44336;">Failed to load cluster data</td></tr>';
     });
+  }
+
+// Render action buttons for herd server rows (batch fetch statuses)
+function renderHerdActions(servers) {
+  if (!servers || !servers.length) return;
+  // Fetch status for each instance and render actions
+  servers.forEach(function(s) {
+    var instId = s.id;
+    qrApi('/instances/' + instId + '/status').then(function(data) {
+      renderInstanceActions(instId, data, '.actions-render[data-inst-id="' + instId + '"]');
+    }).catch(function() {
+      // Silently skip if status fetch fails
+    });
+  });
+}
+
+// Render action buttons for RPC bindings table rows
+function renderRpcBindingsActions(bindings) {
+  if (!bindings || !bindings.length) return;
+  bindings.forEach(function(b) {
+    var instId = b.id;
+    qrApi('/instances/' + instId + '/status').then(function(data) {
+      renderInstanceActions(instId, data, '.actions-render[data-inst-id="' + instId + '"]');
+    }).catch(function() {});
+  });
 }
 
 function getSplitModeBg(mode) {
@@ -671,27 +1080,29 @@ function showHerdDetail(llamaId) {
       modeSel.onchange = function() { cycleSplitMode(llamaId); };
 
      // Preset values array — defined first to avoid reference errors
-      var presetValues = ['0','25','50','75','100'];
+       // Unified split value input + preset buttons
+        var splitInput = document.getElementById('herd-split-value-input');
+        var currentSplit = (server.split !== null && server.split !== undefined) ? String(server.split) : '';
+        splitInput.value = currentSplit || '';
 
-     // Split value dropdown
-     // Unified split value input + preset buttons
-       var splitInput = document.getElementById('herd-split-value-input');
-       var currentSplit = (server.split !== null && server.split !== undefined) ? String(server.split) : '';
-       splitInput.value = currentSplit || '';
-
-       // Input blur: validate and save
-       splitInput.onblur = function() {
-         var v = splitInput.value.trim();
-         if (v === '') return;
-         var num = parseInt(v, 10);
-         if (isNaN(num) || num < 0 || num > 100) {
-           // Revert to current valid value
-           splitInput.value = currentSplit || '';
-           return;
-         }
-         currentSplit = String(num);
-         setSplitValue(llamaId);
-       };
+        // Input blur: validate and save — only for manual typing, not preset buttons
+        splitInput.onblur = function() {
+          // Skip if a preset button just fired (setSplitPreset/setSplitNone handle saving)
+          if (window._splitPresetSaving) {
+            window._splitPresetSaving = false;
+            return;
+          }
+          var v = splitInput.value.trim();
+          if (v === '') return;
+          var num = parseInt(v, 10);
+          if (isNaN(num) || num < 0 || num > 100) {
+            // Revert to current valid value
+            splitInput.value = currentSplit || '';
+            return;
+          }
+          currentSplit = String(num);
+          setSplitValue(llamaId);
+        };
 
       // Tensor split display
       document.getElementById('herd-tensor-split').textContent = server.tensor_split || '-';
@@ -738,33 +1149,34 @@ function showHerdDetail(llamaId) {
        var bindings = server.rpc_bindings || [];
        var tbody = document.getElementById('herd-bindings-tbody');
        if (bindings.length === 0) {
-         tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:#888;">No RPC bindings</td></tr>';
-       } else {
-         var html = '';
-         bindings.forEach(function(b) {
-           var stateColor = b.state === 'running' ? '#4caf50' : (b.state === 'deployed' ? '#2196f3' : '#888');
-           html += '<tr>';
-           html += '<td>' + b.id + '</td>';
-           html += '<td><strong>' + b.name + '</strong></td>';
-           html += '<td>' + (b.hostname || '-') + '</td>';
-           html += '<td>' + (b.port_assigned || '-') + '</td>';
-           html += '<td><input type="number" value="' + b.split + '" min="0" max="100" style="width:70px;padding:2px;border:1px solid #ccc;border-radius:3px;" onchange="setRpcSplit(' + llamaId + ',' + b.id + ',this.value)"></td>';
-           html += '<td style="text-align:center;color:#888;font-size:0.85em;">disabled</td>';
-           // Build draft select with current value if not 0 or 1
-           var draftOpts = '<option value="0"' + (b.draft == 0 ? ' selected' : '') + '>0</option><option value="1"' + (b.draft == 1 ? ' selected' : '') + '>1</option>';
-           if (b.draft != 0 && b.draft != 1) {
-             draftOpts = '<option value="' + b.draft + '" selected>' + b.draft + '</option>' + draftOpts;
-           }
-           html += '<td><select style="width:80px;padding:2px;border:1px solid #ccc;border-radius:3px;" onchange="setRpcDraft(' + llamaId + ',' + b.id + ',this.value)">' + draftOpts + '</select></td>';
-           html += '<td><span style="color:' + stateColor + '">' + (b.state || '-') + '</span></td>';
-           html += '<td><button class="btn btn-danger" onclick="herdRemoveBinding(' + llamaId + ',' + b.id + ')" style="font-size:0.7em;padding:2px 6px;">Remove</button></td>';
-           html += '</tr>';
-         });
-         tbody.innerHTML = html;
-       }
-       // Populate RPC select for adding bindings
-       populateRpcSelect(data.data.llama_servers);
-      })
+          tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:#888;">No RPC bindings</td></tr>';
+        } else {
+          var html = '';
+          bindings.forEach(function(b) {
+            var stateColor = b.state === 'running' ? '#4caf50' : (b.state === 'deployed' ? '#2196f3' : '#888');
+            var draftVal = parseInt(b.draft, 10) || 0;
+            html += '<tr>';
+            html += '<td>' + b.id + '</td>';
+            html += '<td><strong>' + b.name + '</strong></td>';
+            html += '<td>' + (b.hostname || '-') + '</td>';
+            html += '<td>' + (b.port_assigned || '-') + '</td>';
+            html += '<td><input type="number" value="' + b.split + '" min="0" max="100" style="width:70px;padding:2px;border:1px solid #ccc;border-radius:3px;" onchange="setRpcSplit(' + llamaId + ',' + b.id + ',this.value)"></td>';
+            html += '<td><input type="number" value="' + (b.experts || 0) + '" min="0" max="1000" style="width:70px;padding:2px;border:1px solid #ccc;border-radius:3px;" onchange="setRpcExpertSplit(' + llamaId + ',' + b.id + ',this.value)" title="Expert-split value (0=disabled)"></td>';
+            // Draft-offload checkbox (0=no, 1=yes)
+            html += '<td><input type="checkbox" ' + (draftVal ? 'checked' : '') + ' onchange="setRpcDraft(' + llamaId + ',' + b.id + ',this.checked?1:0)" title="Draft offload"></td>';
+            html += '<td><span style="color:' + stateColor + '">' + (b.state || '-') + '</span></td>';
+            html += '<td><button class="btn btn-warning" onclick="herdRemoveBinding(' + llamaId + ',' + b.id + ')" style="font-size:0.7em;padding:2px 6px;">Unbind</button> <span class="actions-render" data-inst-id="' + b.id + '"></span></td>';
+            html += '</tr>';
+ });
+          tbody.innerHTML = html;
+         // Render action buttons for RPC bindings
+         renderRpcBindingsActions(bindings);
+        }
+       // Expert Split Configuration table + flags preview — pass bindings from summary (authoritative source)
+        loadExpertSplitConfig(llamaId, bindings);
+        // Populate RPC select for adding bindings
+        populateRpcSelect(data.data.llama_servers);
+       })
       .catch(function(err) {
         console.error('deploy-preview fetch failed:', err);
         document.getElementById('herd-dev-flag').textContent = '-';
@@ -803,33 +1215,48 @@ function herdApplyPreset(newPresetId) {
   if (!herdCurrentLlamaId) return;
   var sel = document.getElementById('herd-preset-sel');
 
-  // Fetch preset details for confirmation dialog
+  // Fetch preset details + model info for confirmation dialog
   qrApi('/engine/llama_server/presets/' + newPresetId)
     .then(function(data) {
       var p = data.data || {};
-      var details = [];
-      details.push('Server: ' + document.getElementById('herd-server-name').textContent);
-      if (p.model_path) details.push('Model: ' + p.model_path);
-      if (p.category) details.push('Category: ' + p.category);
-      if (p.tags) details.push('Tags: ' + p.tags);
+      // Fetch model details if preset references a model
+      var modelPromise = (p.model_id ? qrApi('/engine/llama_server/models/' + p.model_id) : Promise.resolve({data: null}));
+      var instPromise = qrApi('/instances/' + herdCurrentLlamaId);
+      return Promise.all([modelPromise, instPromise]).then(function(results) {
+        var modelData = results[0].data || {};
+        var details = [];
+        details.push('Switch to preset ' + p.id + ': "' + (p.name || '') + '"');
+        if (modelData.id && modelData.name) {
+          var sizeStr = '';
+          if (modelData.size_bytes !== undefined && modelData.size_bytes !== null) {
+            var gb = (modelData.size_bytes / (1024*1024*1024));
+            sizeStr = ' ' + gb.toFixed(2) + ' GB';
+          }
+          details.push('Model ' + modelData.id + ': "' + modelData.name + '" ' + (modelData.quantization || '') + sizeStr);
+        }
+        var instName = document.getElementById('herd-server-name').textContent;
+        var nodeHost = (results[1].data && results[1].data.node_hostname) ? results[1].data.node_hostname : '';
+        details.push('On Instance: ' + instName);
+        if (nodeHost) details.push('On Host: ' + nodeHost);
+        if (p.category) details.push('Category: ' + p.category);
 
-      var msg = 'Switch to preset "' + (p.name || 'preset #' + newPresetId) + '"?\n\n' + details.join('\n');
-      if (!confirm(msg)) {
-        sel.value = '';
-        return;
-      }
+        var msg = details.join('\n');
+        if (!confirm(msg)) {
+          sel.value = '';
+          return;
+        }
 
-      // Apply the preset change
-      var btn = document.getElementById('herd-preset-apply-btn');
-      btn.disabled = true;
-      btn.textContent = 'Applying...';
-      sel.disabled = true;
+        // Apply the preset change
+        var btn = document.getElementById('herd-preset-apply-btn');
+        btn.disabled = true;
+        btn.textContent = 'Applying...';
+        sel.disabled = true;
 
-      qrApi('/instances/' + herdCurrentLlamaId, {
-        method: 'PUT',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({preset_id: newPresetId, skip_build: true})
-      })
+        qrApi('/instances/' + herdCurrentLlamaId, {
+          method: 'PUT',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({preset_id: newPresetId, skip_build: true})
+        })
         .then(function(data) {
           if (data.status === 'ok') {
             sel.disabled = false;
@@ -857,6 +1284,7 @@ function herdApplyPreset(newPresetId) {
           btn.textContent = 'Apply Preset';
           alert('Request failed: ' + e);
         });
+    });
     })
     .catch(function(e) {
       alert('Failed to load preset details: ' + e);
@@ -922,7 +1350,7 @@ function cycleSplitMode(llamaId) {
 function setSplitPreset(val) {
   var input = document.getElementById('herd-split-value-input');
   input.value = val;
-  // Trigger save after setting preset
+  window._splitPresetSaving = true; // prevent onblur re-save
   var llamaId = herdCurrentLlamaId;
   if (!llamaId) return;
   var payload = {split: val === '' ? null : parseInt(val, 10)};
@@ -932,12 +1360,27 @@ function setSplitPreset(val) {
     body: JSON.stringify(payload)
   }).then(function(data) {
     if (data.status === 'ok') {
-      qrApi('/instances/' + llamaId + '/deploy-preview')
-        .then(function(preview) {
-          if (preview.status === 'ok') {
-            document.getElementById('herd-tensor-split').textContent = preview.data.tensor_split_str || '-';
-          }
-        })
+      loadHerdServers();
+      showHerdDetail(llamaId);
+    }
+  });
+}
+
+// Set split to None (clear value → null, CPU-only mode)
+function setSplitNone() {
+  var input = document.getElementById('herd-split-value-input');
+  input.value = '';
+  window._splitPresetSaving = true; // prevent onblur re-save
+  var llamaId = herdCurrentLlamaId;
+  if (!llamaId) return;
+  qrApi('/instances/' + llamaId + '/split', {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({split: null})
+  }).then(function(data) {
+    if (data.status === 'ok') {
+      loadHerdServers();
+      showHerdDetail(llamaId);
     }
   });
 }
@@ -953,13 +1396,8 @@ function setSplitValue(llamaId) {
     body: JSON.stringify(payload)
   }).then(function(data) {
       if (data.status === 'ok') {
-        // Fetch fresh tensor_split from deploy-preview to avoid stale connection pool
-        qrApi('/instances/' + llamaId + '/deploy-preview')
-          .then(function(preview) {
-          if (preview.status === 'ok') {
-            document.getElementById('herd-tensor-split').textContent = preview.data.tensor_split_str || '-';
-          }
-        })
+        loadHerdServers();
+        showHerdDetail(llamaId);
      }
   })
 }
@@ -974,12 +1412,13 @@ function setRpcSplit(llamaId, rpcId, val) {
     body: JSON.stringify({split: splitVal})
   }).then(function(data) {
       if (data.status === 'ok') {
+        loadHerdServers();
         showHerdDetail(llamaId);
       }
     });
 }
 
- // Set individual RPC experts value
+// Set individual RPC experts value
 function setRpcExperts(llamaId, rpcId, val) {
   var expertsVal = parseInt(val, 10);
   if (isNaN(expertsVal)) return;
@@ -988,7 +1427,10 @@ function setRpcExperts(llamaId, rpcId, val) {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({experts: expertsVal})
   }).then(function(data) {
-      if (data.status === 'ok') { showHerdDetail(herdCurrentLlamaId); }
+      if (data.status === 'ok') {
+        loadHerdServers();
+        showHerdDetail(herdCurrentLlamaId);
+      }
     });
 }
 
@@ -1001,11 +1443,14 @@ function setRpcDraft(llamaId, rpcId, val) {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({draft: draftVal})
   }).then(function(data) {
-      if (data.status === 'ok') { showHerdDetail(herdCurrentLlamaId); }
+      if (data.status === 'ok') {
+        loadHerdServers();
+        showHerdDetail(herdCurrentLlamaId);
+      }
     });
 }
 
-// Add binding — APPENDs to existing bindings instead of replacing
+// Add binding — APPENDs to existing bindings, uses RUNNER-1 job
 function herdAddBinding() {
   var sel = document.getElementById('herd-rpc-select');
   var rpcId = parseInt(sel.value, 10);
@@ -1023,7 +1468,7 @@ function herdAddBinding() {
         return;
       }
 
-      // Append the new RPC ID and save
+      // Append the new RPC ID and send as pure DB update
       var allIds = currentIds.concat([rpcId]);
       qrApi('/rpccluster/llama/' + herdCurrentLlamaId + '/bind-rpc', {
         method: 'PUT',
@@ -1032,24 +1477,28 @@ function herdAddBinding() {
       })
     .then(function(data) {
       if (data.status === 'ok') {
-        showHerdDetail(herdCurrentLlamaId);
+        alert('RPC ' + rpcId + ' bound. Click "Deploy Config & Restart" when ready.');
+        // Refresh upper table + right panel detail to show new bindings
         loadHerdServers();
+        showHerdDetail(herdCurrentLlamaId);
       } else {
         alert('Bind failed: ' + (data.message || 'unknown error'));
       }
      })
-   })
+    })
 }
 
-// Remove binding
+// Remove binding — pure DB update
 function herdRemoveBinding(llamaId, rpcId) {
   if (!confirm('Remove RPC instance ' + rpcId + ' from cluster?')) return;
   qrApi('/rpccluster/llama/' + llamaId + '/bind-rpc/' + rpcId, {
     method: 'DELETE'
   }).then(function(data) {
       if (data.status === 'ok') {
-        showHerdDetail(llamaId);
+        alert('RPC ' + rpcId + ' unbound. Click "Deploy Config & Restart" when ready.');
+        // Refresh upper table + right panel detail to reflect new bindings
         loadHerdServers();
+        showHerdDetail(llamaId);
       } else {
         alert('Unbind failed: ' + (data.message || 'unknown error'));
       }
@@ -1109,40 +1558,138 @@ function showDeployPreview() {
     });
 }
 
-// Update cluster changes (config-only, no rebuild)
-function herdDeploy() {
-  var btn = document.getElementById('herd-deploy-btn');
-  var status = document.getElementById('herd-deploy-status');
-  btn.disabled = true;
-  btn.textContent = 'Updating...';
-  status.textContent = 'Updating cluster configuration...';
+// Layer breakdown debug view — fetches config-levels/merged and shows per-layer contributions
+ function showLayerBreakdown() {
+   if (!herdCurrentLlamaId) return;
+   var btn = document.getElementById('herd-layers-btn');
+   var output = document.getElementById('herd-layers-output');
+   var tbody = document.getElementById('herd-layers-body');
 
-   qrApi('/instances/' + herdCurrentLlamaId + '/deploy', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ skip_build: true })
-    }).then(function(data) {
-       if (data.status === 'ok') {
-          document.getElementById('herd-restart-btn').style.display = 'inline-block';
-          status.textContent = 'Updated successfully! Restart server to apply changes.';
-          btn.textContent = 'Deploy config';
+   btn.disabled = true;
+   btn.textContent = 'Loading...';
+   output.style.display = 'none';
+   tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:#888;">Loading layer data...</td></tr>';
+
+   qrApi('/instances/' + herdCurrentLlamaId + '/config-levels/merged')
+     .then(function(data) {
+       if (data.status !== 'ok' || !data.data) {
+         tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:#888;">Error loading layer data</td></tr>';
+         output.style.display = 'block';
          btn.disabled = false;
-         setTimeout(function() {
-            loadHerdServers();
-            showHerdDetail(herdCurrentLlamaId);
-            // Restart button stays visible — don't hide it
-          }, 2000);
-       } else {
-        status.textContent = 'Update failed: ' + (data.message || '');
-       btn.textContent = 'Deploy config';
-        btn.disabled = false;
-      }
-    })
-   .catch(function() {
-       status.textContent = 'Update failed (network error)';
-       btn.textContent = 'Deploy config';
-        btn.disabled = false;
-      });
+         btn.textContent = 'Debug / Layers';
+         return;
+       }
+
+       var layers = data.data.layers || {};
+       var ann = data.data.source_annotations || {};
+       var merged = data.data.merged || {};
+       var rows = [];
+
+       // Render env vars with layer annotations
+       var envKeys = Object.keys(merged.env || {}).filter(function(k) { return k[0] !== '_'; });
+       envKeys.sort().forEach(function(k) {
+         var val = merged.env[k];
+         var source = ann[k] || (layers.engine_default && layers.engine_default.env_vars && layers.engine_default.env_vars[k] ? 'engine_default' : (layers.instance_override && layers.instance_override.env_vars && layers.instance_override.env_vars[k] ? 'instance_override' : 'unknown'));
+         var color = source === 'engine_default' ? '#4caf50' : (source === 'preset_template' ? '#2196f3' : (source === 'instance_override' ? '#ff9800' : '#888'));
+         rows.push('<tr><td style="padding:3px;"><code>' + k + '</code></td><td style="padding:3px;"><code>' + val + '</code></td><td style="padding:3px;"><span style="color:' + color + ';font-weight:bold;">' + source + '</span></td></tr>');
+       });
+
+       // Render CLI opts
+        (merged.cli_opts || []).forEach(function(opt) {
+          rows.push('<tr><td style="padding:3px;"><code>' + opt + '</code></td><td style="padding:3px;">—</td><td style="padding:3px;"><span style="color:#2196f3;">preset_template</span></td></tr>');
+        });
+
+        // Render L7 cluster bindings (tensor_split, -dev, --rpc, expert_flags)
+        var cb = data.data.cluster_bindings || {};
+        if (cb.tensor_split_str !== undefined) {
+          rows.push('<tr><td colspan="3" style="padding:6px 3px 3px;border-top:2px solid #ddd;font-weight:bold;color:#e65100;">L7 CLUSTER BINDINGS</td></tr>');
+          if (cb.tensor_split_str) {
+            rows.push('<tr><td style="padding:3px;"><code>tensor_split</code></td><td style="padding:3px;"><code>' + cb.tensor_split_str + '</code></td><td style="padding:3px;"><span style="color:#e65100;">cluster_bindings</span></td></tr>');
+          }
+          if (cb.split_mode) {
+            rows.push('<tr><td style="padding:3px;"><code>split_mode</code></td><td style="padding:3px;"><code>' + cb.split_mode + '</code></td><td style="padding:3px;"><span style="color:#e65100;">cluster_bindings</span></td></tr>');
+          }
+          if (cb.rpc_bindings && cb.rpc_bindings.length > 0) {
+            rows.push('<tr><td style="padding:3px;"><code>rpc_endpoints</code></td><td style="padding:3px;"><code>' + cb.rpc_bindings.map(function(b){return b.hostname+':'+b.port_assigned;}).join(', ') + '</code></td><td style="padding:3px;"><span style="color:#e65100;">cluster_bindings</span></td></tr>');
+          }
+          if (cb.gpu_override) {
+            rows.push('<tr><td style="padding:3px;"><code>-dev device</code></td><td style="padding:3px;"><code>' + cb.gpu_override + '</code></td><td style="padding:3px;"><span style="color:#e65100;">cluster_bindings</span></td></tr>');
+          }
+          if (cb.expert_flags && cb.expert_flags.length > 0) {
+            rows.push('<tr><td style="padding:3px;"><code>expert_flags</code></td><td style="padding:3px;"><pre style="margin:0;font-size:0.85em;">' + cb.expert_flags.join('\n') + '</pre></td><td style="padding:3px;"><span style="color:#e65100;">cluster_bindings</span></td></tr>');
+          }
+          if (cb.cli_args) {
+            rows.push('<tr><td style="padding:3px;"><code>full_cli_args</code></td><td style="padding:3px;"><code style="word-break:break-all;">' + cb.cli_args + '</code></td><td style="padding:3px;"><span style="color:#e65100;">cluster_bindings</span></td></tr>');
+          }
+        }
+
+        if (rows.length === 0) {
+          rows.push('<tr><td colspan="3" style="text-align:center;color:#888;">No config keys found</td></tr>');
+        }
+
+        tbody.innerHTML = rows.join('');
+        output.style.display = 'block';
+       btn.disabled = false;
+       btn.textContent = 'Debug / Layers';
+     })
+     .catch(function() {
+       tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:#888;">Network error</td></tr>';
+       output.style.display = 'block';
+       btn.disabled = false;
+       btn.textContent = 'Debug / Layers';
+     });
+ }
+
+  // Update cluster changes + restart (config-only, no rebuild)
+  function herdDeploy() {
+   var btn = document.getElementById('herd-deploy-btn');
+   var status = document.getElementById('herd-deploy-status');
+   btn.disabled = true;
+   btn.textContent = 'Deploying...';
+   status.textContent = 'Deploying config and restarting...';
+
+    qrApi('/instances/' + herdCurrentLlamaId + '/deploy', {
+       method: 'POST',
+       headers: {'Content-Type': 'application/json'},
+       body: JSON.stringify({ skip_build: true })
+     }).then(function(data) {
+        if (data.status === 'ok') {
+           // Also trigger restart since deploy chain's service_start may not fully apply
+           return qrApi('/instances/' + herdCurrentLlamaId + '/restart', { method: 'POST' });
+        } else {
+         status.textContent = 'Deploy failed: ' + (data.message || '');
+         btn.textContent = 'Deploy Config & Restart';
+         btn.disabled = false;
+         throw new Error(data.message);
+       }
+     })
+     .then(function(restartData) {
+        if (restartData && restartData.status === 'ok') {
+           status.textContent = 'Config deployed and restarted successfully.';
+           btn.textContent = 'Deploy Config & Restart';
+          btn.disabled = false;
+          setTimeout(function() {
+             loadHerdServers();
+             showHerdDetail(herdCurrentLlamaId);
+           }, 3000);
+        } else {
+           status.textContent = 'Config deployed but restart failed: ' + (restartData && restartData.message || '');
+           btn.textContent = 'Deploy Config & Restart';
+          btn.disabled = false;
+          setTimeout(function() {
+             loadHerdServers();
+             showHerdDetail(herdCurrentLlamaId);
+           }, 2000);
+        }
+     })
+    .catch(function(e) {
+        if (!e.message || !e.message.startsWith('Deploy')) {
+          // Only shown if deploy failed (restart errors shown above)
+          status.textContent = 'Update failed (network error)';
+        }
+        btn.textContent = 'Deploy Config & Restart';
+         btn.disabled = false;
+       });
 }
 
 // Restart llama-server after config changes
@@ -1178,6 +1725,18 @@ function herdRestart() {
     });
 }
 
-// Load on page load
-document.addEventListener('DOMContentLoaded', loadHerdServers);
+// ---- Manual refresh only (no auto-refresh, no timestamp) ----
+
+// Refresh button handler — manual only
+document.addEventListener('DOMContentLoaded', function() {
+  var btn = document.getElementById('herd-refresh-btn');
+  if (btn) {
+    btn.addEventListener('click', function() {
+      loadHerdServers();
+      if (herdCurrentLlamaId) showHerdDetail(herdCurrentLlamaId);
+    });
+  }
+  // Initial load on page open
+  loadHerdServers();
+});
 </script>

@@ -34,14 +34,20 @@ Usage:
 import os
 import argparse
 import json
+import socket
 import sys
 from datetime import datetime
 
 from lib.qr_engine_ids import (
+    QR_DEFAULT_LOCALHOST,
     QR_ENGINE_API_NAME, QR_ENGINE_LLAMA_SERVER, QR_ENGINE_LLAMA_RPC,
     QR_ENGINE_LLAMA_SERVER_NAME, QR_ENGINE_LLAMA_RPC_NAME,
-    QR_ENGINE_MCP_NAME, QR_ENGINE_WEBUI, QR_ENGINE_WEBUI_NAME,
+    QR_ENGINE_MCP_NAME, QR_ENGINE_SCHEDULER_NAME, QR_ENGINE_SUBPROCESS_NAME,
+    QR_ENGINE_UNIVERSAL_NAME, QR_ENGINE_WEBUI, QR_ENGINE_WEBUI_NAME,
     QR_FORBIDDEN_HOSTS,
+    _QR_NAV_DISPLAY_NAMES, _QR_NAV_LLAMA_NAMES, _QR_NAV_NO_CONFIG,
+    _QR_NAV_SHORT_ALIASES, _QR_NAV_SECTION_MAP, _QR_SYSTEM_NAMES,
+    _QR_EMPTY,
     get_id_by_name, is_llamacpp_engine,
 )
 
@@ -55,8 +61,10 @@ from markupsafe import Markup
 
 from lib.lib_constants import DEFAULT_ANSIBLE_USER, VERSION, DEFAULT_TIMEZONE
 from lib.qr_engine_registry import is_system_engine, get_engine_by_name, get_display_name
+from qr_api.lib_nodes import find_system_instance as _find_sys_inst
 from db.sqlite import pool
 from db.adapters.configs import get_polling_intervals
+import math
 
 _project_root = os.path.dirname(os.path.abspath(__file__))
 if _project_root not in sys.path:
@@ -65,13 +73,29 @@ if _project_root not in sys.path:
 app = Flask(__name__, template_folder='webui')
 
 # Register Jinja2 template filters for badge rendering
+def _format_bytes_py(bytes_val):
+    """Format bytes to human-readable string (Jinja2 global)."""
+    if bytes_val is None or bytes_val == '':
+        return '\u2014'
+    try:
+        b = int(bytes_val)
+    except (ValueError, TypeError):
+        return '\u2014'
+    if b == 0:
+        return '0 B'
+    k = 1024
+    sizes = ['B', 'KB', 'MB']
+    i = min(int(math.log(b) / math.log(k)), len(sizes) - 1)
+    return '{:.1f} {}'.format(b / math.pow(k, i), sizes[i])
+
+
 @app.context_processor
 def utility_processor():
     """Make helper functions and global vars available in all templates."""
     from flask import g
     tz_name = getattr(g, "tz_name", DEFAULT_TIMEZONE)
     app_status = get_app_status()
-    is_dev = app_status.get("data", {}).get("mode", "dev") == "dev"
+    is_dev = app_status.get("data", {}).get("mode", "prod") == "dev"
     # Extract instance summary for global status indicator
     qr_data = app_status.get("data", {})
     return dict(
@@ -86,6 +110,7 @@ def utility_processor():
          qr_status_rgb=qr_data.get("global_state_rgb", "rgb(255, 255, 255)"),
          qr_status_counts_json=json.dumps(qr_data.get("instance_counts", {})),
          qr_status_tooltip=qr_data.get("global_state_tooltip", ""),
+         formatBytes=_format_bytes_py,
      )
 
 
@@ -349,7 +374,7 @@ BASE_LAYOUT = """\
     {engines_nav}
     <li><a href="/webui/instances" {instances}>Instances</a></li>
     <li><a href="/webui/ansible-logs" {logs}>Ansible Logs</a></li>
-    <li><a href="/webui/qr-tasks" {tasks}>Running Tasks</a></li>
+    <li><a href="{{ tasks_href }}" {tasks}>Running Tasks</a></li>
   </ul>
 </nav>
 <main>
@@ -394,7 +419,7 @@ ENGINE_CONFIG_META = {
         "display_title": "LLAMA.cpp RPC Server Global Engine Config",
         "fields": {
             "base_port": {"description": "Default port for first instance on the remote Host"},
-            "binary_path": {"description": "Absolute path to rpc-server binary on remote host (e.g. /opt/quickrobot/llama.cpp/build/bin/rpc-server)"},
+            "binary_path": {"description": "Absolute path to ggml-rpc-server binary on remote host (e.g. /opt/quickrobot/llama.cpp/build/bin/ggml-rpc-server)"},
             "default_timeout": {"description": "Default runtime to be used in seconds for the benchmark"},
             "restart_policy": {"description": "Systemd unit restart policy (always/on-failure/no)"},
             "start_on_boot": {"description": "Enable systemd unit on boot (true/false)"},
@@ -506,62 +531,35 @@ def render_nav(active, engine_types=None):
     """
     pages = ["dashboard", "hosts", "instances", "models", "logs", "tasks", "engines"]
     nav = {p: ' class="active"' if p == active else "" for p in pages}
+    # Preserve query params on Tasks nav link so filters persist across navigation
+    _qs = request.query_string.decode() if request.query_string else ""
+    nav["tasks_href"] = "/webui/qr-tasks" + ("?" + _qs if _qs else "")
 
-   # Build engine sections: 3 groups (LLAMA.cpp, Misc, System)
+    # Build engine sections: 3 groups (LLAMA.cpp, Misc, System)
     llama_section = {"header": "LLAMA.cpp", "items": []}
     misc_section = {"header": "Misc", "items": []}
     system_section = {"header": "System", "items": []}
-    sections_map = {"llama_server": llama_section, "llama_rpc": llama_section,
-                    "rpc": llama_section,  # alias: rpc → same section as llama_rpc
-                    "iperf3": misc_section, "subprocess": misc_section,
-                    "quickrobot-api": system_section,
-                    "quickrobot-webui": system_section,
-                    "quickrobot-mcp": system_section}
-    default_section = system_section
-
-    # Short-name aliases that should be skipped (redirect to canonical long names)
-    _SHORT_NAME_ALIASES = ("qr_api", "qr_webui", "qr_mcp", "rpc")
+    section_objs = {"llama": llama_section, "misc": misc_section, "system": system_section}
 
     if engine_types and len(engine_types) > 0:
         for et in engine_types:
             et_name = et.get("name", "?")
             # Skip short-name aliases — they'll render via their canonical long-name route
-            if et_name in _SHORT_NAME_ALIASES:
+            if et_name in _QR_NAV_SHORT_ALIASES:
                 continue
-            # Display name: registry lookup with overrides for special cases
-            is_sys = is_system_engine(et_name)
-            et_display = get_display_name(et_name)
-            # Display name overrides for system-managed engines
-            if et_name == QR_ENGINE_API_NAME:
-                et_display = "API Service"
-            elif et_name == QR_ENGINE_WEBUI_NAME:
-                et_display = "Web UI Service"
-            elif et_name == "subprocess":
-                et_display = "Subprocess"
-            # Subprocess: no global config page (per-instance only), skip nav item
-            if et_name == "subprocess":
+            # Skip engines without a config nav item (from SSOT)
+            if et_name in _QR_NAV_NO_CONFIG:
                 continue
-            elif et_name == QR_ENGINE_MCP_NAME:
-                et_display = "MCP Service"
-            # Universal engine: no global config page, skip nav item
-            if et_name == "universal":
-                continue
-            # Iperf3: merged page replaces per-engine config/presets nav items
-            if et_name == "iperf3":
-                continue
-           # RPC: merged page replaces per-engine config/presets nav items
-            if et_name == QR_ENGINE_LLAMA_RPC_NAME:
-                continue
-            # LLaMA section nav: bare suffixes (Config/Presets); Models on top-level nav
-            if et_name == QR_ENGINE_LLAMA_SERVER_NAME:
-                et_display = ""
-                suffix = "Config"
-            elif et_name == QR_ENGINE_LLAMA_RPC_NAME:
-                et_display = "RPC"
-                suffix = ""
+            # Display name + suffix: LLaMA overrides first (explicit None check for empty string),
+            # then display-name dict, then registry fallback.
+            _llama_data = _QR_NAV_LLAMA_NAMES.get(et_name)
+            if _llama_data is not None:
+                _raw_display, _raw_suffix = _llama_data
+                et_display = "" if _raw_display == _QR_EMPTY else _raw_display
+                suffix = "" if _raw_suffix == _QR_EMPTY else " Config"
             else:
-                _SYS_NAMES = (QR_ENGINE_API_NAME, QR_ENGINE_WEBUI_NAME, QR_ENGINE_MCP_NAME)
-                suffix = "" if et_name in _SYS_NAMES or et_name == "subprocess" else " Config"
+                et_display = _QR_NAV_DISPLAY_NAMES.get(et_name) or get_display_name(et_name)
+                suffix = "" if et_name in _QR_SYSTEM_NAMES or et_name == QR_ENGINE_SUBPROCESS_NAME else " Config"
             caps = et.get("capabilities", {})
             if isinstance(caps, str):
                 try:
@@ -569,7 +567,8 @@ def render_nav(active, engine_types=None):
                     caps = _j.loads(caps)
                 except Exception:
                     caps = {}
-            section = sections_map.get(et_name, default_section)
+            _section_key = _QR_NAV_SECTION_MAP.get(et_name, "system")
+            section = section_objs[_section_key]
             has_presets = caps.get("supports_presets") if isinstance(caps, dict) else False
             item = f'<li><a href="/webui/engine/{et_name}/config">{et_display}{suffix}</a></li>'
             section["items"].append(item)
@@ -590,7 +589,9 @@ def render_nav(active, engine_types=None):
         llama_section["items"].append('<li><a href="/webui/rpc">RPC</a></li>')
 
     # Static system nav items (Tasks before Playbooks)
-    system_section["items"].append('<li><a href="/webui/qr-tasks">Tasks</a></li>')
+    _tasks_qs = request.query_string.decode() if request.query_string else ""
+    _tasks_href = "/webui/qr-tasks" + ("?" + _tasks_qs if _tasks_qs else "")
+    system_section["items"].append(f'<li><a href="{_tasks_href}">Tasks</a></li>')
     if "quickrobot-api" in [e.get("name") for e in engine_types or []] or \
        "quickrobot-webui" in [e.get("name") for e in engine_types or []] or \
        "quickrobot-mcp" in [e.get("name") for e in engine_types or []]:
@@ -621,16 +622,31 @@ def status_badge(state):
 
     Returns Markup-wrapped HTML so Jinja2 does not auto-escape it.
     """
-    if state == "running":
-        return Markup('<span class="badge badge-running">running</span>')
-    elif state == "loading":
-        return Markup('<span class="badge badge-loading">loading</span>')
-    elif state == "stopped":
-        return Markup('<span class="badge badge-stopped">stopped</span>')
-    elif state == "error":
-        return Markup('<span class="badge badge-error">error</span>')
-    else:
-        return Markup(f'<span class="badge badge-other">{state}</span>')
+    # SSOT state -> (css_class, display_label) mapping
+    # All states covered here must also have a --badge-* CSS variable in base.html :root
+    _STATE_MAP = {
+        "running":      ("badge-running",   "running"),
+        "stopped":      ("badge-stopped",   "stopped"),
+        "error":        ("badge-error",     "error"),
+        # Transition states — all map to loading (blue) for visual consistency
+        "deploying":    ("badge-loading",   "deploying"),
+        "configuring":  ("badge-loading",   "configuring"),
+        "loading":      ("badge-loading",   "loading"),
+        "updating":     ("badge-loading",   "updating"),
+        "compiling":    ("badge-loading",   "compiling"),
+        "starting":     ("badge-loading",   "starting"),
+        "stopping":     ("badge-loading",   "stopping"),
+        # Terminal/specific states
+        "deployed":     ("badge-success",   "deployed"),
+        "build_error":  ("badge-error",     "build_error"),
+        "timeout":      ("badge-other",     "timeout"),
+    }
+    entry = _STATE_MAP.get(state)
+    if entry is not None:
+        cls, label = entry
+        return Markup(f'<span class="badge {cls}">{label}</span>')
+    # Unknown state — fall back to generic badge
+    return Markup(f'<span class="badge badge-other">{state}</span>')
 
 
 def gpu_device_badge(device):
@@ -803,13 +819,14 @@ def webui_nodes_new():
         hostname = body.get("hostname", "").strip()
         ansible_user = body.get("ansible_user", "").strip() or DEFAULT_ANSIBLE_USER
         ansible_key_path = body.get("ansible_key_path", "").strip() or ""
+        ssh_port = int(body.get("ssh_port", 22))
 
         if not name or not hostname:
             content = '<div style="color:#f44336;padding:12px;">Name and hostname are required.</div>'
             return make_html("Add Node", "hosts", content, engine_types=get_engine_types())
 
         # Step 1: Create node
-        create_data = {"name": name, "hostname": hostname}
+        create_data = {"name": name, "hostname": hostname, "ssh_port": ssh_port}
         if ansible_user:
             create_data["ansible_user"] = ansible_user
         if ansible_key_path:
@@ -866,7 +883,7 @@ def webui_nodes_new():
 <p><strong>{name}</strong> at {hostname} is not reachable.</p>
 <div style="color:#f44336;padding:12px;background:#fff3cd;border-radius:4px;margin-bottom:12px;">
 Cannot connect via SSH — the host was not added.<br>
-Check that the hostname resolves and SSH (port 22) is accessible.
+Check that the hostname resolves and SSH (port {{ ssh_port }}) is accessible.
 </div>
 <a href="/webui/nodes/new" style="color:#007bff;">Try again with different hostname</a>"""
         return make_html("Add Node", "hosts", content, engine_types=get_engine_types())
@@ -995,7 +1012,7 @@ def webui_model_create():
 @app.route("/webui/instances")
 def webui_instances():
     """List all instances with filter controls."""
-    filter_host = request.args.get("host") or ""
+    filter_host = request.args.get("host") or request.args.get("filter_host") or ""
     # Determine include_inactive based on host filter selection
     if filter_host == "active_only":
         include_inactive = False
@@ -1011,8 +1028,8 @@ def webui_instances():
         return make_html("Instances", "instances", content, engine_types=get_engine_types())
 
     all_instances = data.get("items", [])
-    filter_engine = request.args.get("engine") or ""
-    filter_state = request.args.get("state") or ""
+    filter_engine = request.args.get("engine") or request.args.get("filter_engine") or ""
+    filter_state = request.args.get("state") or request.args.get("filter_state") or ""
 
     # Build filter options from all data
     all_engines = sorted(set(
@@ -1048,9 +1065,25 @@ def webui_instances():
             (filter_engine == 'exclude_system' and not inst.get("system_managed"))
             or (inst.get("engine_display_name") or inst.get("engine_type_name", "")) == filter_engine)
         and (not filter_state or inst.get("state", "unknown") == filter_state)
-    ]
+   ]
 
-   # Pre-format RSS strings for template
+    # Enrich instances with node ping_state and is_active for UI indicators
+    # Build node lookup map by hostname (more reliable than node_id since some nodes may be deleted)
+    all_nodes_data = api_get("nodes")
+    node_map = {}
+    if "error" not in all_nodes_data:
+        for n in all_nodes_data.get("items", []):
+            hn = n.get("hostname", "") or n.get("name", "")
+            if hn:
+                node_map[hn] = {"ping_state": n.get("ping_state", "unknown"), "is_active": n.get("is_active", 1)}
+
+    for inst in filtered:
+        hn = inst.get("node_hostname") or inst.get("node_name") or ""
+        nm = node_map.get(hn, {})
+        inst["_node_ping_state"] = nm.get("ping_state", "unknown") if hn else None
+        inst["_node_is_active"] = nm.get("is_active", 1) if hn else 1
+
+    # Pre-format RSS strings for template
     for inst in filtered:
         rss = inst.get("rss_bytes", 0)
         if rss and isinstance(rss, (int, float)) and rss > 0:
@@ -1268,6 +1301,7 @@ def webui_engine_config(engine_type):
     display_names = {
         "quickrobot-webui": "Dry Nose Ape Control Interface",
         "quickrobot-api": "API Service Settings",
+        "quickrobot-scheduler": "Scheduler",
         "llama_server": "LLAMA.cpp Server",
         "llama_rpc": "LLAMA.RPC Server",
         "quickrobot-mcp": "MCP Service Settings",
@@ -1453,6 +1487,14 @@ def webui_engine_config(engine_type):
 
     content = f"<h1 style='margin:0;font-size:1.3em;'>{page_title}</h1>\n"
     content += config_html + save_js
+
+    # Add instance detail button for scheduler
+    if engine_type == "quickrobot-scheduler":
+        _sched_inst = _find_sys_inst(os.path.join(os.getcwd(), "data", "quickrobot.db"), QR_ENGINE_SCHEDULER_NAME)
+        sched_id = _sched_inst.get("id") if _sched_inst else None
+        if sched_id:
+            content += f'<div class="actions" style="margin-top:12px;"><a href="/webui/instances/{sched_id}" class="btn btn-sm btn-success">Open Instance Detail</a></div>'
+
     nav, engines_nav = render_nav("engines", get_engine_types())
     return render_template('base.html', title=page_title,
                            engines_nav=engines_nav, **nav, content=Markup(content))
@@ -1479,12 +1521,8 @@ def _render_system_engine_config(engine_type):
         else:
             settings = data["data"]
             # Find the quickrobot-webui instance ID for link to detail page
-            insts = api_get("instances").get("items", [])
-            web_id = None
-            for i in insts:
-                if i.get("engine_type_name") == QR_ENGINE_WEBUI_NAME and i.get("system_managed"):
-                    web_id = i.get("id")
-                    break
+            _web_inst = _find_sys_inst(os.path.join(os.getcwd(), "data", "quickrobot.db"), QR_ENGINE_WEBUI_NAME)
+            web_id = _web_inst.get("id") if _web_inst else None
 
             # Fields from .quickrobot.env — show as informational only (read-only)
             webui_env_migrated = ("web_ui_host", "web_ui_port", "webui_autostart", "webui_detach")
@@ -1661,12 +1699,8 @@ def _render_system_engine_config(engine_type):
             metrics = data["data"]
 
         # Find the quickrobot-api instance ID for link to detail page
-        insts = api_get("instances").get("items", [])
-        svc_id = None
-        for i in insts:
-            if i.get("engine_type_name") == QR_ENGINE_API_NAME and i.get("system_managed"):
-                svc_id = i.get("id")
-                break
+        _api_inst = _find_sys_inst(os.path.join(os.getcwd(), "data", "quickrobot.db"), QR_ENGINE_API_NAME)
+        svc_id = _api_inst.get("id") if _api_inst else None
 
         # Build editable config section (shared settings from engine_configs table)
         config_data = api_get("engine/quickrobot-api/config")
@@ -1843,18 +1877,14 @@ def _render_system_engine_config(engine_type):
             # Remove deprecated/hidden fields entirely from display
             for _k in ("mcp_detach", "mcp_autostart"):
                 settings.pop(_k, None)
-            insts = api_get("instances").get("items", [])
-            mcp_id = None
-            for i in insts:
-                if i.get("engine_type_name") == QR_ENGINE_MCP_NAME and i.get("system_managed"):
-                    mcp_id = i.get("id")
-                    break
+            _mcp_inst = _find_sys_inst(os.path.join(os.getcwd(), "data", "quickrobot.db"), QR_ENGINE_MCP_NAME)
+            mcp_id = _mcp_inst.get("id") if _mcp_inst else None
 
             # Fields migrated to .quickrobot.env - show as informational only
             mcp_env_migrated = ("mcp_host", "mcp_port")
             rows = ""
             api_settings = api_get("engines/quickrobot-api/status").get("data", {})
-            api_bind_host = api_settings.get("bind_host") or "127.0.0.1"
+            api_bind_host = api_settings.get("bind_host") or QR_DEFAULT_LOCALHOST
 
             mcp_field_meta = {
                 "allow_reads": {"description": "Expose read-only tools (list_instances, list_nodes, etc.)", "input_type": "dropdown", "editable": True},
@@ -1988,32 +2018,10 @@ def _render_system_engine_config(engine_type):
           descEl.innerHTML = '<span style=\"color:#e67e22;\">&#9888; MCP Python package not found</span>';
           pathEl.textContent = 'none — cannot start MCP server';
         }}
-      }}).catch(function() {{}});
-
-    // Start/Stop buttons for MCP service — use instance-level endpoints for proper state transitions
-  document.querySelectorAll('.inst-action[data-id="{mcp_id}"]').forEach(function(btn) {{
-    btn.addEventListener('click', function() {{
-      var action = this.getAttribute('data-action');
-      if (!confirm('Are you sure you want to ' + action + ' the MCP service?')) return;
-      fetch('/api/v1/instances/{mcp_id}/' + action, {{method: 'POST'}})
-        .then(function(r) {{ return r.json(); }})
-        .then(function(data) {{
-          if (data.status === 'ok') {{
-            alert('MCP service ' + action + ' requested');
-          }} else {{
-            alert('Error: ' + (data.message || JSON.stringify(data)));
-          }}
-        }}).catch(function(e) {{ alert('Request failed: ' + e); }});
-    }});
-  }});
-
-  // Add actions div with instance button
-  document.querySelector('#config-form')
-    .insertAdjacentHTML('beforeend',
-      '<div class="actions" style="margin-top:12px;">{instance_btn}</div>');
+       }}).catch(function() {{}});
 }})();
             </script>"""
-            config_html += f'<div class="actions"><button class="btn btn-success inst-action" data-action="start" data-id="{mcp_id}" title="Start MCP Service" style="font-size:0.75em;padding:3px 8px;margin-left:4px;">&#9654; Start</button><button class="btn btn-danger inst-action" data-action="stop" data-id="{mcp_id}" title="Stop MCP Service" style="font-size:0.75em;padding:3px 8px;margin-left:4px;">&#9632; Stop</button></div>'
+            config_html += f'<div class="actions">{instance_btn}</div>'
             return config_html, js
 
         return config_html, js
@@ -2274,31 +2282,44 @@ def webui_ansible_logs():
 
 @app.route("/webui/qr-tasks")
 def webui_qr_tasks():
-    """Running tasks viewer with auto-refresh for in-flight operations."""
-    status_filter = request.args.get("status") or None
-    limit_val = int(request.args.get("limit", "50")) or 50
+     """Running tasks viewer with auto-refresh for in-flight operations.
 
-    api_params = {"limit": limit_val}
-    if status_filter:
-        api_params["status"] = status_filter
+     Tab 1 (Job Log): RUNNER-1 job/task pipeline via /api/v1/jobs + /tasks
+     Tab 2 (Task Log): Legacy qr_actions framework-level operation log
+     """
+     status_filter = request.args.get("status") or None
+     limit_val = int(request.args.get("limit", "50")) or 50
 
-    data = api_get("qr_actions", api_params)
-    if "error" in data:
-        content = f'<p style="color:#f44336;">API unavailable: {data["error"]}</p>'
-        return make_html("Running Tasks", "tasks", content, engine_types=get_engine_types())
+     # Fetch legacy qr_actions for Operation Log tab
+     api_params = {"limit": limit_val}
+     if status_filter:
+         api_params["status"] = status_filter
 
-    items = data.get("items", [])
-    running_count = sum(1 for i in items if i.get("status") == "running")
-    failed_count = sum(1 for i in items if i.get("status") in ("failed", "stuck"))
+     data = api_get("qr_actions", api_params)
+     if "error" in data:
+         content = f'<p style="color:#f44336;">API unavailable: {data["error"]}</p>'
+         return make_html("Running Tasks", "tasks", content, engine_types=get_engine_types())
 
-    nav, engines_nav = render_nav("tasks", get_engine_types())
-    content = render_template('qr_tasks.html',
-        qr_entries=items,
-        filter_status=status_filter,
-        running_count=running_count,
-        failed_count=failed_count,
-    )
-    return render_template('base.html', title="Running Tasks", engines_nav=engines_nav, **nav, content=Markup(content))
+     items = data.get("items", [])
+     running_count = sum(1 for i in items if i.get("status") == "running")
+     failed_count = sum(1 for i in items if i.get("status") in ("failed", "stuck"))
+
+     # Fetch RUNNER-1 jobs for Staged Deploys tab
+     jobs_data = api_get("jobs")
+     jobs_running = 0
+     if jobs_data.get("status") == "ok":
+         jobs_running = sum(1 for j in jobs_data.get("items", []) if j.get("status") == "running")
+
+     nav, engines_nav = render_nav("tasks", get_engine_types())
+     content = render_template('qr_tasks.html',
+         qr_entries=items,
+         filter_status=status_filter,
+         filter_limit=limit_val,
+         running_count=running_count,
+         failed_count=failed_count,
+         jobs_running=jobs_running,
+     )
+     return render_template('base.html', title="Running Tasks", engines_nav=engines_nav, **nav, content=Markup(content))
 
 
 @app.route("/webui/benchmarks")
@@ -2447,7 +2468,7 @@ def webui_instance_proxy(inst_id):
         return make_html("Proxy", "instances", content, engine_types=get_engine_types())
 
     inst = data.get("data", {})
-    node_hostname = inst.get("node_hostname", "") or inst.get("node_name", "127.0.0.1")
+    node_hostname = inst.get("node_hostname", "") or inst.get("node_name", QR_DEFAULT_LOCALHOST)
     port = inst.get("port_assigned", 8080)
     inst_name = inst.get("name", str(inst_id))
     nav, engines_nav = render_nav("instances", get_engine_types())
@@ -2523,7 +2544,7 @@ def webui_instance_detail_v2(inst_id):
         polling_interval_sec = POLLING_INTERVAL_LOCAL_SEC if is_local else POLLING_INTERVAL_REMOTE_SEC
 
     # Universal engine config_override fields
-    is_universal = (engine_name == "universal")
+    is_universal = (engine_name == QR_ENGINE_UNIVERSAL_NAME)
     univ_co = {}
     if is_universal:
         try: import json as _j2
@@ -2549,7 +2570,7 @@ def webui_instance_detail_v2(inst_id):
     univ_fb_timeout = int(univ_co.get("feedback_timeout", 30))
 
     # Subprocess engine env_passthrough info (for UI banner)
-    is_subprocess = (engine_name == "subprocess")
+    is_subprocess = (engine_name == QR_ENGINE_SUBPROCESS_NAME)
     _raw_ep = co_dict.get("env_passthrough") if is_subprocess else None
     if isinstance(_raw_ep, str):
         subprocess_env_passthrough = _raw_ep.lower() == "true"
@@ -2599,13 +2620,13 @@ def webui_instance_detail_v2(inst_id):
                 "draft_model_path": m.get("draft_model_path"),
             }
 
-    # Health check
-    health_data = api_get(f"instances/{inst_id}/status")
+    # STATUS-1: Unified status with engine-specific actions (single source of truth for badges)
+    status_api = api_get(f"instances/{inst_id}/status")
     health_alive = False
     health_latency = None
     health_error = ""
-    if "error" not in health_data and health_data.get("data"):
-        d = health_data["data"]
+    if "error" not in status_api and status_api.get("data"):
+        d = status_api["data"]
         health_alive = True
         health_latency = d.get("latency_ms")
         health_error = d.get("error", "")
@@ -2624,14 +2645,31 @@ def webui_instance_detail_v2(inst_id):
         }
 
     # Build detail_items list for template
+    # Use STATUS-1 data as single source of truth for state/health badges.
+    # override_system_instance_states() already updated DB state based on process health,
+    # so we trust the instance's state field directly.
     state_badge_html = status_badge(state)
     health_badge = ""
-    if is_system and "error" not in system_status_data and system_status_data.get("data"):
-        sdata = system_status_data["data"]
-        if "alive" in sdata:
-            if sdata["alive"]: state_badge_html = Markup('<span class="badge badge-running">running</span>')
-            else: state_badge_html = Markup('<span class="badge badge-error">dead</span>')
-            health_badge = Markup('<span class="badge badge-running">alive</span>') if sdata.get("alive") else Markup('<span class="badge badge-error">dead</span>')
+    if is_system and "error" not in status_api:
+        sd = status_api.get("data", {}) or {}
+        ed = sd.get("engine_data", {})
+        pid = ed.get("pid")
+        uptime = ed.get("uptime_seconds", 0)
+        rss = ed.get("rss_bytes", 0)
+        if pid:
+            # System engine with active PID — running
+            health_badge = Markup(f'<span class="badge badge-running">running</span>')
+            if uptime and uptime > 0:
+                hrs = uptime // 3600; mins = (uptime % 3600) // 60
+                health_badge += Markup(f' <small style="color:#888;">{hrs}h {mins}m</small>')
+            if rss and rss > 0:
+                health_badge += Markup(f' <small style="color:#888;">RSS {rss // (1024*1024)}MB</small>')
+        elif sd.get("engine_type_name") in (QR_ENGINE_WEBUI_NAME, QR_ENGINE_MCP_NAME):
+            # System engine with stale/dead PID — show error state
+            health_badge = Markup('<span class="badge badge-error">dead</span>')
+        elif sd.get("engine_type_name") == QR_ENGINE_API_NAME:
+            # API instance always alive when serving requests
+            health_badge = Markup('<span class="badge badge-running">running</span>')
     elif health_alive:
         health_badge = Markup(f'<span class="badge badge-running">alive</span>')
         if health_latency is not None: health_badge += Markup(f' <small style="color:#666;">{health_latency:.0f}ms</small>')
@@ -2644,19 +2682,18 @@ def webui_instance_detail_v2(inst_id):
         ("Engine Type", engine_display),
     ]
     if is_system:
-        import socket as _socket_mod
         local_hostname = "localhost"
-        try: local_hostname = _socket_mod.gethostname()
+        try: local_hostname = socket.gethostname()
         except Exception: pass
         detail_items.append(("Node", f"{local_hostname} (local)"))
         sys_data = system_status_data.get("data", {}) if "error" not in system_status_data else {}
         # Use engine-specific fields for port/IP
         if engine_name == QR_ENGINE_WEBUI_NAME:
             detail_items.append(("Port", str(sys_data.get("web_ui_port") or sys_data.get("port") or actual_port or "N/A")))
-            detail_items.append(("Host", str(sys_data.get("web_ui_host") or sys_data.get("ip") or "127.0.0.1")))
+            detail_items.append(("Host", str(sys_data.get("web_ui_host") or sys_data.get("ip") or QR_DEFAULT_LOCALHOST)))
         elif engine_name == QR_ENGINE_API_NAME:
             detail_items.append(("Port", str(sys_data.get("port") or actual_port or "N/A")))
-            detail_items.append(("Host", str(sys_data.get("ip") or "127.0.0.1")))
+            detail_items.append(("Host", str(sys_data.get("ip") or QR_DEFAULT_LOCALHOST)))
         else:
             detail_items.append(("Port", str(sys_data.get("port") or actual_port or "N/A")))
             if sys_data.get("ip"): detail_items.append(("IP", sys_data["ip"]))
@@ -2665,51 +2702,47 @@ def webui_instance_detail_v2(inst_id):
         detail_items.append(("Port", str(actual_port)))
     detail_items.extend([("Transport", "local" if is_system else transport), ("Created", str(created_at)), ("Last State Change", str(last_change))])
     if is_llama: detail_items.append(("GPU Device", inst.get("gpu_device", "") or "not set"))
-    if is_system:
-        sys_data = system_status_data.get("data", {}) if "error" not in system_status_data else {}
-        if "rss_bytes" in sys_data: detail_items.append(("RSS Memory", f"{sys_data['rss_bytes'] / (1024*1024):.1f} MB"))
-        if "uptime_seconds" in sys_data and sys_data["uptime_seconds"] > 0:
-            hrs = sys_data["uptime_seconds"] // 3600; mins = (sys_data["uptime_seconds"] % 3600) // 60
+    # Use STATUS-1 engine_data for system instance details (RSS, uptime) — single source of truth
+    if is_system and "error" not in status_api:
+        sd = status_api.get("data", {}) or {}
+        ed = sd.get("engine_data", {})
+        if "rss_bytes" in ed and ed["rss_bytes"]:
+            detail_items.append(("RSS Memory", f"{ed['rss_bytes'] / (1024*1024):.1f} MB"))
+        if ed.get("uptime_seconds", 0) > 0:
+            hrs = ed["uptime_seconds"] // 3600; mins = (ed["uptime_seconds"] % 3600) // 60
             detail_items.append(("Uptime", f"{hrs}h {mins}m"))
 
-    # Build actions list for template
-    _state_action_map = {
-        "unconfigured": {"start": True, "stop": False, "restart": False, "undeploy": False},
-        "configuring":  {"start": False, "stop": False, "restart": False, "undeploy": False},
-        "deploying":    {"start": False, "stop": False, "restart": False, "undeploy": False},
-        "deployed":     {"start": True, "stop": True,  "restart": True,  "undeploy": True},
-        "starting":     {"start": False, "stop": False, "restart": False, "undeploy": False},
-        "running":      {"start": False, "stop": True,  "restart": True,  "undeploy": False},
-        "stopping":     {"start": False, "stop": False, "restart": False, "undeploy": False},
-        "stopped":      {"start": True, "stop": False, "restart": False, "undeploy": True},
-        "error":        {"start": True, "stop": False, "restart": True,  "undeploy": True},
-        "updating":     {"start": False, "stop": True,  "restart": False, "undeploy": False},
-    }
-    if is_system: _state_action_map = {s: {"start": False, "stop": False, "restart": True, "undeploy": False} for s in _state_action_map}
-    # llama_server/rpc: add build action in stopped/deployed/error states (per AGENTS.md instance action matrix)
-    is_build_engine = engine_type_id in (QR_ENGINE_LLAMA_SERVER, QR_ENGINE_LLAMA_RPC)
-    if is_build_engine:
-        _state_action_map["stopped"]["build"] = bool(co_git_pull)
-        _state_action_map["deployed"]["build"] = True
-        _state_action_map["error"]["build"] = True
-        _state_action_map["stopped"]["undeploy"] = True  # ensure undeploy visible too
-    btn_map = _state_action_map.get(state, {})
-    actions = [
-        ("start","Start","start",btn_map.get("start",False)),
-        ("stop","Stop","stop",btn_map.get("stop",False)),
-        ("restart","Restart","restart",btn_map.get("restart",False)),
-        ("undeploy","Undeploy","undeploy",btn_map.get("undeploy",False)),
-    ]
-    # Add build action for llama_server/rpc in stopped state only
-    if is_build_engine and btn_map.get("build"):
-        actions.append(("build","Build & Update","update-build",True))
-    # Add execute button for universal engine (always enabled)
-    if is_universal:
-        actions.append(("execute","Execute","execute",True))
+    status_actions = []
+    status_warnings = []
+    status_engine_data = {}
+    if "error" not in status_api:
+        status_data = status_api.get("data", {}) or {}
+        status_actions = status_data.get("actions", [])
+        status_warnings = status_data.get("warnings", [])
+        status_engine_data = status_data.get("engine_data", {})
 
-    # Prepare config data for template
+    # For system-managed instances, use STATUS-1 state as single source of truth.
+    # This ensures the detail page shows real-time process health, not stale DB state.
+    if is_system and "error" not in status_api:
+        sd = status_api.get("data", {}) or {}
+        real_state = sd.get("state")
+        if real_state:
+            state = real_state
+
+    # Convert STATUS-1 actions to template tuple format: (name, label, endpoint, enabled)
+    actions = []
+    for sa in status_actions:
+        aname = sa.get("name", "")
+        alabel = sa.get("label", aname)
+        # STATUS-1 action names now match API endpoints directly (post redesign)
+        endpoint = aname
+        enabled = not sa.get("disabled", False)
+        actions.append((aname, alabel, endpoint, enabled))
+
+   # Prepare config data for template
     env_data = {}; cli_data = []; model_data = {}
     config_json = "No merged config"
+    is_build_engine = engine_type_id in (QR_ENGINE_LLAMA_SERVER, QR_ENGINE_LLAMA_RPC)
     if is_build_engine and merged_config:
         env_data = merged_config.get("env", {}) or {}
         cli_data = merged_config.get("cli_opts", []) or []
@@ -2756,7 +2789,7 @@ def webui_instance_detail_v2(inst_id):
         merged_config=merged_config,
         env_data=env_data, cli_data=cli_data, model_data=model_data,
         config_json=config_json, detail_items=detail_items, actions=actions,
-        journal_logs_text=journal_logs_text, ansible_entries=ansible_entries,
+        status_warnings=status_warnings, journal_logs_text=journal_logs_text, ansible_entries=ansible_entries,
         log_entries=log_entries, log_data=nav,
         has_benchmark_btn=(engine_name == 'iperf3' and state in ('deployed','running','stopped')),
          preset_id=preset_id, preset_name=preset_name, presets_list=presets_list,
@@ -2962,7 +2995,8 @@ def parse_args():
             )
     # Backfill args.host and args.port with env values if not set
     args.host = args.host or os.getenv("QUICKROBOT_WEBUI_HOST")
-    args.port = args.port or int(os.getenv("QUICKROBOT_WEBUI_PORT")) if os.getenv("QUICKROBOT_WEBUI_PORT") else None
+    _env_port = os.getenv("QUICKROBOT_WEBUI_PORT")
+    args.port = args.port if args.port is not None else (int(_env_port) if _env_port else None)
     return args, api_base
 
 
@@ -2975,9 +3009,30 @@ if __name__ == "__main__":
     if args.host in QR_FORBIDDEN_HOSTS:
         print(f"[qr] FATAL: Web UI bind host is '{args.host}' — {QR_FORBIDDEN_HOSTS}", file=sys.stderr)
         sys.exit(1)
-    print(f"[qr] quickrobot {VERSION} Web UI starting on {args.host}:{args.port}")
-    print(f"API base: {CONFIG['api_base']}")
+    # Log rotation (vC): truncate oversized log files on startup
+    from lib.lib_system_engine import get_engine_log_path as _log_path, rotate_log_if_needed as _rotate_log
+    _rotate_log(_log_path("webui"), "webui")
+    # Structured startup log — single line with all config info minus tokens
+    _pid = os.getpid()
+    _log_path = os.getenv("QUICKROBOT_LOG_PATH", "")
+    _log_suffix = f" log_path={_log_path}" if _log_path else ""
+    _api_h = args.api_host or os.getenv("QUICKROBOT_API_HOST", "?")
+    _api_p = args.api_port or os.getenv("QUICKROBOT_API_PORT", "?")
+    print(f"[qr] STARTUP: pid={_pid} host={args.host} port={args.port} api={_api_h}:{_api_p}{_log_suffix}")
     try:
+        # === Start periodic health check thread ===
+        from lib.lib_system_engine import start_health_check_thread as _start_health
+        api_host = args.api_host or os.getenv("QUICKROBOT_API_HOST", "?")
+        api_port = int(args.api_port) if args.api_port else int(os.getenv("QUICKROBOT_API_PORT", "?"))
+        _health_thread = _start_health(
+            api_host=api_host,
+            api_port=api_port,
+            max_retries=3,
+            retry_delay=5,
+            check_interval=10
+        )
+        print(f"[qr] Health check thread started (interval=10s, kill=10s)", flush=True)
+        
         app.run(host=args.host, port=args.port, debug=False)
     except OSError as exc:
         if "Address already in use" in str(exc) or "Errno 98" in str(exc):
