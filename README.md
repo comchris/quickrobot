@@ -11,31 +11,20 @@
 
 8k Trailer VIDEO here ;o)
 
--Prompt + Hosts example-
 
--Prompt + Cluster example-
-
-
-
-
-
-## Example 2: Expert-Split on E-waste
+## Example: Expert-Split on E-waste ![full](docs/examples/llamaCPP_cluster/Expertsplit3nodesQwen36-35B-A3B/cluster_002_example_v007.md)
 
 Nodes (1 main + 2 RPC)
-| ID | CPU | Cores | RAM | GPU | Instance | Flags used |
+| ID | CPU | Cores | RAM | GPU | Instance | Usage |
 |----|-----|-------|-----|-----|----------|--------------------|
-| 1 | 2013 i5-4570  | 4 ~3GHz | 4x8GB  @ DDR3-1333 | 2019 AMD 8GB RX5700 | Server | -dev Vulkan0, layer-split 100,0,0 = Attention+MTP+kV |
-| 3 | 2015 i5-6500T | 4 ~3GHz | 2x16GB @ DDR4-2400 | intel onboard HD530 | RPC0-CPU | -ot "blk.(0|2|4|6|8|...46).ffn_(up|gate|down)_exps.* = 8GB experts |
-| 3 | 2015 i5-6500T | 4 ~3GHz | 2x16GB @ DDR4-2400 | intel onboard HD530 | RPC1-CPU | -ot "blk.(1|3|5|7|9|...47).ffn_(up|gate|down)_exps.* = 8GB experts |
+| 1 | 2013 i5-4570  | 4 ~3GHz | 4x8GB  @ DDR3-1333 | 2019 AMD 8GB RX5700 | Server | Vulkan0 = Attention+MTP+kV |
+| 3 | 2015 i5-6500T | 4 ~3GHz | 2x16GB @ DDR4-2400 | intel onboard HD530 | RPC0-CPU | 8GB experts |
+| 3 | 2015 i5-6500T | 4 ~3GHz | 2x16GB @ DDR4-2400 | intel onboard HD530 | RPC1-CPU | 8GB experts |
 
-Model Qwen3.6-35B-A3B-MTP-Q5_K_M.gguf ~ 23GB  CTX_SIZE=262144
+Model Qwen3.6-35B-A3B-MTP-Q5_K_M.gguf ~ 23GB  CTX_SIZE=262144   ~ 10t/s (details later)
 
+## Example: Layer + MTP + Expert split on 1GB LAN ![full](docs/examples/llamaCPP_cluster/ExpertsplitThinclientStep37Flash/cluster_001_example_v007.md)
 
-
-![Setup Quickrobot](docs/git/guide_controller.md)
-
-
-![Setup Remote Node example LXC](docs/git/guide_node_lxc.md)
 
 
 
@@ -51,17 +40,33 @@ Model Qwen3.6-35B-A3B-MTP-Q5_K_M.gguf ~ 23GB  CTX_SIZE=262144
 
 ## "BUT WHY?" 
 
-- Scope of the project is to help upcycle e-waste Hardware: Can't run win 11 ? -> Load the Experts of a 120B LLM instead.
-- Use Your old laptop with the broken screen to store Your active context window at home on DDR4 - on Your hardware
+- Scope of the project is to help upcycle e-waste Hardware: Too old to run win 11 ? Make it an AI-node and hold some Experts. 
+- Use Your old laptop with the broken screen to store Your active context window at home on Your DDR4.
+
 
 ## including Human interface
+In case the agent is down:
 
 ![RPCandClusterSetup](docs/pics/herd_007.png)
+Dynamic Cluster setup for IP, Port, Layer, ENV, cli 
 
 ![ListOfEngines](docs/pics/instances_007.png)
+Remote Service handling, health checks (async), ping checks
 
-![ListOfComputers](docs/pics/hosts_006.png)
+![ListOfComputers](docs/pics/hosts_007.png)
+Host management (rebuild/update/upgrade/reboot)
 
 ![TopModels](docs/pics/models_006.png)
+Local Model manager with auto-import, Change notification,
+Draft (MTP) Model handling for standalone draft heads, 
+Model and Preset based Merge chain for ENV or cli
+TODO wrapper for downloader with checksums
 
+## "Get started" 
+
+WIP
+![Setup Quickrobot](docs/git/guide_controller.md)
+
+WIP
+![Setup Remote Node example LXC](docs/git/guide_node_lxc.md)
 
