@@ -33,9 +33,8 @@ Run the "Count-to-100" benchmark and report results."
 | 3 | 2015 i5-6500T | 4 ~3GHz | 2x16GB @ DDR4-2400 | intel onboard HD530 | RPC1-CPU | 26GB experts |
 | 4 | 2013 i5-4570  | 4 ~3GHz | 4x8GB  @ DDR3-1333 | 2019 AMD 8GB RX5700 | RPC2-VULKAN | 3GB -mtp-Q8_0 |
 
-![TopModels](Expertsplit4nodes-Step-37-flash-Q3KM/ScreenshotChat.png)
+![TopModels](docs/examples/llamaCPP_cluster/Expertsplit4nodes-Step-37-flash-Q3KM/ScreenshotChat.png)
 198B at ~5 t/s - not fast - But it's a good story writer 
-
 
 ## Cluster Example: Expert-Split on E-waste ![full](docs/examples/llamaCPP_cluster/Expertsplit3nodesQwen36-35B-A3B/cluster_002_example_v007.md)
 Nodes (1 main + 2 RPC)
