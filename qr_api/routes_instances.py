@@ -1843,6 +1843,40 @@ def api_cycle_split_mode(inst_id):
         return error_response("VALIDATION_ERROR", f"Failed to update split_mode: {exc}")
 
 
+def api_set_split_mode(inst_id):
+    """Set split_mode on a llama-server instance to the specified value.
+
+    Args:
+        inst_id: Integer primary key of the llama-server instance.
+        Body: {"split_mode": "layer"|"row"|"tensor"}
+
+    Returns:
+        JSON with new split_mode value.
+    """
+    from db.adapters.instances import get_instance as _gi, update_instance as _ui
+
+    inst = _gi(_CONFIG["db_path"], inst_id)
+    if inst is None:
+        return error_response("RESOURCE_NOT_FOUND", f"Instance {inst_id} not found")
+    if inst.get("engine_type_name") != QR_ENGINE_LLAMA_SERVER_NAME:
+        return error_response("INVALID_ENGINE", "split-mode set only works for llama_server instances")
+
+    body, is_err = require_json()
+    if is_err:
+        return error_response("VALIDATION_ERROR", body.get("_error", "invalid body"))
+
+    new_mode = body.get("split_mode")
+    valid_modes = ("layer", "row", "tensor")
+    if new_mode not in valid_modes:
+        return error_response("VALIDATION_ERROR", f"split_mode must be one of {valid_modes}")
+
+    try:
+        _ui(_CONFIG["db_path"], inst_id, split_mode=new_mode)
+        return success_single({"instance_id": inst_id, "split_mode": new_mode})
+    except Exception as exc:
+        return error_response("VALIDATION_ERROR", f"Failed to update split_mode: {exc}")
+
+
 def api_set_split(inst_id):
     """Set the split value for an instance (RPC or llama_server).
 
@@ -2049,7 +2083,9 @@ def api_set_herd_config(inst_id):
         co = {}
 
     # Save old keys BEFORE merging — allows detecting which overrides were removed
-    old_keys = set(k for k in co if not k.startswith("_") and k != "cli_flags" and k != "expert_split")
+    # Exclude cli_flags, expert_split, and LLAMA_ARG_DEVICE (GPU override lives in same JSON)
+    _SALVAGED_KEYS = ("cli_flags", "expert_split", "LLAMA_ARG_DEVICE")
+    old_keys = set(k for k in co if not k.startswith("_") and k not in _SALVAGED_KEYS)
 
     # Merge env keys into config_override
     co.update(env_overrides)
@@ -2150,6 +2186,7 @@ def api_get_expert_split_config(inst_id):
     Returns the expert_split JSON from config_override, containing:
     - template_prefix: prefix for -ot pattern (default "blk.")
     - template_suffix: suffix for -ot pattern (default "ffn_(up|gate|down)_exps.*")
+    - skip_n_first: offset applied to all generated expert indices (default 0)
     - <rpc_id>: {"mode": "a"|"b"|"c", "index_pattern": "..."}
 
     Args:
@@ -2178,6 +2215,8 @@ def api_get_expert_split_config(inst_id):
         expert_split["template_prefix"] = "blk."
     if "template_suffix" not in expert_split:
         expert_split["template_suffix"] = "ffn_(up|gate|down)_exps.*"
+    if "skip_n_first" not in expert_split:
+        expert_split["skip_n_first"] = 0
 
     return success_single({"instance_id": inst_id, "expert_split": expert_split})
 

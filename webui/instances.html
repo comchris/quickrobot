@@ -37,7 +37,7 @@
       <option value="60">60s</option>
       <option value="120">120s</option>
     </select>
-    <button id="health-check-all-btn" class="btn" style="padding:4px 10px;font-size:0.85em;background:#90caf9;border:1px solid #64b5f6;color:#1565c0;" title="Trigger health check for all instances">Health check all</button>
+    <button id="health-check-all-btn" class="btn" style="padding:2px 8px;font-size:0.85em;background:#90caf9;border:1px solid #64b5f6;color:#1565c0;" title="Trigger health check for all instances">Health check all</button>
   </form>
 </div>
 {% if default_refresh_ms is defined %}
@@ -655,6 +655,13 @@ var filterHost = document.getElementById('filter-host');
     if (stored.engine && filterEngine) filterEngine.value = stored.engine;
     if (stored.state && filterState) filterState.value = stored.state;
     if (stored.host && filterHost) filterHost.value = stored.host;
+    // Reload the page with restored filters as URL params so Jinja2 re-renders
+    // the table body with the correct server-side filtering applied.
+    var params = [];
+    if (filterEngine && filterEngine.value) params.push('filter_engine=' + encodeURIComponent(filterEngine.value));
+    if (filterState && filterState.value) params.push('filter_state=' + encodeURIComponent(filterState.value));
+    if (filterHost && filterHost.value) params.push('filter_host=' + encodeURIComponent(filterHost.value));
+    if (params.length > 0) window.location.replace('/webui/instances?' + params.join('&'));
   }
 })();
 

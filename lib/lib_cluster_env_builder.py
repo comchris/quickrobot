@@ -138,6 +138,7 @@ def _generate_expert_split_flags(inst, rpc_bindings, expert_config):
 
     prefix = expert_config.get("template_prefix", "blk.")
     suffix = expert_config.get("template_suffix", "ffn_(up|gate|down)_exps.*")
+    skip_n_first = int(expert_config.get("skip_n_first", 0) or 0)
     # Modes stored under _rpc_modes sub-key (WebUI format): {"_rpc_modes": {"109": {"mode":"b"}, ...}}
     # Fall back to top-level keys for backward compat (legacy format).
     _rpc_modes = expert_config.get("_rpc_modes", {})
@@ -201,15 +202,12 @@ def _generate_expert_split_flags(inst, rpc_bindings, expert_config):
             # Already pre-computed above — look up the pre-assigned indices.
             indices = _expert_allocation.get(rpc_id, [])
         elif rpc_mode == "f":
-            # Mode F (freeform): use stored index_pattern from config_override.
-            pattern = _rpc_modes.get(rpc_id, {}).get("index_pattern", None)
-            if pattern:
-                try:
-                    indices = [int(x.strip()) for x in pattern.split("|") if x.strip()]
-                except ValueError:
-                    indices = list(range(experts_val))
-            else:
-                # No stored pattern — fall back to range
+            # Mode F (freeform): use stored index_pattern as the full -ot pattern string.
+            # The index_pattern is taken as-is (e.g. "blk.(0|2|4).ffn_up_exps.*")
+            # and inserted directly into the -ot flag without wrapping or transformation.
+            pattern = _rpc_modes.get(rpc_id, {}).get("index_pattern", "")
+            if not pattern:
+                # No stored pattern — fall back to using prefix.suffix with range
                 indices = list(range(experts_val))
         elif rpc_mode == "b":
             # Block mode: consecutive indices starting after previous RPCs' blocks.
@@ -218,18 +216,28 @@ def _generate_expert_split_flags(inst, rpc_bindings, expert_config):
         elif rpc_mode == "c":
             pass  # Mode C already has indices from pre-computed allocation above
         elif rpc_mode == "f":
-            pass  # Mode F uses stored index_pattern, no offset tracking
+            pass  # Mode F uses stored index_pattern directly (set above)
         else:
             # Mode A (stride): capacity-aware greedy stride allocation.
             # Uses pre-computed allocation which respects per-RPC expert quotas
             # while maintaining distance-maximized stride distribution.
             indices = _expert_allocation.get(rpc_id, [])
 
-        # Generate the -ot flag (llama.cpp bug: always uses RPC0 in the string)
-        pattern_str = "|".join(str(x) for x in indices)
+        # Apply skip_n_first offset to indices (not applied to Mode F freeform patterns)
+        if skip_n_first > 0 and rpc_mode != "f":
+            indices = [x + skip_n_first for x in indices]
+
+        # Generate the -ot flag
         rpc_host = b.get("hostname", "")
         rpc_port = b.get("port_assigned", "")
-        flag = f'-ot "{prefix}({pattern_str}).{suffix}=RPC0[{rpc_host}:{rpc_port}]"'
+
+        if rpc_mode == "f" and pattern:
+            # Mode F: use the freeform pattern string directly
+            flag = f'-ot "{pattern}=RPC0[{rpc_host}:{rpc_port}]"'
+        else:
+            # All other modes: construct from prefix, indices, suffix
+            pattern_str = "|".join(str(x) for x in indices)
+            flag = f'-ot "{prefix}({pattern_str}).{suffix}=RPC0[{rpc_host}:{rpc_port}]"'
         flags.append(flag)
 
     return flags

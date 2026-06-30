@@ -160,6 +160,7 @@ from .routes_instances import (
     api_create_instance,
     api_cycle_split_mode,
     api_delete_instance,
+    api_set_split_mode,
     api_deploy_instance,
      api_reconfigure_instance,
     api_deploy_preview,
@@ -437,6 +438,7 @@ def register_routes(app):
     app.add_url_rule("/api/v1/instances/<int:inst_id>/run_client", "api_run_client", api_run_client, methods=["POST"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/split", "api_set_split", api_set_split, methods=["PUT"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/split-mode", "api_cycle_split_mode", api_cycle_split_mode, methods=["PATCH"])
+    app.add_url_rule("/api/v1/instances/<int:inst_id>/split-mode", "api_set_split_mode", api_set_split_mode, methods=["PUT"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/start", "api_start_instance", api_start_instance, methods=["POST"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/status", "api_instance_status", api_instance_status, methods=["GET"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/stop", "api_stop_instance", api_stop_instance, methods=["POST"])
