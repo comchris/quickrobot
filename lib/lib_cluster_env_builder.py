@@ -123,6 +123,11 @@ def _generate_expert_split_flags(inst, rpc_bindings, expert_config):
     For each RPC with experts > 0, generates a -ot flag in the format:
       -ot "PREFIX(indices).SUFFIX=RPC0[hostname:port]"
 
+    CRITICAL: The "RPC0" in the -ot flag is a FIXED LITERAL, not a positional index.
+    llama.cpp's -ot syntax uses RPC0 as the protocol role name for all entries.
+    The actual target differentiation is done solely by hostname:port inside [].
+    Do NOT use RPC1, RPC2, etc. — every entry must be RPC0[hostname:port].
+
     The index pattern is generated based on mode (stride/block/freeform).
 
     Args:
@@ -153,29 +158,32 @@ def _generate_expert_split_flags(inst, rpc_bindings, expert_config):
 
     # Pre-compute expert-split indices for all RPCs (needed for modes that require global pool)
     _expert_allocation = {}  # rpc_id -> list of indices
+    _use_greedy = False  # whether greedy allocation was needed
     if count_with_experts > 0 and total_experts > 0:
         # Build list of RPCs with experts, sorted by count descending (slowest first = best spacing)
         rpcs_with_experts = [(i, b) for i, b in enumerate(rpc_bindings) if int(b.get("experts") or 0) > 0]
         rpcs_by_load = sorted(rpcs_with_experts, key=lambda x: -int(x[1].get("experts") or 0))
 
-        # Greedy distance-maximization allocation
+        # Greedy distance-maximization allocation — respects per-RPC quotas exactly
         allocated = {i: [] for i, _ in rpcs_with_experts}
         quotas = {i: int(b.get("experts") or 0) for i, b in rpcs_with_experts}
 
-        for exp_idx in range(total_experts):
+        # Pre-assign one index per RPC via round-robin to ensure clean stride start positions
+        for rr_idx in range(count_with_experts):
+            rpc = rpcs_by_load[rr_idx][0]
+            allocated[rpc].append(rr_idx)
+            quotas[rpc] -= 1
+
+        for exp_idx in range(count_with_experts, total_experts):
             # Find best RPC for this index: one with remaining quota
             candidates = [r for r, q in quotas.items() if q > 0]
             if not candidates:
                 break
-            # For each candidate, compute min distance to its already-assigned indices
+            # For each candidate, compute max distance to its already-assigned indices
             best_rpc = None
             best_dist = -1
             for r in candidates:
-                 if not allocated[r]:
-                     # No assignments yet — assign to RPC with lowest quota first (spread evenly)
-                     dist = quotas[r]
-                 else:
-                     dist = min(abs(exp_idx - a) for a in allocated[r])
+                 dist = min(abs(exp_idx - a) for a in allocated[r])
                  if best_rpc is None or dist > best_dist or (dist == best_dist and quotas.get(r, 0) < quotas.get(best_rpc, 0)):
                     best_rpc = r
                     best_dist = dist
@@ -217,10 +225,10 @@ def _generate_expert_split_flags(inst, rpc_bindings, expert_config):
             pass  # Mode C already has indices from pre-computed allocation above
         elif rpc_mode == "f":
             pass  # Mode F uses stored index_pattern directly (set above)
-        else:
-            # Mode A (stride): capacity-aware greedy stride allocation.
-            # Uses pre-computed allocation which respects per-RPC expert quotas
-            # while maintaining distance-maximized stride distribution.
+        elif rpc_mode == "a":
+            # Mode A (stride): greedy allocation respecting per-RPC quotas.
+            # Uses pre-computed allocation which distributes indices across
+            # the expert pool with distance-maximization for clean stride.
             indices = _expert_allocation.get(rpc_id, [])
 
         # Apply skip_n_first offset to indices (not applied to Mode F freeform patterns)
@@ -236,6 +244,7 @@ def _generate_expert_split_flags(inst, rpc_bindings, expert_config):
             flag = f'-ot "{pattern}=RPC0[{rpc_host}:{rpc_port}]"'
         else:
             # All other modes: construct from prefix, indices, suffix
+            # RPC0 is a fixed literal in llama.cpp -ot syntax (not RPC{idx})
             pattern_str = "|".join(str(x) for x in indices)
             flag = f'-ot "{prefix}({pattern_str}).{suffix}=RPC0[{rpc_host}:{rpc_port}]"'
         flags.append(flag)
