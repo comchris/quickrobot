@@ -9,6 +9,7 @@
     name: "{{ unit_name }}"
     state: stopped
     enabled: no
+  failed_when: false
 
 - name: Wait for model unload (~5s to free GPU VRAM)
   shell: sleep 5

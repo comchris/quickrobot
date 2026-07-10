@@ -30,7 +30,7 @@
       <select id="instance-select" style="width:100%;padding:5px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
         <option value="">-- Select running instance --</option>
         {% for inst in instances %}
-        {% if inst.state == 'running' and (inst.engine_type_name == 'llama_server' or inst.engine_type_name == 'llama.cpp') %}
+        {% if inst.state == 'running' and inst.engine_type_name == 'llama_server' %}
         <option value="{{ inst.id }}">{{ inst.name }} ({{ inst.node_hostname or inst.node_name }}:{{ inst.port_assigned }})</option>
         {% endif %}
         {% endfor %}

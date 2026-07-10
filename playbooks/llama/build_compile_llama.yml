@@ -1,9 +1,9 @@
 # @name: Compile Build
 # @playbook_id: build_compile_llama
 # @version: 4
-# @timeout: 1800
+# @timeout: 5400
 # compile.yml — Pull latest source, configure and build llama.cpp (cmake)
-- hosts: "{{ inventory_host | default('localhost') }}"
+- hosts: "{{ inventory_host }}"
   become_user: "{{ remote_node_user | default(omit) }}"
   gather_facts: no
 
@@ -34,32 +34,32 @@
 
     - name: Ensure build directory exists
       file:
-        path: "{{ node_build_dir | default('/opt/quickrobot/llama.cpp/build') }}"
+        path: "{{ node_build_dir }}"
         state: directory
         mode: '0755'
 
     - name: Configure cmake for llama.cpp
       shell: "{{ cmake_configure_cmd }}"
       args:
-        chdir: "{{ node_src_dir | default('/opt/quickrobot/llama.cpp') }}"
+        chdir: "{{ node_src_dir }}"
       register: cmake_configure_result
       changed_when: "'-- Configuring' in cmake_configure_result.stdout"
 
     - name: Build llama.cpp
       shell: "{{ cmake_build_cmd }}"
       args:
-        chdir: "{{ node_src_dir | default('/opt/quickrobot/llama.cpp') }}"
+        chdir: "{{ node_src_dir }}"
       register: cmake_build_result
       changed_when: false
 
     - name: Verify binary was created
       stat:
-        path: "{{ node_build_dir | default('/opt/quickrobot/llama.cpp/build') }}/bin/llama-server"
+        path: "{{ binary_path }}"
       register: new_binary
 
     - name: Fail if binary not found after build
       fail:
-        msg: "Build failed — llama-server not found in {{ node_build_dir | default('/opt/quickrobot/llama.cpp/build') }}"
+        msg: "Build failed — {{ binary_path | basename }} not found in {{ node_build_dir }}"
       when: not new_binary.stat.exists
 
     - name: Report compile status

@@ -28,7 +28,7 @@ from lib.lib_constants import DEFAULT_ANSIBLE_USER
 
 CAPABILITIES = {
     "name": "iperf3",
-    "display_name": "Iperf3",
+    "display_name": "Iperf 3",
     "supports_models": False,
     "supports_presets": True,
     "max_instances": 99,
@@ -37,6 +37,7 @@ CAPABILITIES = {
         {"path": "/engines/iperf3/config", "label": "Config", "order": 1},
         {"path": "/engines/iperf3/presets", "label": "Presets", "order": 2},
     ],
+    "supported_jobs": ["deploy", "restart", "undeploy"],
 }
 
 

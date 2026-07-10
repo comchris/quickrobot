@@ -61,6 +61,7 @@ from lib.lib_ansible_runner import run_playbook, log_ansible_action
 from lib.lib_cluster_env_builder import build_llama_server_env, build_rpc_server_env, get_cluster_summary
 from lib.lib_constants import (
     DEFAULT_ANSIBLE_USER, GRACE_PERIOD_RUNNING, QR_DEFAULT_BIND_HOST,
+    QUICKROBOT_PLAYBOOK_TIMEOUT,
 )
 from lib.qr_engine_ids import (
     QR_ENGINE_API_NAME, QR_ENGINE_LLAMA_SERVER_NAME, QR_ENGINE_LLAMA_RPC_NAME,
@@ -151,8 +152,8 @@ def override_system_instance_states(instances, config):
                         pass
                 except Exception:
                     pass
-            # Fallback: if no valid PID, use API start time
-            if not inst.get("process_age_seconds") and engine_type_name == QR_ENGINE_API_NAME:
+            # Fallback: if no valid PID or process_age_seconds, use API start time as estimate
+            if not inst.get("process_age_seconds"):
                 inst["process_age_seconds"] = int(now_ts - start_time)
 
         elif engine_type_name == QR_ENGINE_SCHEDULER_NAME:
@@ -180,6 +181,21 @@ def override_system_instance_states(instances, config):
                                     pass
                             except Exception:
                                 pass  # Non-fatal — health check will retry next cycle
+                except Exception:
+                    pass
+            else:
+                # No PID stored (cleared after death or never set) — scan process table
+                # for running scheduler processes to detect alive/dead state.
+                try:
+                    from lib.lib_system_engine import _find_stale_schedulers as _fss
+                    stale = _fss()
+                    if len(stale) > 0:
+                        inst["state"] = "running"
+                        inst["process_age_seconds"] = int(now_ts - _psutil.Process(stale[0]).create_time())
+                    else:
+                        # No scheduler process found — mark error to reflect dead state
+                        if inst.get("state") != "error":
+                            inst["state"] = "error"
                 except Exception:
                     pass
 
@@ -231,31 +247,16 @@ def _resolve_playbook_by_file_path(file_path):
     return None
 
 
+# V1 playbook IDs removed (2026-07-05) — files deleted from disk, not in seed.
+# RUNNER-1 staged chain uses individual stage playbooks instead.
+# Keep stub for backward compat if anything calls this; returns None since V1 playbooks are gone.
 def _resolve_engine_playbook_id(action, engine_type_name):
-    """Map (action, engine_type) → stable playbook_id string.
+    """Return V1 playbook ID (deprecated — files no longer exist on disk).
 
-    Args:
-        action: Action string, e.g. "deploy", "undeploy".
-        engine_type_name: Engine type name, e.g. "llama_server", "llama_rpc", "iperf3".
-
-    Returns:
-        str — stable playbook_id (e.g. "DEPLOY_LLAMA_SERVER_V1"), or None.
+    Returns None since V1 playbooks were removed during RUNNER-1 migration.
+    Callers should use PlaybookRunner.chain() for staged execution.
     """
-    from lib.qr_engine_ids import (
-        QR_ENGINE_LLAMA_SERVER_NAME, QR_ENGINE_LLAMA_RPC_NAME,
-        QR_ENGINE_IPERF3_NAME, QR_ENGINE_UNIVERSAL_NAME,
-    )
-    _MAP = {
-        ("deploy", QR_ENGINE_LLAMA_SERVER_NAME): "DEPLOY_LLAMA_SERVER_V1",
-        ("deploy", QR_ENGINE_LLAMA_RPC_NAME): "DEPLOY_LLAMA_RPC_V1",
-        ("deploy", QR_ENGINE_IPERF3_NAME): "DEPLOY_IPERF3_V1",
-        ("deploy", QR_ENGINE_UNIVERSAL_NAME): "DEPLOY_UNIVERSAL_V1",
-        ("undeploy", QR_ENGINE_LLAMA_SERVER_NAME): "undeploy_llama_server",
-        ("undeploy", QR_ENGINE_LLAMA_RPC_NAME): "undeploy_rpc",
-        ("undeploy", QR_ENGINE_IPERF3_NAME): "undeploy_iperf3",
-        ("undeploy", QR_ENGINE_UNIVERSAL_NAME): "UNDEPLOY_UNIVERSAL_V1",
-    }
-    return _MAP.get((action, engine_type_name))
+    return None
 
 
 def _track_playbook_usage(ref):
@@ -305,7 +306,7 @@ def _track_playbook_error(ref):
 
 
 def _execute_playbook(resolver_ref, resolver_type="playbook_id", limit=None, extra_vars=None,
-                      timeout=3600, inventory_data=None, node_id=None, instance_id=None,
+                      timeout=None, inventory_data=None, node_id=None, instance_id=None,
                       action_type="ansible_execute"):
     """Centralized playbook execution with pre-call checksum, usage tracking, and error handling.
 
@@ -1030,14 +1031,16 @@ def _restart_system_managed(inst_id, engine_type_name, log_action_fn):
     Returns:
         Success or error response dict.
     """
-    from db.adapters.instances import get_instance as _gi, transition_state as _ts2
+    from db.adapters.instances import get_instance as _gi, transition_state as _ts2, \
+        update_log_status as _update_log
 
     config = _get_config()
     inst = _gi(config["db_path"], inst_id)
     if not inst:
         return _error_response("RESOURCE_NOT_FOUND", f"Instance {inst_id} not found")
 
-    log_action_fn(config["db_path"], inst_id, "restart", "received", detail={"system_managed": True})
+    log_entry_id = log_action_fn(config["db_path"], inst_id, "restart", "received",
+                                  detail={"system_managed": True})
     node_id = inst.get("node_id")
 
     try:
@@ -1047,8 +1050,8 @@ def _restart_system_managed(inst_id, engine_type_name, log_action_fn):
                 engine = QrWebuiEngine()
                 result = engine.execute(inst_id, "restart", config["db_path"])
 
-                log_action_fn(config["db_path"], inst_id, "restart", "success",
-                                detail={"system_managed": True, "engine": engine_type_name})
+                _update_log(config["db_path"], log_entry_id, "success",
+                            detail={"system_managed": True, "engine": engine_type_name})
                 try:
                     _ts2(config["db_path"], inst_id, "starting")
                     _time.sleep(0.2)
@@ -1062,12 +1065,15 @@ def _restart_system_managed(inst_id, engine_type_name, log_action_fn):
                             {"changed": True, "failed": False, "results": result})
                 except Exception:
                     pass  # non-critical
+                old_pid = result.get("old_pid")
+                pid_changed = result.get("pid_changed", True)
                 return _success_single({"action": "restart", "instance_id": inst_id,
                                     "state": "running", "system_managed": True,
-                                    "pid": result.get("pid")})
+                                    "pid": result.get("pid"), "old_pid": old_pid,
+                                    "pid_changed": pid_changed})
             except Exception as exc:
-                log_action_fn(config["db_path"], inst_id, "restart", "failed",
-                                detail={"error": str(exc), "system_managed": True})
+                _update_log(config["db_path"], log_entry_id, "failed",
+                            detail={"error": str(exc), "system_managed": True})
                 try:
                     log_ansible_action(config["db_path"], "restart_instance", node_id, inst_id,
                             "webui (quickrobot-webui)", {"action": "restart", "engine_type": engine_type_name,
@@ -1082,9 +1088,9 @@ def _restart_system_managed(inst_id, engine_type_name, log_action_fn):
                 _ts2(config["db_path"], inst_id, "running")
             except Exception:
                 pass
-            log_action_fn(config["db_path"], inst_id, "restart", "success",
-                            detail={"system_managed": True, "engine": engine_type_name,
-                                    "message": "quickrobot service reloads on next request"})
+            _update_log(config["db_path"], log_entry_id, "success",
+                        detail={"system_managed": True, "engine": engine_type_name,
+                                "message": "quickrobot service reloads on next request"})
             try:
                 log_ansible_action(config["db_path"], "restart_instance", node_id, inst_id,
                         "local (quickrobot-api)", {"action": "restart", "engine_type": engine_type_name,
@@ -1101,12 +1107,12 @@ def _restart_system_managed(inst_id, engine_type_name, log_action_fn):
             engine = QrMcpEngine()
             result = engine.execute(inst_id, "restart", config["db_path"])
             if result.get("error"):
-                log_action_fn(config["db_path"], inst_id, "restart", "failed",
-                                detail={"system_managed": True, "engine": engine_type_name,
-                                        "error": result["error"]})
+                _update_log(config["db_path"], log_entry_id, "failed",
+                            detail={"system_managed": True, "engine": engine_type_name,
+                                    "error": result["error"]})
                 return _error_response("DEPLOYMENT_FAILED", f"MCP restart failed: {result['error']}")
-            log_action_fn(config["db_path"], inst_id, "restart", "success",
-                            detail={"system_managed": True, "engine": engine_type_name})
+            _update_log(config["db_path"], log_entry_id, "success",
+                        detail={"system_managed": True, "engine": engine_type_name})
             try:
                 _ts2(config["db_path"], inst_id, "starting")
                 _time.sleep(0.2)
@@ -1120,9 +1126,12 @@ def _restart_system_managed(inst_id, engine_type_name, log_action_fn):
                         {"changed": True, "failed": False, "results": result})
             except Exception:
                 pass  # non-critical
+            old_pid = result.get("old_pid")
+            pid_changed = result.get("pid_changed", True)
             return _success_single({"action": "restart", "instance_id": inst_id,
                                 "state": "running", "system_managed": True,
-                                "pid": result.get("pid")})
+                                "pid": result.get("pid"), "old_pid": old_pid,
+                                "pid_changed": pid_changed})
 
         elif engine_type_name == QR_ENGINE_SCHEDULER_NAME:
             from engine.quickrobot_scheduler import SchedulerEngine
@@ -1130,13 +1139,13 @@ def _restart_system_managed(inst_id, engine_type_name, log_action_fn):
             result = engine.execute(inst_id, "restart", config["db_path"])
 
             if result.get("error"):
-                log_action_fn(config["db_path"], inst_id, "restart", "failed",
-                                detail={"system_managed": True, "engine": engine_type_name,
-                                        "error": result["error"]})
+                _update_log(config["db_path"], log_entry_id, "failed",
+                            detail={"system_managed": True, "engine": engine_type_name,
+                                    "error": result["error"]})
                 return _error_response("DEPLOYMENT_FAILED", f"Scheduler restart failed: {result['error']}")
 
-            log_action_fn(config["db_path"], inst_id, "restart", "success",
-                            detail={"system_managed": True, "engine": engine_type_name})
+            _update_log(config["db_path"], log_entry_id, "success",
+                        detail={"system_managed": True, "engine": engine_type_name})
             try:
                 _ts2(config["db_path"], inst_id, "starting")
                 _time.sleep(0.2)
@@ -1150,13 +1159,17 @@ def _restart_system_managed(inst_id, engine_type_name, log_action_fn):
                         {"changed": True, "failed": False, "results": result})
             except Exception:
                 pass
+            old_pid = result.get("old_pid")
+            pid_changed = result.get("pid_changed", True)
+            dead_verified = result.get("dead_verified")
             return _success_single({"action": "restart", "instance_id": inst_id,
                                 "state": "running", "system_managed": True,
-                                "pid": result.get("pid")})
+                                "pid": result.get("pid"), "old_pid": old_pid,
+                                "pid_changed": pid_changed, "dead_verified": dead_verified})
 
     except Exception as exc:
-        log_action_fn(config["db_path"], inst_id, "restart", "failed",
-                        detail={"error": str(exc), "system_managed": True})
+        _update_log(config["db_path"], log_entry_id, "failed",
+                    detail={"error": str(exc), "system_managed": True})
         return _error_response("DEPLOYMENT_FAILED", f"System restart failed: {exc}")
 
     return _error_response("UNKNOWN_ENGINE", f"Unknown system engine: {engine_type_name}")
@@ -1175,7 +1188,8 @@ def _start_system_managed(inst_id, engine_type_name, log_action_fn):
     Returns:
         Success or error response dict.
     """
-    from db.adapters.instances import get_instance as _gi, transition_state as _ts2
+    from db.adapters.instances import get_instance as _gi, transition_state as _ts2, \
+        update_log_status as _update_log
 
     config = _get_config()
     inst = _gi(config["db_path"], inst_id)
@@ -1183,7 +1197,8 @@ def _start_system_managed(inst_id, engine_type_name, log_action_fn):
         return _error_response("RESOURCE_NOT_FOUND", f"Instance {inst_id} not found")
 
     node_id = inst.get("node_id")
-    log_action_fn(config["db_path"], inst_id, "start", "received", detail={"system_managed": True})
+    log_entry_id = log_action_fn(config["db_path"], inst_id, "start", "received",
+                                  detail={"system_managed": True})
 
     try:
         if engine_type_name == QR_ENGINE_WEBUI_NAME:
@@ -1192,13 +1207,13 @@ def _start_system_managed(inst_id, engine_type_name, log_action_fn):
             result = engine.execute(inst_id, "start", config["db_path"])
 
             if result.get("error"):
-                log_action_fn(config["db_path"], inst_id, "start", "failed",
-                                detail={"system_managed": True, "engine": engine_type_name,
-                                        "error": result["error"]})
+                _update_log(config["db_path"], log_entry_id, "failed",
+                            detail={"system_managed": True, "engine": engine_type_name,
+                                    "error": result["error"]})
                 return _error_response("DEPLOYMENT_FAILED", f"Web UI start failed: {result['error']}")
 
-            log_action_fn(config["db_path"], inst_id, "start", "success",
-                            detail={"system_managed": True, "engine": engine_type_name})
+            _update_log(config["db_path"], log_entry_id, "success",
+                        detail={"system_managed": True, "engine": engine_type_name})
             try:
                 _ts2(config["db_path"], inst_id, "running")
             except Exception:
@@ -1218,9 +1233,9 @@ def _start_system_managed(inst_id, engine_type_name, log_action_fn):
                 _ts2(config["db_path"], inst_id, "running")
             except Exception:
                 pass
-            log_action_fn(config["db_path"], inst_id, "start", "success",
-                            detail={"system_managed": True, "engine": engine_type_name,
-                                "message": "Already running (API server itself)"})
+            _update_log(config["db_path"], log_entry_id, "success",
+                        detail={"system_managed": True, "engine": engine_type_name,
+                            "message": "Already running (API server itself)"})
             try:
                 log_ansible_action(config["db_path"], "start_instance", node_id, inst_id,
                         "local (quickrobot-api)", {"action": "start", "engine_type": engine_type_name,
@@ -1238,13 +1253,13 @@ def _start_system_managed(inst_id, engine_type_name, log_action_fn):
             result = engine.execute(inst_id, "start", config["db_path"])
 
             if result.get("error"):
-                log_action_fn(config["db_path"], inst_id, "start", "failed",
-                                detail={"system_managed": True, "engine": engine_type_name,
-                                        "error": result["error"]})
+                _update_log(config["db_path"], log_entry_id, "failed",
+                            detail={"system_managed": True, "engine": engine_type_name,
+                                    "error": result["error"]})
                 return _error_response("DEPLOYMENT_FAILED", f"MCP start failed: {result['error']}")
 
-            log_action_fn(config["db_path"], inst_id, "start", "success",
-                            detail={"system_managed": True, "engine": engine_type_name})
+            _update_log(config["db_path"], log_entry_id, "success",
+                        detail={"system_managed": True, "engine": engine_type_name})
             try:
                 _ts2(config["db_path"], inst_id, "running")
             except Exception:
@@ -1265,13 +1280,13 @@ def _start_system_managed(inst_id, engine_type_name, log_action_fn):
             result = engine.execute(inst_id, "start", config["db_path"])
 
             if result.get("error"):
-                log_action_fn(config["db_path"], inst_id, "start", "failed",
-                                detail={"system_managed": True, "engine": engine_type_name,
-                                        "error": result["error"]})
+                _update_log(config["db_path"], log_entry_id, "failed",
+                            detail={"system_managed": True, "engine": engine_type_name,
+                                    "error": result["error"]})
                 return _error_response("DEPLOYMENT_FAILED", f"Scheduler start failed: {result['error']}")
 
-            log_action_fn(config["db_path"], inst_id, "start", "success",
-                            detail={"system_managed": True, "engine": engine_type_name})
+            _update_log(config["db_path"], log_entry_id, "success",
+                        detail={"system_managed": True, "engine": engine_type_name})
             try:
                 _ts2(config["db_path"], inst_id, "running")
             except Exception:
@@ -1287,8 +1302,8 @@ def _start_system_managed(inst_id, engine_type_name, log_action_fn):
                                 "state": "running", "system_managed": True})
 
     except Exception as exc:
-        log_action_fn(config["db_path"], inst_id, "start", "failed",
-                        detail={"error": str(exc), "system_managed": True})
+        _update_log(config["db_path"], log_entry_id, "failed",
+                    detail={"error": str(exc), "system_managed": True})
         return _error_response("DEPLOYMENT_FAILED", f"System start failed: {exc}")
 
     return _error_response("UNKNOWN_ENGINE", f"Unknown system engine: {engine_type_name}")
@@ -1849,7 +1864,7 @@ def deploy_instance(db_path, instance_id, playbook=None, async_mode=False, skip_
     # Run the deploy playbook
     _ts2(db_path, instance_id, "deploying") if current_state != "running" else _ts2(db_path, instance_id, "updating")
     r = _execute_playbook(playbook, resolver_type="playbook_id",
-                          limit=hostname, extra_vars=extra_vars, timeout=3600,
+                          limit=hostname, extra_vars=extra_vars, timeout=QUICKROBOT_PLAYBOOK_TIMEOUT,
                           node_id=node_id, instance_id=instance_id,
                           action_type="deploy_instance")
 

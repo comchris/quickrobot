@@ -1,8 +1,10 @@
--- db/migrations/base007.sql
--- Consolidated base schema for quickrobot v0.07 (all incremental migrations merged).
--- Created: 2026-06-20 by Design Agent
--- Updated: 2026-06-28 — merged 008 through 012 into base schema
--- Source: merge of 000_base_006 + 001 through 012
+-- db/migrations/008_base.sql
+-- Consolidated base schema for quickrobot v0.08 (unified logging + health checks).
+-- Created: 2026-07-10 by Design Agent
+-- Replaces: 007_base.sql + 008_unified_logs.sql + 008b_bg_health_checks.sql
+-- Changes from 007:
+--   - Unified logging: log_entries replaces (jobs, tasks, ansible_actions, qr_actions, instance_logs)
+--   - BG health checks: scheduler_config table + health_check_enabled column on instances
 
 PRAGMA foreign_keys = OFF;
 
@@ -71,12 +73,12 @@ CREATE TABLE groups (
 
 CREATE TABLE playbook_registry (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    file_path TEXT NOT NULL,
+    file_path TEXT NOT NULL UNIQUE,
     version TEXT DEFAULT '1',
     checksum_sha256 TEXT NOT NULL,
     file_type TEXT DEFAULT 'core' CHECK(file_type IN ('core', 'custom', 'template')),
     tags TEXT DEFAULT '',
-    playbook_id TEXT NOT NULL UNIQUE,
+    playbook_id TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     usage_counter_since_update INTEGER DEFAULT 0,
@@ -179,22 +181,6 @@ CREATE TABLE request_log (
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now'))
 );
 
-CREATE TABLE qr_actions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    action_type TEXT NOT NULL,
-    node_id INTEGER,
-    instance_id INTEGER,
-    actor TEXT DEFAULT 'api',
-    details TEXT DEFAULT '{}',
-    created_at TEXT NOT NULL,
-    override INTEGER NOT NULL DEFAULT 0,
-    status TEXT DEFAULT 'running' CHECK(status IN ('running','completed','failed','timeout','stuck')),
-    started_at TEXT,
-    finished_at TEXT,
-    duration_ms INTEGER DEFAULT 0,
-    playbook_registry_id INTEGER
-);
-
 -- =============================================================================
 -- INSTANCE & DEPLOYMENT TABLES
 -- =============================================================================
@@ -238,6 +224,7 @@ CREATE TABLE instances (
     experts INTEGER DEFAULT 0 CHECK(experts >= 0 AND experts <= 1000),
     draft INTEGER DEFAULT 0 CHECK(draft >= 0 AND draft <= 1000),
     cli_flags TEXT DEFAULT '[]',
+    health_check_enabled INTEGER DEFAULT 1 CHECK(health_check_enabled IN (0, 1)),
     UNIQUE(name, node_id)
 );
 
@@ -266,47 +253,6 @@ CREATE TABLE benchmark_results (
     output TEXT,
     response_json TEXT,
     success INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE TABLE ansible_actions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    action_type TEXT NOT NULL CHECK(action_type IN (
-        'validate_node','discover_node','deploy_instance','undeploy_instance',
-        'restart_instance','stop_instance','get_logs','scan_models',
-        'apt_update','apt_upgrade','reboot_node','shutdown_node',
-        'force_delete','ansible_execute','update_build','update_and_compile',
-        'rpc_health_check','execute_instance','config_change','preset_change'
-    )),
-    node_id INTEGER,
-    instance_id INTEGER,
-    actor TEXT DEFAULT 'system',
-    status TEXT DEFAULT 'received',
-    details TEXT,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now')),
-    started_at TEXT,
-    finished_at TEXT,
-    stdout TEXT,
-    stderr TEXT,
-    results_json TEXT,
-    duration_ms INTEGER DEFAULT 0,
-    playbook_name TEXT,
-    task_summary TEXT,
-    playbook_registry_id INTEGER,
-    playbook_version TEXT,
-    host TEXT,
-    CONSTRAINT fk_ansible_node FOREIGN KEY (node_id) REFERENCES nodes(id),
-    CONSTRAINT fk_ansible_instance FOREIGN KEY (instance_id) REFERENCES instances(id),
-    CONSTRAINT fk_ansible_playbook FOREIGN KEY (playbook_registry_id) REFERENCES playbook_registry(id)
-);
-
-CREATE TABLE instance_logs (
-    id INTEGER PRIMARY KEY,
-    instance_id INTEGER REFERENCES instances(id) ON DELETE SET NULL,
-    action TEXT NOT NULL CHECK(action IN ('create','start','stop','restart','config_change','deploy','undeploy','health_check','state_transition','error','async_build','preflight','timeout','uuid_check','update_and_compile','update_build','force_delete')),
-    status TEXT DEFAULT 'received',
-    detail TEXT,
-    duration_ms INTEGER DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now'))
 );
 
 CREATE TABLE config_levels (
@@ -339,75 +285,71 @@ CREATE TABLE engine_job_types (
 );
 
 -- =============================================================================
--- JOB/TASK HIERARCHY (RUNNER-1)
+-- UNIFIED LOGGING (log_entries) — replaces jobs/tasks/ansible_actions/qr_actions/instance_logs
 -- =============================================================================
 
-CREATE TABLE jobs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    instance_id INTEGER,
-    job_type TEXT NOT NULL CHECK(job_type IN (
-        'deploy', 'restart', 'undeploy', 'reconfigure', 'deploy_fast',
-        'update_build', 'full_update', 'health_check',
-        'apt_update', 'apt_upgrade', 'apt_update_upgrade', 'compile',
-        'model_scan', 'reboot', 'shutdown',
-        'start', 'rebuild', 'stop',
-        'benchmark_run', 'benchmark_chain',
-        'batch_update', 'batch_restart', 'script',
-        'bind', 'unbind'
-    )),
-    engine_type_name TEXT,
-    priority INTEGER DEFAULT 5 CHECK(priority > 0),
-    status TEXT DEFAULT 'queued' CHECK(status IN (
-        'queued', 'running', 'completed', 'failed', 'cancelled', 'disabled', 'scheduled', 'error'
-    )),
-    actor TEXT DEFAULT 'api' CHECK(actor IN ('api', 'system', 'agent', 'scheduler')),
-    error_message TEXT,
-    started_at TEXT,
-    finished_at TEXT,
-    retry_count INTEGER DEFAULT 0,
-    max_retries INTEGER DEFAULT 1,
-    next_run_at TEXT,
-    disabled INTEGER DEFAULT 0 CHECK(disabled IN (0, 1)),
-    recurrence_interval INTEGER DEFAULT 0,
-    parent_job_id INTEGER,
-    group_id INTEGER,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now')),
-    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now')),
-    timeout_seconds INTEGER DEFAULT 7200,
-    FOREIGN KEY(instance_id) REFERENCES instances(id) ON DELETE CASCADE,
-    FOREIGN KEY(parent_job_id) REFERENCES jobs(id) ON DELETE CASCADE
+CREATE TABLE log_entries (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    
+    -- Hierarchy: NULL = job-header row, set for task sub-rows
+    parent_id           INTEGER REFERENCES log_entries(id),
+    
+    -- Identity
+    job_type            TEXT,
+    engine_type_name    TEXT,
+    
+    -- Target references
+    instance_id         INTEGER REFERENCES instances(id),
+    node_id             INTEGER REFERENCES nodes(id),
+    
+    -- Execution state
+    status              TEXT NOT NULL DEFAULT 'running',
+    actor               TEXT DEFAULT 'api',
+    error_message       TEXT,
+    
+    -- Timing
+    created_at          TEXT NOT NULL,
+    started_at          TEXT,
+    finished_at         TEXT,
+    duration_ms         INTEGER DEFAULT 0,
+    
+    -- Task-level detail (NULL for job-header rows)
+    task_stage          TEXT,
+    stage_playbook      TEXT,
+    retry_count         INTEGER DEFAULT 0,
+    max_retries         INTEGER DEFAULT 1,
+    
+    -- Rich output
+    details_json        TEXT,
+    results_json        TEXT,
+    
+    -- Audit
+    playbook_registry_id INTEGER,
+    playbook_version    TEXT
 );
 
-CREATE TABLE tasks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    job_id INTEGER NOT NULL,
-    instance_id INTEGER,
-    stage TEXT NOT NULL CHECK(stage IN (
-        'preflight', 'deps', 'source', 'compile',
-        'config', 'config_svc', 'config_env',
-        'start', 'stop', 'health_probe',
-        'reboot', 'shutdown', 'undeploy', 'verify'
-    )),
-    playbook TEXT,
-    status TEXT DEFAULT 'queued' CHECK(status IN (
-        'queued', 'running', 'completed', 'failed', 'skipped', 'cancelled'
-    )),
-    error_message TEXT,
-    started_at TEXT,
-    finished_at TEXT,
-    playbook_registry_id INTEGER,
-    playbook_version INTEGER,
-    duration_ms INTEGER DEFAULT 0,
-    retry_count INTEGER DEFAULT 0,
-    max_retries INTEGER DEFAULT 1,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now')),
-    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now')),
-    FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+CREATE INDEX IF NOT EXISTS idx_log_parent ON log_entries(parent_id);
+CREATE INDEX IF NOT EXISTS idx_log_status ON log_entries(status);
+CREATE INDEX IF NOT EXISTS idx_log_created ON log_entries(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_log_instance ON log_entries(instance_id);
+
+-- =============================================================================
+-- SCHEDULED HEALTH CHECKS — config store
+-- =============================================================================
+
+CREATE TABLE scheduler_config (
+    key           TEXT PRIMARY KEY,
+    value         TEXT NOT NULL DEFAULT '',
+    description   TEXT
 );
+
+-- =============================================================================
+-- SCRIPT EXECUTION (dynamic multi-step scripts)
+-- =============================================================================
 
 CREATE TABLE scripts (
     id INTEGER PRIMARY KEY,
-    parent_job_id INTEGER REFERENCES jobs(id) ON DELETE CASCADE,
+    parent_job_id INTEGER REFERENCES log_entries(id) ON DELETE CASCADE,
     actor TEXT DEFAULT 'api',
     name TEXT,
     status TEXT DEFAULT 'queued' CHECK(status IN ('queued', 'running', 'completed', 'failed', 'cancelled')),
@@ -441,11 +383,10 @@ CREATE TABLE script_steps (
 CREATE TABLE playbook_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id INTEGER NOT NULL,
-    ansible_action_id INTEGER REFERENCES ansible_actions(id),
+    ansible_action_id INTEGER,
     output TEXT,
     timing_json TEXT,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now')),
-    FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now'))
 );
 
 -- =============================================================================
@@ -462,6 +403,7 @@ CREATE INDEX idx_instances_name ON instances(name);
 CREATE INDEX idx_instances_node ON instances(node_id);
 CREATE INDEX idx_instances_port ON instances(port_assigned);
 CREATE INDEX idx_instances_state ON instances(state);
+CREATE INDEX idx_instances_health_check ON instances(health_check_enabled);
 CREATE INDEX idx_members_group ON group_members(group_id);
 CREATE INDEX idx_models_engine ON engine_models(engine_type_id);
 CREATE INDEX idx_models_host ON engine_models(host_id);
@@ -473,20 +415,11 @@ CREATE INDEX idx_nodes_status ON nodes(status);
 CREATE INDEX idx_playbook_file_type ON playbook_registry(file_type);
 CREATE INDEX idx_playbook_tags ON playbook_registry(tags);
 CREATE INDEX idx_presets_engine ON engine_presets(engine_type_id);
-CREATE INDEX idx_qr_actions_action_type ON qr_actions(action_type);
-CREATE INDEX idx_qr_actions_created_at ON qr_actions(created_at DESC);
-CREATE INDEX idx_qr_actions_instance_id ON qr_actions(instance_id);
-CREATE INDEX idx_qr_actions_node_id ON qr_actions(node_id);
 CREATE INDEX idx_request_log_time ON request_log(created_at DESC);
-CREATE INDEX idx_playbook_runs_task ON playbook_runs(task_id);
 CREATE UNIQUE INDEX idx_job_type_engine ON engine_job_types(engine_type_name, job_type);
 CREATE INDEX idx_ejt_engine ON engine_job_types(engine_type_name);
 CREATE INDEX idx_script_steps_script ON script_steps(script_id);
 CREATE INDEX idx_config_levels_instance ON config_levels(instance_id);
 CREATE INDEX idx_config_levels_level ON config_levels(level);
-CREATE INDEX idx_jobs_instance ON jobs(instance_id);
-CREATE INDEX idx_jobs_status ON jobs(status);
-CREATE INDEX idx_jobs_running ON jobs(status, priority ASC, created_at ASC)
-    WHERE status IN ('queued', 'running');
-CREATE INDEX idx_jobs_parent ON jobs(parent_job_id);
 CREATE INDEX idx_nodes_hostname ON nodes(hostname);
+CREATE INDEX idx_playbook_runs_task ON playbook_runs(task_id);

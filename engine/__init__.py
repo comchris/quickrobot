@@ -223,11 +223,7 @@ def _auto_register_engines(db_path):
                 existing = _get_etb(db_path, hyphen_name)
         if existing is None:
             # Normalize name: use underscores (matching the filesystem package)
-            # Override: iperf3 → "iperf;3" for cleaner display
-            if eng_name == QR_ENGINE_IPERF3_NAME:
-                display_name = "iperf;3"
-            else:
-                display_name = cap.get("display_name", eng_name.replace("_", " ").title())
+            display_name = cap.get("display_name", eng_name.replace("_", " ").title())
             module_path = f"engine.{eng_name}"
            # Use predefined ID if available, otherwise let DB auto-assign
             fixed_id = _ENGINE_ID_MAP.get(eng_name)
@@ -236,21 +232,45 @@ def _auto_register_engines(db_path):
                     module_path=module_path, capabilities=cap, engine_id=fixed_id)
                 print(f"Auto-registered engine type: {eng_name}")
                 registered.append((eng_name, cap))
+                # Seed engine_configs from CAPABILITIES["config_defaults"]
+                if "config_defaults" in cap and fixed_id:
+                    try:
+                        from db.adapters.configs import set_engine_config as _sec
+                        for key, val_desc in cap["config_defaults"].items():
+                            value, desc = val_desc if isinstance(val_desc, tuple) else (val_desc, "")
+                            _sec(db_path, fixed_id, key, value, desc)
+                    except Exception:
+                        pass  # Non-critical — config seeding won't block engine registration
+                # Seed engine_job_types from CAPABILITIES["supported_jobs"]
+                if "supported_jobs" in cap and fixed_id:
+                    try:
+                        from db.sqlite import pool as _pool
+                        with _pool(db_path) as conn:
+                            for job_type in cap["supported_jobs"]:
+                                conn.execute(
+                                    """INSERT OR IGNORE INTO engine_job_types
+                                       (engine_type_name, job_type, label, description, requires_instance, max_concurrent)
+                                       VALUES (?, ?, ?, ?, 1, 1)""",
+                                    (eng_name, job_type, job_type.title(), f"{job_type.title()} via {eng_name}"),
+                                )
+                    except Exception:
+                        pass
             except Exception as exc:
                 print(f"Warning: failed to register engine '{eng_name}': {exc}")
         else:
-            # Sync display_name for known overrides (e.g., iperf3 → "iperf;3")
-            if eng_name == QR_ENGINE_IPERF3_NAME and existing.get("display_name") != "iperf;3":
+            # Sync display_name from CAPABILITIES (fixes drift, e.g., iperf3)
+            expected_dn = cap.get("display_name", eng_name.replace("_", " ").title())
+            if existing.get("display_name") != expected_dn:
                 try:
                     from db.sqlite import pool as _pool
                     with _pool(db_path) as conn:
                         conn.execute(
                             "UPDATE engine_types SET display_name = ? WHERE id = ?",
-                            ("iperf;3", existing["id"])
+                            (expected_dn, existing["id"])
                         )
-                    print(f"Updated iperf3 display_name to 'iperf;3' (was: {existing.get('display_name', 'N/A')})")
+                    print(f"[qr] Synced display_name for {eng_name}: '{existing['display_name']}' -> '{expected_dn}'")
                 except Exception as sync_exc:
-                    print(f"Warning: failed to update iperf3 display_name: {sync_exc}")
+                    print(f"[qr] Warning: failed to sync display_name for {eng_name}: {sync_exc}")
             # Sync ID if it drifted from the fixed mapping (e.g., MCP got id=9 on first DB creation)
             expected_id = _ENGINE_ID_MAP.get(eng_name)
             if expected_id is not None and existing["id"] != expected_id:
@@ -273,7 +293,33 @@ def _auto_register_engines(db_path):
                     print(f"Synced engine type '{eng_name}' id {existing['id']} -> {expected_id}")
                 except Exception as sync_exc:
                     print(f"Warning: failed to sync engine type '{eng_name}' id: {sync_exc}")
+    # One-shot full sync: catches any drift not caught by per-engine else branch
+    _sync_engine_display_names(db_path)
     return registered
+
+
+def _sync_engine_display_names(db_path):
+    """Sync all engine display_names from CAPABILITIES to DB.
+    
+    Called at end of _auto_register_engines() to catch drift on every engine.
+    Uses CAPABILITIES["display_name"] as the single source of truth.
+    """
+    try:
+        from db.sqlite import pool as _pool
+        with _pool(db_path) as conn:
+            for eng_name, cls, cap in ENGINES:
+                expected_dn = cap.get("display_name", eng_name.replace("_", " ").title())
+                row = conn.execute(
+                    "SELECT id, display_name FROM engine_types WHERE name=?", (eng_name,)
+                ).fetchone()
+                if row and row["display_name"] != expected_dn:
+                    conn.execute(
+                        "UPDATE engine_types SET display_name = ? WHERE id = ?",
+                        (expected_dn, row["id"])
+                    )
+                    print(f"[qr] Synced display_name for {eng_name}: '{row['display_name']}' -> '{expected_dn}'")
+    except Exception as exc:
+        print(f"[qr] WARNING: display_name sync failed: {exc}")
 
 
 def get_engine(name):

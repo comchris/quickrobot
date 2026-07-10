@@ -63,8 +63,8 @@ class ScriptRunner:
 
             # Update script to running
             conn.execute(
-                "UPDATE scripts SET status='running', started_at=strftime('%Y-%m-%dT%H:%M:%S','now'), "
-                "updated_at=strftime('%Y-%m-%dT%H:%M:%S','now') WHERE id=?", (script_id,)
+                "UPDATE scripts SET status='running', started_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'), "
+                "updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?", (script_id,)
             )
             conn.commit()
 
@@ -110,14 +110,14 @@ class ScriptRunner:
 
             conn.execute(
                 "UPDATE scripts SET status=?, completed_steps=?, failed_steps=?, skipped_steps=?, "
-                "finished_at=strftime('%Y-%m-%dT%H:%M:%S','now'), updated_at=strftime('%Y-%m-%dT%H:%M:%S','now') WHERE id=?",
+                "finished_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'), updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
                 (new_status, completed, failed, skipped, script_id),
             )
 
             # Update parent job status if linked
             if script["parent_job_id"]:
                 conn.execute(
-                    "UPDATE jobs SET status=?, finished_at=strftime('%Y-%m-%dT%H:%M:%S','now') "
+                    "UPDATE log_entries SET status=?, finished_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') "
                     "WHERE id=?", (new_status, script["parent_job_id"]),
                 )
 
@@ -212,8 +212,8 @@ class ScriptRunner:
         # Update step record
         with pool(self.db_path) as conn:
             conn.execute(
-                "UPDATE script_steps SET status=?, result=?, finished_at=strftime('%Y-%m-%dT%H:%M:%S','now'), "
-                "updated_at=strftime('%Y-%m-%dT%H:%M:%S','now') WHERE id=?",
+                "UPDATE script_steps SET status=?, result=?, finished_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'), "
+                "updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
                 (result["status"], json.dumps(result), step["id"]),
             )
 

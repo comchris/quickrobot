@@ -8,10 +8,10 @@ After=network.target
 
 [Service]
 Type=simple
-User={{ remote_node_user | default('mepaw') }}
+User={{ remote_node_user }}
 WorkingDirectory=/opt/quickrobot/{{ unit_name }}
-ExecStart={{ binary_path | default('/usr/bin/iperf3') }} $QR_CLI_ARGS_JOINED
-Restart={{ restart_policy | default('no') }}
+ExecStart={{ binary_path }} $QR_CLI_ARGS_JOINED
+Restart={{ restart_policy }}
 RestartSec=5
 StandardOutput=journal
 StandardError=journal

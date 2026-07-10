@@ -30,6 +30,7 @@ import time
 from lib.qr_engine_ids import (
     QR_DEFAULT_LOCALHOST, get_port_default, get_name_by_id,
     QR_FORBIDDEN_HOSTS, QR_ENGINE_PORT_DEFAULTS, get_system_instance_id,
+    QR_HEALTH_CHECK_SLEEP, QR_ENGINE_SUBPROCESS,
 )
 from lib.lib_time import utcnow_str
 
@@ -184,6 +185,7 @@ def check_and_free_port(port, service_name):
 # ---------------------------------------------------------------------------
 
 _ENGINE_SCAN_PATTERNS = {
+    "api": {"port": QR_ENGINE_PORT_DEFAULTS["quickrobot-api"], "patterns": ["quickrobot.py"]},
     "webui": {"port": QR_ENGINE_PORT_DEFAULTS["quickrobot-webui"], "patterns": ["quickrobot_webui.py"]},
     "mcp": {"port": QR_ENGINE_PORT_DEFAULTS["quickrobot-mcp"], "patterns": ["qr_mcp_server.py"]},
     "scheduler": {"port": None, "patterns": ["quickrobot_scheduler", "engine.quickrobot_scheduler"]},
@@ -742,7 +744,6 @@ def start_system_engine(engine_name, env_config, api_host, api_port, python_exe=
     elif engine_name == "mcp":
         port = int(env_config.get("QUICKROBOT_MCP_PORT") or str(get_port_default("quickrobot-mcp")))
     elif engine_name == "scheduler":
-        port = 0  # Scheduler doesn't bind a port
         port = None
 
     # Port conflict safety: check + free if stale process holds it
@@ -775,6 +776,22 @@ def start_system_engine(engine_name, env_config, api_host, api_port, python_exe=
     if old_pid and _get_pid_status(old_pid):
         # Is this a true child of this API, or an orphan from a dead API?
         if _is_process_orphaned(old_pid):
+            # Check per-engine restart adopt flag (from .env, default=QR_XXX_RESTART_ADOPT)
+            adopt_env = os.getenv(f"QUICKROBOT_{engine_name.upper()}_RESTART_ADOPT")
+            if adopt_env is None:
+                _adopt_map = {"webui": QR_WEBUI_RESTART_ADOPT,
+                              "mcp": QR_MCP_RESTART_ADOPT,
+                              "scheduler": QR_SCHEDULER_RESTART_ADOPT}
+                adopt_env = _adopt_map.get(engine_name, "false")
+            adopt = adopt_env.lower() in ("true", "1")
+            if adopt:
+                print(f"[qr] {engine_name}: orphaned process (pid={old_pid}) — adopting (RESTART_ADOPT=true)")
+                try:
+                    transition_state(db_path, inst_id, "deployed")
+                except Exception:
+                    pass
+                return {"action": "start", "port": port, "pid": old_pid,
+                        "status": "existing_process_alive", "engine": engine_name}
             print(f"[qr] {engine_name}: orphaned process detected (pid={old_pid}), killing and restarting")
             _kill_orphaned_process(old_pid, engine_name)
             try:
@@ -1210,7 +1227,7 @@ def api_health_check_loop(api_host, api_port, max_retries=3, retry_delay=3, chec
     print(f"[qr] Health check starting: {_api_url} (interval={check_interval}s, retries={max_retries}, retry_delay={retry_delay}s)", flush=True)
     # Startup grace period: give Flask time to bind and start accepting connections.
     import time as _time_mod
-    _time_mod.sleep(10)
+    _time_mod.sleep(QR_HEALTH_CHECK_SLEEP)
 
     while True:
         try:
@@ -1281,6 +1298,310 @@ def start_health_check_thread(api_host, api_port, max_retries=3, retry_delay=10,
     )
     _thread.start()
     return _thread
+
+
+# ── System + Subprocess Engine Health Loop (HC-SYSTEM) ──────────────────
+# Monitors all system-managed and subprocess instances for dead PIDs.
+# Auto-restarts dead processes, logs to logs/system_health.log.
+
+_SYSTEM_HEALTH_INTERVAL = 30  # seconds between health checks
+_SYSTEM_HEALTH_LOG_NAME = "system_health.log"
+_SYSTEM_HEALTH_STARTED = False  # Guard: only start once
+
+
+def _get_system_health_log_path():
+    """Get the log file path for system health checks."""
+    return os.path.join(os.getcwd(), _LOG_DIR, _SYSTEM_HEALTH_LOG_NAME)
+
+
+def _system_health_check_one(db_path, inst_id, pid, engine_name):
+    """Check a single instance's PID and auto-restart if dead.
+
+    Uses os.kill(pid, 0) for fast existence check (no psutil import overhead).
+    Falls back to psutil if os.kill fails (e.g., permission issues).
+
+    Args:
+        db_path: Path to the SQLite database.
+        inst_id: Instance ID to check.
+        pid: Process ID to verify.
+        engine_name: Human-readable engine name for logging.
+
+    Returns:
+        str: "alive", "dead_restarted", or "error"
+    """
+    import psutil as _psutil
+
+    alive = False
+    try:
+        proc = _psutil.Process(pid)
+        if proc.status() != "zombie":
+            alive = True
+    except (_psutil.NoSuchProcess, _psutil.AccessDenied):
+        pass
+
+    if alive:
+        return "alive"
+
+    # Process is dead — attempt auto-restart
+    try:
+        from db.adapters.instances import update_instance, get_instance
+
+        # Get instance info to determine restart method
+        inst = get_instance(db_path, inst_id)
+        if not inst:
+            return "error"
+
+        engine_type_id = inst.get("engine_type_id")
+        is_subprocess = (engine_type_id == QR_ENGINE_SUBPROCESS)
+
+        # For system engines (IDs 1-4), use start_system_engine path
+        # For subprocess engines (ID=12), use QrSubprocessEngine execute path
+        if is_subprocess:
+            from engine.subprocess import QrSubprocessEngine
+            try:
+                QrSubprocessEngine().execute(inst_id, "start", db_path)
+                _log_system_health(
+                    engine_name, f"restarted_subprocess",
+                    {"inst_id": inst_id, "old_pid": pid}
+                )
+                return "dead_restarted"
+            except Exception as _exc:
+                _log_system_health(
+                    engine_name, f"restart_failed_subprocess",
+                    {"inst_id": inst_id, "old_pid": pid, "error": str(_exc)}
+                )
+                return "error"
+        else:
+            # System-managed instance — clear stale PID and let
+            # start_system_engine handle restart on next cycle
+            try:
+                update_instance(db_path, inst_id, pid_last_known=None)
+                _log_system_health(
+                    engine_name, f"dead_system_engine",
+                    {"inst_id": inst_id, "pid": pid}
+                )
+                return "dead_restarted"
+            except Exception as _exc:
+                _log_system_health(
+                    engine_name, f"dead_system_engine_error",
+                    {"inst_id": inst_id, "pid": pid, "error": str(_exc)}
+                )
+                return "error"
+
+    except Exception as _exc:
+        _log_system_health(
+            engine_name, f"check_error",
+            {"inst_id": inst_id, "pid": pid, "error": str(_exc)}
+        )
+        return "error"
+
+
+def _system_health_loop():
+    """Periodic health check loop for system-managed and subprocess instances.
+
+    Runs every _SYSTEM_HEALTH_INTERVAL seconds:
+    1. Queries instances with system_managed=1 or engine_type_id=12
+    2. For each with a non-NULL PID, checks if process is alive
+    3. Dead PIDs → auto-restart (subprocess) or clear PID (system engine)
+    4. Logs all results to logs/system_health.log
+
+    Designed for use as a daemon thread target — no exceptions escape.
+    """
+    import threading as _threading
+    import time as _time_mod
+
+    db_path = _CONFIG.get("db_path", os.path.join(os.getcwd(), "data", "quickrobot.db"))
+    from db.sqlite import pool
+    from lib.qr_engine_ids import QR_ENGINE_SUBPROCESS
+
+    while True:
+        try:
+            with pool(db_path) as conn:
+                # Query system-managed + subprocess instances with PIDs
+                rows = conn.execute(
+                    """SELECT id, pid_last_known, engine_type_id, name
+                       FROM instances
+                       WHERE (system_managed = 1 OR engine_type_id = ?)
+                         AND pid_last_known IS NOT NULL
+                         AND state != 'stopped'""",
+                    (QR_ENGINE_SUBPROCESS,),
+                ).fetchall()
+
+                # Also query system-managed instances without PIDs (scheduler).
+                # These need process-table scanning to detect alive/dead.
+                no_pid_rows = conn.execute(
+                    """SELECT id, engine_type_id, name
+                       FROM instances
+                       WHERE system_managed = 1
+                         AND pid_last_known IS NULL
+                         AND state != 'stopped'""",
+                ).fetchall()
+
+            if not rows and not no_pid_rows:
+                _time_mod.sleep(_SYSTEM_HEALTH_INTERVAL)
+                continue
+
+            alive_count = 0
+            dead_count = 0
+            error_count = 0
+
+            for row in rows:
+                inst_id = row["id"]
+                pid = row["pid_last_known"]
+                engine_type_id = row["engine_type_id"]
+                engine_name = row["name"] if row["name"] else f"instance-{inst_id}"
+
+                # Always update last_state_change so WebUI/API shows freshness
+                # Direct SQL — transition_state fails for running→running (not in state machine)
+                try:
+                    from lib.lib_time import utcnow_str as _hc_now
+                    now_ts = _hc_now()
+                    from db.sqlite import pool as _hc_pool
+                    with _hc_pool(db_path) as _hc_conn:
+                        _hc_conn.execute(
+                            "UPDATE instances SET last_state_change=? WHERE id=?",
+                            (now_ts, inst_id),
+                        )
+                except Exception:
+                    pass  # Non-critical — stale timestamp is acceptable
+
+                result = _system_health_check_one(
+                    db_path, inst_id, pid, engine_name
+                )
+
+                if result == "alive":
+                    alive_count += 1
+                elif result == "dead_restarted":
+                    dead_count += 1
+                else:
+                    error_count += 1
+
+            # Handle system-managed instances without PIDs (scheduler).
+            # Use process table scanning to detect alive/dead state.
+            for row in no_pid_rows:
+                inst_id = row["id"]
+                engine_type_id = row["engine_type_id"]
+                engine_name = row["name"] if row["name"] else f"instance-{inst_id}"
+
+                # Update last_state_change for freshness
+                try:
+                    from lib.lib_time import utcnow_str as _hc_now
+                    now_ts = _hc_now()
+                    from db.sqlite import pool as _hc_pool
+                    with _hc_pool(db_path) as _hc_conn:
+                        _hc_conn.execute(
+                            "UPDATE instances SET last_state_change=? WHERE id=?",
+                            (now_ts, inst_id),
+                        )
+                except Exception:
+                    pass
+
+                # Check if this is the scheduler engine (ID=4 by convention)
+                is_scheduler = False
+                try:
+                    from lib.qr_engine_ids import QR_ENGINE_SCHEDULER
+                    et_row = conn.execute(
+                        "SELECT id FROM engine_types WHERE name=?",
+                        ("quickrobot-scheduler",),
+                    ).fetchone()
+                    is_scheduler = (et_row and et_row["id"] == QR_ENGINE_SCHEDULER) or engine_type_id == QR_ENGINE_SCHEDULER
+                except Exception:
+                    pass
+
+                if is_scheduler:
+                    try:
+                        stale = _find_stale_schedulers()
+                        if len(stale) > 0:
+                            alive_count += 1
+                        else:
+                            # No scheduler process found — update state to error
+                            try:
+                                from db.adapters.instances import update_instance
+                                with pool(db_path) as _hc_pool:
+                                    _hc_pool.execute(
+                                        "UPDATE instances SET state='error' WHERE id=? AND state != 'error'",
+                                        (inst_id,),
+                                    )
+                                dead_count += 1
+                                _log_system_health(engine_name, "dead_system_engine_scan", {"inst_id": inst_id})
+                            except Exception:
+                                error_count += 1
+                    except Exception as _exc:
+                        _log_system_health("hc-loop", "scheduler_scan_error", {"error": str(_exc)})
+                        error_count += 1
+
+            total_checked = len(rows) + len(no_pid_rows)
+            _log_system_health(
+                "hc-loop", "check_summary",
+                {"total": total_checked, "alive": alive_count,
+                 "dead_restarted": dead_count, "errors": error_count}
+            )
+
+        except Exception as _exc:
+            # Non-fatal: loop continues on next interval
+            _log_system_health(
+                "hc-loop", "loop_error",
+                {"error": str(_exc)}
+            )
+
+        _time_mod.sleep(_SYSTEM_HEALTH_INTERVAL)
+
+
+def start_system_health_thread():
+    """Start the system health check daemon thread.
+
+    Idempotent: if already started, returns without creating a duplicate thread.
+
+    Returns:
+        Thread object (daemon=True), or None if already running.
+    """
+    global _SYSTEM_HEALTH_STARTED
+    if _SYSTEM_HEALTH_STARTED:
+        return None
+
+    from threading import Thread as _Thread
+    _thread = _Thread(
+        target=_system_health_loop,
+        daemon=True,
+        name="system-health-check"
+    )
+    _thread.start()
+    _SYSTEM_HEALTH_STARTED = True
+    print("[qr] system health check started (interval={}s)".format(
+        _SYSTEM_HEALTH_INTERVAL), flush=True)
+    return _thread
+
+
+def _log_system_health(engine_name, action, details=None):
+    """Log a system health event to logs/system_health.log.
+
+    Args:
+        engine_name: "hc-loop" for loop-level events, or instance name
+        action: Short action descriptor (e.g., "dead_restarted", "alive")
+        details: Optional dict with extra context
+    """
+    from lib.lib_time import utcnow_str
+
+    timestamp = utcnow_str()
+    detail_str = ""
+    if details:
+        parts = [f"{k}={v}" for k, v in sorted(details.items())]
+        detail_str = " ".join(parts)
+
+    log_line = f"[{timestamp}] [{engine_name}] {action}: {detail_str}"
+
+    try:
+        log_dir = os.path.join(os.getcwd(), "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, _SYSTEM_HEALTH_LOG_NAME)
+        with open(log_path, "a") as f:
+            f.write(log_line + "\n")
+    except Exception:
+        pass  # Non-critical — don't let log failure break the health loop
+
+    # Also print to stdout for tmux visibility (low frequency)
+    if action in ("check_summary", "dead_restarted", "loop_error"):
+        print(f"[qr] {log_line}")
 
 
 # Import _CONFIG at module level for DB path access

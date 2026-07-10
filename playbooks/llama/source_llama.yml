@@ -3,7 +3,7 @@
 # @version: 3
 # @timeout: 600
 # source.yml — Clone or update llama.cpp source code on the node
-- hosts: "{{ inventory_host | default('localhost') }}"
+- hosts: "{{ inventory_host }}"
   become_user: "{{ remote_node_user | default(omit) }}"
   gather_facts: no
 

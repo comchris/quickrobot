@@ -27,7 +27,7 @@ from lib.lib_constants import DEFAULT_ANSIBLE_USER
 
 CAPABILITIES = {
     "name": "universal",
-    "display_name": "Universal Engine",
+    "display_name": "Universal systemd service",
     "supports_models": False,
     "supports_presets": True,
     "max_instances": 99,
@@ -36,6 +36,7 @@ CAPABILITIES = {
     "sub_pages": [
         {"path": "/engines/universal/config", "label": "Config", "order": 1},
     ],
+    "supported_jobs": ["deploy", "undeploy", "restart", "reconfigure"],
 }
 
 

@@ -1,6 +1,6 @@
 # @name: Undeploy Llama Rpc
 # @playbook_id: undeploy_rpc
-# @version: 4
+# @version: 5
 # undeploy_rpc.yml — Undeploy RPC engine instance from target node
 # Extra vars: pkill_pattern (optional, defaults to ggml-rpc-server)
 - hosts: "{{ inventory_host }}"
@@ -8,7 +8,7 @@
   vars:
     # engine_type comes from extra_vars passed by routes_instances.py
     # Default fallback to 'rpc' if not provided (legacy compat)
-    unit_name: "qr-{{ instance_id }}-{{ engine_type | default('rpc') }}"
+    unit_name: "qr-{{ instance_id }}-{{ engine_type | default('llama_rpc') }}"
     _pkill_pattern: "{{ pkill_pattern | default('ggml-rpc-server') }}"
   tasks:
     - set_fact:

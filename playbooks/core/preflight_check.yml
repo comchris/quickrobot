@@ -3,7 +3,7 @@
 # @version: 4
 # @timeout: 60
 # preflight.yml — Read-only verification: connectivity, disk, stale service report
-- hosts: "{{ inventory_host | default('localhost') }}"
+- hosts: "{{ inventory_host }}"
   become: yes
   gather_facts: no
 
@@ -15,8 +15,8 @@
       file:
         path: "{{ _qr_base_dir }}"
         state: directory
-        owner: "{{ ansible_user | default('root') }}"
-        group: "{{ ansible_user | default('root') }}"
+        owner: "{{ ansible_user  }}"
+        group: "{{ ansible_user  }}"
         mode: '0755'
       register: qr_dir_created
       changed_when: false
@@ -58,14 +58,14 @@
       failed_when: '"UUID_MISMATCH" in (_uuid_verify.stdout | default(""))'
       changed_when: false
 
-    - name: Check available disk space on root filesystem
-      shell: df -BG / | tail -1 | awk '{print $4}' | tr -d 'G'
+    - name: Check available disk space on build filesystem (/opt)
+      shell: df -BG /opt 2>/dev/null | tail -1 | awk '{print $4}' | tr -d 'G'
       register: disk_free_gb
       changed_when: false
 
-    - name: Fail if insufficient disk space (< 5 GB free)
+    - name: Fail if insufficient disk space (< 5 GB free on /opt)
       fail:
-        msg: "Insufficient disk space on root filesystem. Free: {{ disk_free_gb.stdout }} GB (need >= 5 GB)"
+        msg: "Insufficient disk space on /opt. Free: {{ disk_free_gb.stdout }} GB (need >= 5 GB)"
       when: disk_free_gb.stdout | int < 5
 
     - name: Log available disk space

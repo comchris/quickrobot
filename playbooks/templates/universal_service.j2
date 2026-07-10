@@ -8,11 +8,11 @@ After=network.target
 
 [Service]
 Type=simple
-User={{ remote_node_user | default('mepaw') }}
+User={{ remote_node_user }}
 WorkingDirectory={{ install_dir }}
 EnvironmentFile={{ env_file }}
-{% if start_command %}ExecStart=bash -c "source {{ venv_path }}/bin/activate && {{ start_command | replace('{host}', host | default('127.0.0.1')) | replace('{port}', (deploy_port | default(0))|string) }} $QR_CLI_ARGS_JOINED"{% else %}ExecStart={{ binary_path }} $QR_CLI_ARGS_JOINED{% endif %}
-Restart={{ restart_policy | default('no') }}
+{% if start_command %}ExecStart=bash -c "source {{ venv_path }}/bin/activate && {{ start_command | replace('{host}', host) | replace('{port}', (deploy_port)|string) }} $QR_CLI_ARGS_JOINED"{% else %}ExecStart={{ binary_path }} $QR_CLI_ARGS_JOINED{% endif %}
+Restart={{ restart_policy }}
 RestartSec=5
 StandardOutput=journal
 StandardError=journal

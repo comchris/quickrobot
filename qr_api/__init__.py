@@ -160,6 +160,9 @@ from .routes_instances import (
     api_create_instance,
     api_cycle_split_mode,
     api_delete_instance,
+    # EP-CONSOLIDATE P3+P4: unified config handlers
+    api_get_instance_config,
+    api_set_instance_config,
     api_set_split_mode,
     api_deploy_instance,
      api_reconfigure_instance,
@@ -171,6 +174,7 @@ from .routes_instances import (
     api_set_gpu_override,
     api_get_instance,
     api_get_instance_status,
+    api_health_check_all,
     api_instance_health,
     api_instance_journal,
     api_instance_logs,
@@ -229,6 +233,8 @@ from .routes_nodes import (
     api_clear_old_ansible_actions,
     api_qr_actions,
     api_clear_old_qr_actions,
+    api_log_entries,
+    api_cleanup_log_entries,
     api_clear_results,
     api_clone_preset,
 
@@ -281,6 +287,7 @@ from .routes_nodes import (
     api_mcp_stop,
     api_mcp_update_setting,
     api_mcp_update_settings,
+     api_node_apt,
     api_node_apt_update,
     api_node_apt_upgrade,
     api_node_apt_update_upgrade,
@@ -345,6 +352,8 @@ def register_routes(app):
     app.add_url_rule("/api/v1/ansible_actions/clear-old", "api_clear_old_ansible_actions", api_clear_old_ansible_actions, methods=["POST"])
     app.add_url_rule("/api/v1/qr_actions", "api_qr_actions", api_qr_actions, methods=["GET"])
     app.add_url_rule("/api/v1/qr_actions/clear-old", "api_clear_old_qr_actions", api_clear_old_qr_actions, methods=["POST"])
+    app.add_url_rule("/api/v1/log_entries", "api_log_entries", api_log_entries, methods=["GET"])
+    app.add_url_rule("/api/v1/log_entries/cleanup", "api_cleanup_log_entries", api_cleanup_log_entries, methods=["POST"])
     app.add_url_rule("/api/v1/app/status", "api_app_status", api_app_status, methods=["GET"])
     app.add_url_rule("/api/v1/benchmarks/prompts", "api_create_prompt", api_create_prompt, methods=["POST"])
     app.add_url_rule("/api/v1/benchmarks/prompts", "api_list_prompts", api_list_prompts, methods=["GET"])
@@ -423,6 +432,8 @@ def register_routes(app):
     app.add_url_rule("/api/v1/instances/<int:inst_id>/experts", "api_set_experts", api_set_experts, methods=["PUT"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/force-delete", "api_force_delete_instance", api_force_delete_instance, methods=["POST"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/health", "api_instance_health", api_instance_health, methods=["GET"])
+    # BG-HEALTH-1
+    app.add_url_rule("/api/v1/instances/health-check-all", "api_health_check_all", api_health_check_all, methods=["POST"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/journal", "api_instance_journal", api_instance_journal, methods=["GET"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/log-level", "api_update_log_level", api_update_log_level, methods=["PUT"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/logs", "api_instance_logs", api_instance_logs, methods=["GET"])
@@ -439,8 +450,12 @@ def register_routes(app):
     app.add_url_rule("/api/v1/instances/<int:inst_id>/split", "api_set_split", api_set_split, methods=["PUT"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/split-mode", "api_cycle_split_mode", api_cycle_split_mode, methods=["PATCH"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/split-mode", "api_set_split_mode", api_set_split_mode, methods=["PUT"])
+    # EP-CONSOLIDATE P3+P4: unified instance config endpoint
+    app.add_url_rule("/api/v1/instances/<int:inst_id>/config", "api_get_instance_config", api_get_instance_config, methods=["GET"])
+    app.add_url_rule("/api/v1/instances/<int:inst_id>/config", "api_set_instance_config", api_set_instance_config, methods=["PUT"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/start", "api_start_instance", api_start_instance, methods=["POST"])
-    app.add_url_rule("/api/v1/instances/<int:inst_id>/status", "api_instance_status", api_instance_status, methods=["GET"])
+    # /instances/<id>/status registered at line 409 as api_get_instance_status (merged handler)
+    # Former duplicate at line 447 removed — EP-CONSOLIDATE P1
     app.add_url_rule("/api/v1/instances/<int:inst_id>/stop", "api_stop_instance", api_stop_instance, methods=["POST"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/system-status", "api_system_instance_status", api_system_instance_status, methods=["GET"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/test_mode", "api_toggle_test_mode", api_toggle_test_mode, methods=["POST"])
@@ -470,6 +485,9 @@ def register_routes(app):
     app.add_url_rule("/api/v1/nodes/<int:node_id>", "api_delete_node", api_delete_node, methods=["DELETE"])
     app.add_url_rule("/api/v1/nodes/<int:node_id>", "api_get_node", api_get_node, methods=["GET"])
     app.add_url_rule("/api/v1/nodes/<int:node_id>", "api_update_node", api_update_node, methods=["PUT"])
+    # EP-CONSOLIDATE P2: Unified APT endpoint (3→1)
+    app.add_url_rule("/api/v1/nodes/<int:node_id>/apt", "api_node_apt", api_node_apt, methods=["POST"])
+    # Backward-compat wrappers (thin: redirect to unified handler)
     app.add_url_rule("/api/v1/nodes/<int:node_id>/apt-update", "api_node_apt_update", api_node_apt_update, methods=["POST"])
     app.add_url_rule("/api/v1/nodes/<int:node_id>/apt-upgrade", "api_node_apt_upgrade", api_node_apt_upgrade, methods=["POST"])
     app.add_url_rule("/api/v1/nodes/<int:node_id>/apt-update-upgrade", "api_node_apt_update_upgrade", api_node_apt_update_upgrade, methods=["POST"])

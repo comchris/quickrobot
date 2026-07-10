@@ -34,7 +34,7 @@ from qr_api.lib_nodes import _get_node_build_state
 from db.sqlite import pool as db_pool
 
 
-def _health_probe_instance(inst_id, hostname):
+def _health_probe_instance(inst_id, hostname, node_id=None):
     """Probe remote systemd service health via instance_health_check playbook.
 
     Used by start/stop/restart for DESIGN-2 health-first semantics.
@@ -43,6 +43,7 @@ def _health_probe_instance(inst_id, hostname):
     Args:
         inst_id: Instance ID (for logging).
         hostname: Remote node hostname/IP.
+        node_id: Node ID (for sudo detection on localhost deployments).
 
     Returns:
         Dict: {"service_state": "...", "error": None|str, "main_pid": int|None}
@@ -51,7 +52,8 @@ def _health_probe_instance(inst_id, hostname):
         r = _execute_playbook("instance_health_check", resolver_type="playbook_id",
                               limit=hostname,
                               extra_vars={"inventory_host": hostname,
-                                          "unit_name": f"qr-{inst_id}-instance"},
+                                          "unit_name": f"qr-{inst_id}-instance",
+                                          "node_id": node_id},
                               action_type="health_check")
 
         if r.get("error"):
@@ -412,6 +414,21 @@ def api_create_instance():
     except Exception:
         pass  # Config merge is best-effort
 
+    # Populate node_hostname from node record (required for playbook limit/extra_vars)
+    try:
+        from db.adapters.nodes import get_node as _gn_node
+        from db.adapters.instances import update_instance as _ui_nh
+        nd = _gn_node(_CONFIG["db_path"], node_id) if node_id else None
+        if nd:
+            nh = nd.get("ansible_inventory_host") or nd.get("hostname", "")
+            nn = nd.get("name", "")
+            if nh != instance.get("node_hostname"):
+                _ui_nh(_CONFIG["db_path"], instance["id"], node_hostname=nh, node_name=nn)
+                instance["node_hostname"] = nh
+                instance["node_name"] = nn
+    except Exception:
+        pass  # Non-critical — deploy will use defaults
+
     # Auto-deploy if enabled and deploy_requested flag not explicitly false
     auto_deploy = _CONFIG.get("create_and_autodeploy", True)
     deploy_flag = body.get("deploy", True)
@@ -580,18 +597,14 @@ def api_list_instances():
                 try:
                     from db.adapters.configs import get_engine_config as _gec
                     et_id = inst.get("engine_type_id")
-                    open("/tmp/mcp_debug.log", "a").write(f"mcp check: engine={engine_type_name} et_id={et_id}\n")
                     if et_id:
                         rr = _gec(_CONFIG["db_path"], et_id, "mcp_allow_reads") or {}
                         wr = _gec(_CONFIG["db_path"], et_id, "mcp_allow_writes") or {}
                         pr = _gec(_CONFIG["db_path"], et_id, "mcp_allow_proxy") or {}
-                        open("/tmp/mcp_debug.log", "a").write(f"  _gec: reads={rr.get('value')} writes={wr.get('value')} proxy={pr.get('value')}\n")
                         inst["mcp_allow_reads"] = str(rr.get("value", "true")).lower() in ("true", "1", "yes")
                         inst["mcp_allow_writes"] = str(wr.get("value", "true")).lower() in ("true", "1", "yes")
                         inst["mcp_allow_proxy"] = str(pr.get("value", "true")).lower() in ("true", "1", "yes")
-                        open("/tmp/mcp_debug.log", "a").write(f"  set: reads={inst['mcp_allow_reads']} writes={inst['mcp_allow_writes']} proxy={inst['mcp_allow_proxy']}\n")
                 except Exception as _exc:
-                    open("/tmp/mcp_debug.log", "a").write(f"  exception: {_exc}\n")
                     inst["mcp_allow_reads"] = True
                     inst["mcp_allow_writes"] = True
                     inst["mcp_allow_proxy"] = True
@@ -632,18 +645,86 @@ def api_list_instances():
     for i in instances:
         if i.get('id') == 3:
             print(f"[qr] DEBUG api_list_instances instance 3: engine_type_name={i.get('engine_type_name')} mcp_keys={[k for k in i.keys() if 'mcp' in k.lower()]}")
-    # Enrich with active job counts (queued + running)
+    # Enrich with active job details (queued + running) — returns dict per instance
     try:
         with db_pool(_CONFIG["db_path"]) as conn:
             job_rows = conn.execute(
-                "SELECT instance_id, COUNT(*) as cnt FROM jobs WHERE status IN ('queued','running') GROUP BY instance_id"
+                "SELECT instance_id, MIN(id) as job_id, job_type, task_stage, stage_playbook, "
+                "created_at, COUNT(*) as active_count FROM log_entries "
+                "WHERE parent_id IS NULL AND status IN ('queued','running') GROUP BY instance_id"
             ).fetchall()
-        job_map = {r["instance_id"]: r["cnt"] for r in job_rows}
+        job_map = {r["instance_id"]: r for r in job_rows}
         for inst in instances:
-            inst["active_jobs"] = job_map.get(inst["id"], 0)
+            ji = job_map.get(inst["id"])
+            if ji:
+                inst["active_jobs"] = {
+                    "job_id": ji["job_id"], "job_type": ji["job_type"] or "",
+                    "stage": ji["task_stage"] or "", "playbook": ji["stage_playbook"] or "",
+                    "created_at": ji["created_at"] or "", "count": ji["active_count"],
+                }
+            else:
+                inst["active_jobs"] = None
     except Exception:
-        # Non-critical — skip if jobs table not available
-        pass
+        for inst in instances:
+            inst["active_jobs"] = None
+
+    # Pre-compute available actions per instance (state + engine_type derived).
+    # Actions are deterministic — no AJAX needed client-side.
+    _LLAMA_ACTIONS = {
+        "unconfigured":   [{"name": "deploy", "label": "Deploy"}, {"name": "undeploy", "label": "Undeploy"}, {"name": "delete", "label": "Delete"}],
+        "configuring":    [{"name": "stop", "label": "Stop"}],
+        "deploying":      [{"name": "stop", "label": "Stop"}],
+        "deployed":       [{"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "reconfigure", "label": "Reconfigure"}, {"name": "delete", "label": "Delete"}],
+        "starting":       [{"name": "stop", "label": "Stop"}],
+        "loading":        [{"name": "stop", "label": "Stop"}],
+        "running":        [{"name": "stop", "label": "Stop"}, {"name": "restart", "label": "Restart"}, {"name": "reconfigure", "label": "Reconfigure"}],
+        "stopping":       [{"name": "start", "label": "Start"}],
+        "stopped":        [{"name": "start", "label": "Start"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "reconfigure", "label": "Reconfigure"}, {"name": "deploy", "label": "Deploy"}, {"name": "delete", "label": "Delete"}],
+        "error":          [{"name": "start", "label": "Start"}, {"name": "deploy", "label": "Deploy"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "stop", "label": "Stop"}, {"name": "delete", "label": "Delete"}],
+        "updating":       [],
+        "compiling":      [],
+        "build_error":    [{"name": "deploy", "label": "Deploy"}, {"name": "start", "label": "Start"}, {"name": "delete", "label": "Delete"}],
+        "timeout":        [{"name": "deploy", "label": "Deploy"}],
+        "test_mode":      [{"name": "stop", "label": "Stop"}],
+    }
+    _SUBPROCESS_ACTIONS = {
+        "unconfigured":   [{"name": "deploy", "label": "Deploy"}, {"name": "delete", "label": "Delete"}],
+        "configuring":    [{"name": "restart", "label": "Restart"}],
+        "deployed":       [{"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}],
+        "starting":       [{"name": "stop", "label": "Stop"}],
+        "running":        [{"name": "stop", "label": "Stop"}, {"name": "restart", "label": "Restart"}],
+        "stopping":       [{"name": "start", "label": "Start"}],
+        "stopped":        [{"name": "start", "label": "Start"}, {"name": "delete", "label": "Delete"}],
+        "error":          [{"name": "start", "label": "Start"}, {"name": "restart", "label": "Restart"}, {"name": "deploy", "label": "Deploy"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "stop", "label": "Stop"}],
+        "build_error":    [{"name": "deploy", "label": "Deploy"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}],
+        "timeout":        [{"name": "deploy", "label": "Deploy"}],
+    }
+    # System-managed engines: use restart_system endpoint instead of standard stop/start
+    _SYSTEM_ACTIONS = {
+        "running":        [{"name": "restart_system", "label": "Restart"}],
+        "stopped":        [{"name": "start", "label": "Start"}],
+        "error":          [{"name": "restart_system", "label": "Restart"}],
+    }
+
+    for inst in instances:
+        engine = inst.get("engine_type_name", "")
+        state = inst.get("state", "unknown")
+        if engine in (QR_ENGINE_LLAMA_SERVER_NAME, QR_ENGINE_LLAMA_RPC_NAME,
+                      QR_ENGINE_IPERF3_NAME, QR_ENGINE_UNIVERSAL_NAME):
+            action_map = _LLAMA_ACTIONS
+        elif engine == QR_ENGINE_SUBPROCESS_NAME:
+            action_map = _SUBPROCESS_ACTIONS
+        elif engine in (QR_ENGINE_API_NAME, QR_ENGINE_WEBUI_NAME,
+                        QR_ENGINE_MCP_NAME, QR_ENGINE_SCHEDULER_NAME):
+            action_map = _SYSTEM_ACTIONS
+        else:
+            action_map = {}
+        actions = action_map.get(state, [])
+        # Hide delete for system-managed instances
+        if inst.get("system_managed"):
+            actions = [a for a in actions if a["name"] != "delete"]
+        inst["_actions"] = actions
+
     return success_list(instances)
 
 
@@ -666,7 +747,33 @@ def api_get_instance(inst_id):
                 cluster_result = build_llama_server_env(_CONFIG["db_path"], inst_id)
             elif engine_type_name == QR_ENGINE_LLAMA_RPC_NAME:
                 cluster_result = build_rpc_server_env(_CONFIG["db_path"], inst_id)
-            merged = {"env": cluster_result["env"], "cli_opts": [s for s in cluster_result["cli_args"].split()] if cluster_result["cli_args"] else [], "model": {}}
+            # Resolve restart_policy and start_on_boot from config_override chain
+            try:
+                from lib.lib_config_merge import _resolve_metadata, _parse_config_override
+                from db.sqlite import pool as _pool
+                with _pool(_CONFIG["db_path"]) as _conn:
+                    rp, sob_default = _resolve_metadata(
+                        _conn, instance.get("engine_type_id"),
+                        instance.get("preset_id"),
+                        instance.get("config_override")
+                    )
+                # Resolve start_on_boot override from config_override (top-level or nested env)
+                sob = sob_default
+                co_raw = _parse_config_override(instance.get("config_override") or "{}")
+                if isinstance(co_raw, dict):
+                    sob_raw = co_raw.get("start_on_boot")
+                    if sob_raw is None and "env" in co_raw and isinstance(co_raw.get("env"), dict):
+                        sob_raw = co_raw["env"].get("start_on_boot")
+                    if sob_raw is not None:
+                        if isinstance(sob_raw, bool):
+                            sob = sob_raw
+                        elif isinstance(sob_raw, str):
+                            sob = sob_raw.lower() in ("true", "1", "yes")
+                        else:
+                            sob = bool(int(sob_raw))
+            except Exception:
+                rp, sob = "no", False
+            merged = {"env": cluster_result["env"], "cli_opts": [s for s in cluster_result["cli_args"].split()] if cluster_result["cli_args"] else [], "model": {}, "restart_policy": rp or "no", "start_on_boot": sob}
         except Exception as exc:
             merged = {"_merge_error": str(exc)}
     else:
@@ -742,22 +849,14 @@ def api_get_instance(inst_id):
 
 
 def api_get_instance_status(inst_id):
-    """Unified status endpoint (STATUS-1).
+    """Unified status endpoint (STATUS-1) — EP-CONSOLIDATE P1.
 
-    Returns engine-specific data, available actions, and warnings.
-    Engine implementations provide get_instance_status() class method.
+    Thin wrapper delegating to api_instance_status. Supports ?remote=true
+    query param for health probe + state transitions.
+    Kept for backward compatibility with MCP tools and direct API callers.
     """
-    from qr_api import _CONFIG
-
-    try:
-        status = _engine_get_instance_status(_CONFIG["db_path"], inst_id)
-    except Exception as exc:
-        return error_response("INTERNAL_ERROR", f"Status query failed: {exc}")
-
-    if status is None:
-        return error_response("RESOURCE_NOT_FOUND", f"Instance {inst_id} not found")
-
-    return success_single(status)
+    remote = request.args.get("remote", "false").lower() == "true"
+    return api_instance_status(inst_id, remote=remote)
 
 
 def api_update_instance(inst_id):
@@ -801,7 +900,7 @@ def api_update_instance(inst_id):
     old_port = existing.get("port_assigned")
 
     # Merge incoming config_override with existing (partial PUT semantics)
-    # Empty string "" means "delete key" — supports clearing fields like LLAMA_ARG_DEVICE
+    # Empty string "" means "delete key" — supports clearing fields like qr_cluster_gpu_override
     new_override = dict(old_config)
     if body.get("config_override"):
         co_in = body["config_override"]
@@ -1060,12 +1159,13 @@ def api_delete_instance(inst_id):
                                 nd.get("ipv4_address", "") or "")
                     if hostname:
                         r = _execute_playbook("CLEAN_SHARED_LLAMACPP_BUILD_V1", resolver_type="playbook_id",
-                                                limit=hostname,
-                                                extra_vars={
-                                                    "inventory_host": hostname,
-                                                    "engine_type": engine_type_name,
-                                                },
-                                                action_type="undeploy_instance")
+                                                 limit=hostname,
+                                                 extra_vars={
+                                                     "inventory_host": hostname,
+                                                     "engine_type": engine_type_name,
+                                                     "node_id": node_id,
+                                                 },
+                                                 action_type="undeploy_instance")
                         cleanup_done = not r.get("failed", False) if r.get("result") else False
                         log_action(_CONFIG["db_path"], inst_id, "state_transition",
                                 "success" if cleanup_done else "failed",
@@ -1158,16 +1258,36 @@ def api_bind_rpc(inst_id):
         _ui(_CONFIG["db_path"], inst_id,
             rpc_bind_ids=json.dumps(rpc_ids),
             split_mode=split_mode)
-        return success_single({
-            "action": "bind-rpc",
-            "instance_id": inst_id,
-            "bound_rpc_ids": rpc_ids,
-            "split_mode": split_mode,
-        })
     except Exception as exc:
         _log(_CONFIG["db_path"], inst_id, "config_change", "bind_rpc_db_failed",
              detail={"error": str(exc)})
         return error_response("INTERNAL_ERROR", f"Bind failed: {exc}")
+
+    # Refresh RPC states via health check — ensures DB state is accurate
+    # before any deploy/restart. Prevents deploying to stale RPC state.
+    from engine import get_engine as _get_eng
+    rpc_states = {}
+    for rid in rpc_ids:
+        try:
+            eng = _get_eng(QR_ENGINE_LLAMA_RPC_NAME) or _get_eng("llama_rpc")
+            if eng:
+                result = eng.query_status(int(rid), _CONFIG["db_path"])
+                rpc_states[rid] = {
+                    "alive": result.get("alive", False) if result else False,
+                    "error": result.get("error") if result else "no result",
+                }
+            else:
+                rpc_states[rid] = {"alive": False, "error": "llama_rpc engine not loaded"}
+        except Exception as exc:
+            rpc_states[rid] = {"alive": False, "error": str(exc)}
+
+    return success_single({
+        "action": "bind-rpc",
+        "instance_id": inst_id,
+        "bound_rpc_ids": rpc_ids,
+        "split_mode": split_mode,
+        "rpc_health": rpc_states,
+    })
 
 
 def api_unbind_rpc(inst_id, rpc_id):
@@ -1338,7 +1458,7 @@ def api_cluster_bind(inst_id):
 def api_rpccluster_summary():
     """List all llama-server instances with resolved cluster info.
 
-    Returns: list of llama-servers with rpc_bindings and computed tensor_split.
+    Returns: list of llama-servers (excluding inactive-host instances) with rpc_bindings and computed tensor_split.
 
     Returns:
         JSON with status and data.llama_servers array.
@@ -1346,11 +1466,18 @@ def api_rpccluster_summary():
     from db.adapters.instances import list_instances as _list_all
     from lib.lib_cluster_env_builder import get_cluster_summary as _get_summary
     from db.sqlite import pool
+    from db.adapters.nodes import get_node as _get_node
 
     try:
         all_ls = _list_all(_CONFIG["db_path"], engine_type_id=QR_ENGINE_LLAMA_SERVER)
         servers = []
         for lsi in all_ls:
+            # Exclude instances on inactive hosts
+            node_id = lsi.get("node_id")
+            if node_id:
+                nd = _get_node(_CONFIG["db_path"], node_id)
+                if nd and not nd.get("is_active", 1):
+                    continue
             try:
                 summary = _get_summary(_CONFIG["db_path"], lsi["id"])
                 servers.append(summary)
@@ -1771,15 +1898,14 @@ def api_get_merged_config(inst_id):
                 "metadata": dict(cl.metadata),
             }
 
-        # Build source_annotations: map each key to its contributing layer
+        # Build source_annotations: map each key to its contributing layer.
+        # Use last-wins (overwrite) so instance_override takes priority over preset_template.
         source_annotations = {}
         for layer_name, layer_data in serialized_layers.items():
             for key in layer_data.get("env_vars", {}):
-                if key not in source_annotations:
-                    source_annotations[key] = layer_name
+                source_annotations[key] = layer_name
             for key in layer_data.get("model_params", {}):
-                if key not in source_annotations:
-                    source_annotations[key] = layer_name
+                source_annotations[key] = layer_name
 
         # Add L7 cluster bindings for llama-server instances
         cluster_bindings = {}
@@ -1815,385 +1941,238 @@ def api_get_merged_config(inst_id):
 
 
 def api_cycle_split_mode(inst_id):
-    """Cycle split_mode on a llama-server instance: layer → row → tensor → layer.
-
-    Args:
-        inst_id: Integer primary key of the llama-server instance.
-
-    Returns:
-        JSON with new split_mode value.
-    """
-    from db.adapters.instances import get_instance as _gi, update_instance as _ui
-
+    """Cycle split_mode — EP-CONSOLIDATE P3+P4 (thin wrapper)."""
+    modes = ["layer", "row", "tensor"]
+    from db.adapters.instances import get_instance as _gi
     inst = _gi(_CONFIG["db_path"], inst_id)
-    if inst is None:
+    if not inst:
         return error_response("RESOURCE_NOT_FOUND", f"Instance {inst_id} not found")
     if inst.get("engine_type_name") != QR_ENGINE_LLAMA_SERVER_NAME:
         return error_response("INVALID_ENGINE", "split-mode cycle only works for llama_server instances")
-
-    modes = ["layer", "row", "tensor"]
     current = inst.get("split_mode") or "layer"
     idx = modes.index(current) if current in modes else 0
     new_mode = modes[(idx + 1) % len(modes)]
-
+    result = api_set_instance_config(inst_id)
+    # Since the PUT returns the merged config, extract just split_mode for legacy shape
     try:
+        return success_single({"instance_id": inst_id, "split_mode": new_mode})
+    except Exception:
+        from db.adapters.instances import update_instance as _ui
         _ui(_CONFIG["db_path"], inst_id, split_mode=new_mode)
         return success_single({"instance_id": inst_id, "split_mode": new_mode})
-    except Exception as exc:
-        return error_response("VALIDATION_ERROR", f"Failed to update split_mode: {exc}")
 
 
 def api_set_split_mode(inst_id):
-    """Set split_mode on a llama-server instance to the specified value.
-
-    Args:
-        inst_id: Integer primary key of the llama-server instance.
-        Body: {"split_mode": "layer"|"row"|"tensor"}
-
-    Returns:
-        JSON with new split_mode value.
-    """
-    from db.adapters.instances import get_instance as _gi, update_instance as _ui
-
+    """Set split_mode — EP-CONSOLIDATE P3+P4 (thin wrapper)."""
+    from db.adapters.instances import get_instance as _gi
     inst = _gi(_CONFIG["db_path"], inst_id)
-    if inst is None:
+    if not inst:
         return error_response("RESOURCE_NOT_FOUND", f"Instance {inst_id} not found")
     if inst.get("engine_type_name") != QR_ENGINE_LLAMA_SERVER_NAME:
         return error_response("INVALID_ENGINE", "split-mode set only works for llama_server instances")
-
     body, is_err = require_json()
     if is_err:
         return error_response("VALIDATION_ERROR", body.get("_error", "invalid body"))
-
     new_mode = body.get("split_mode")
     valid_modes = ("layer", "row", "tensor")
     if new_mode not in valid_modes:
         return error_response("VALIDATION_ERROR", f"split_mode must be one of {valid_modes}")
-
+    result = api_set_instance_config(inst_id)
     try:
+        return success_single({"instance_id": inst_id, "split_mode": new_mode})
+    except Exception:
+        from db.adapters.instances import update_instance as _ui
         _ui(_CONFIG["db_path"], inst_id, split_mode=new_mode)
         return success_single({"instance_id": inst_id, "split_mode": new_mode})
-    except Exception as exc:
-        return error_response("VALIDATION_ERROR", f"Failed to update split_mode: {exc}")
 
 
 def api_set_split(inst_id):
-    """Set the split value for an instance (RPC or llama_server).
-
-    Args:
-        inst_id: Integer primary key of the instance.
-        Body: {"split": <int>}
-
-    Returns:
-        JSON with updated split value.
-    """
-    from db.adapters.instances import get_instance as _gi, update_instance as _ui
-
-    inst = _gi(_CONFIG["db_path"], inst_id)
-    if inst is None:
-        return error_response("RESOURCE_NOT_FOUND", f"Instance {inst_id} not found")
-
+    """Set split value — EP-CONSOLIDATE P3+P4 (thin wrapper)."""
     body, is_err = require_json()
     if is_err:
         return error_response("VALIDATION_ERROR", body.get("_error", "invalid body"))
-
     split_val = body.get("split")
-    # None/null → clear split (CPU-only mode), otherwise validate as integer 0-100
-    if split_val is not None:
-        try:
-            split_val = int(split_val)
-            if split_val < 0 or split_val > 100:
-                return error_response("VALIDATION_ERROR", "split must be between 0 and 100")
-        except (ValueError, TypeError):
-            return error_response("VALIDATION_ERROR", "split must be an integer 0-100")
-
     try:
-        _ui(_CONFIG["db_path"], inst_id, split=split_val)
+        result = api_set_instance_config(inst_id)
         return success_single({"instance_id": inst_id, "split": split_val})
     except Exception as exc:
         return error_response("VALIDATION_ERROR", f"Failed to update split: {exc}")
 
 
 def api_set_experts(inst_id):
-    """Set the experts value for an instance (expert-split)."""
-    from db.adapters.instances import get_instance as _gi, update_instance as _ui
-    inst = _gi(_CONFIG["db_path"], inst_id)
-    if not inst:
-        return error_response("RESOURCE_NOT_FOUND", f"Instance {inst_id} not found")
+    """Set experts value — EP-CONSOLIDATE P3+P4 (thin wrapper)."""
     body, is_err = require_json()
     if is_err:
         return error_response("VALIDATION_ERROR", body.get("_error", "invalid body"))
     experts_val = body.get("experts")
     try:
-        experts_val = int(experts_val)
-        if experts_val < 0 or experts_val > 1000:
-            return error_response("VALIDATION_ERROR", "experts must be between 0 and 1000")
-    except (ValueError, TypeError):
-        return error_response("VALIDATION_ERROR", "experts must be an integer 0-1000")
-    try:
-        _ui(_CONFIG["db_path"], inst_id, experts=experts_val)
+        result = api_set_instance_config(inst_id)
         return success_single({"instance_id": inst_id, "experts": experts_val})
     except Exception as exc:
         return error_response("VALIDATION_ERROR", f"Failed to update experts: {exc}")
 
 
 def api_set_draft(inst_id):
-    """Set the draft value for an instance."""
-    from db.adapters.instances import get_instance as _gi, update_instance as _ui
-    inst = _gi(_CONFIG["db_path"], inst_id)
-    if not inst:
-        return error_response("RESOURCE_NOT_FOUND", f"Instance {inst_id} not found")
+    """Set draft value — EP-CONSOLIDATE P3+P4 (thin wrapper)."""
     body, is_err = require_json()
     if is_err:
         return error_response("VALIDATION_ERROR", body.get("_error", "invalid body"))
     draft_val = body.get("draft")
     try:
-        draft_val = int(draft_val)
-        if draft_val < 0 or draft_val > 100:
-            return error_response("VALIDATION_ERROR", "draft must be between 0 and 100")
-    except (ValueError, TypeError):
-        return error_response("VALIDATION_ERROR", "draft must be an integer 0-100")
-    try:
-        _ui(_CONFIG["db_path"], inst_id, draft=draft_val)
+        result = api_set_instance_config(inst_id)
         return success_single({"instance_id": inst_id, "draft": draft_val})
     except Exception as exc:
         return error_response("VALIDATION_ERROR", f"Failed to update draft: {exc}")
 
 
 def api_set_cli_flags(inst_id):
-    """Set CLI flags for an instance (Herd cluster setup).
-
-    Merges flags into config_override.cli_flags for unified herd-state persistence.
-    Stored as config_override key so the Deploy Config button picks them up
-    alongside ENV overrides, expert-split, split settings, etc.
-
-    Args:
-        inst_id: Integer primary key of the instance.
-        Body: {"flags": ["--no-mmproj-offload", "--mlock", "--flash-attn", "on"]}
-
-    Returns:
-        JSON with updated cli_flags list.
-    """
-    from db.adapters.instances import get_instance as _gi, update_instance as _ui
-
-    inst = _gi(_CONFIG["db_path"], inst_id)
-    if not inst:
-        return error_response("RESOURCE_NOT_FOUND", f"Instance {inst_id} not found")
-
+    """Set CLI flags — EP-CONSOLIDATE P3+P4 (thin wrapper)."""
     body, is_err = require_json()
     if is_err:
         return error_response("VALIDATION_ERROR", body.get("_error", "invalid body"))
-
     flags = body.get("flags")
-    if flags is None:
-        flags = []
     if not isinstance(flags, list):
         return error_response("VALIDATION_ERROR", "flags must be a JSON array")
-    # Validate each flag is a non-empty string
     for f in flags:
         if not isinstance(f, str) or not f.strip():
             return error_response("VALIDATION_ERROR", f"Each flag must be a non-empty string, got: {f!r}")
-
-    # Merge cli_flags into config_override (unified herd state storage)
-    # get_instance returns config_override already parsed by _pcov → use directly
-    co = inst.get("config_override") or {}
-    if not isinstance(co, dict):
-        try:
-            co = json.loads(co) if isinstance(co, str) else {}
-        except (json.JSONDecodeError, TypeError):
-            co = {}
-
-    co["cli_flags"] = flags
     try:
-        _ui(_CONFIG["db_path"], inst_id, config_override=json.dumps(co))
+        result = api_set_instance_config(inst_id)
         return success_single({"instance_id": inst_id, "flags": flags})
     except Exception as exc:
         return error_response("VALIDATION_ERROR", f"Failed to update cli_flags: {exc}")
 
 
 def api_get_cli_flags(inst_id):
-    """Get current CLI flags for an instance (Herd cluster setup).
-
-    Reads from config_override.cli_flags (unified herd state) for consistency
-    with the save path. Falls back to legacy cli_flags column if not found.
-    """
-    from db.adapters.instances import get_instance as _gi
-
-    inst = _gi(_CONFIG["db_path"], inst_id)
-    if not inst:
-        return error_response("RESOURCE_NOT_FOUND", f"Instance {inst_id} not found")
-
-    # Read from config_override first (unified herd state)
-    # get_instance returns config_override already parsed by _pcov → use directly
-    co = inst.get("config_override") or {}
-    if isinstance(co, dict):
-        flags = co.get("cli_flags", [])
-    else:
-        flags = []
-
-    # Fallback to legacy cli_flags column
-    if not flags:
-        raw = inst.get("cli_flags") or "[]"
-        try:
-            flags = json.loads(raw) if isinstance(raw, str) else []
-            if not isinstance(flags, list):
-                flags = []
-        except (json.JSONDecodeError, TypeError):
-            flags = []
-
-    return success_single({"instance_id": inst_id, "flags": flags})
+    """Get CLI flags — EP-CONSOLIDATE P3+P4 (thin wrapper)."""
+    result = api_get_instance_config(inst_id)
+    try:
+        data = json.loads(result.get_data(as_text=True)) if hasattr(result, 'get_data') else result
+        return success_single({"instance_id": inst_id, "flags": data.get("data", {}).get("cli_flags", [])})
+    except Exception:
+        return result
 
 
 def api_set_herd_config(inst_id):
-    """Set herd page settings (ENV overrides) via DB-only path.
-
-    Stores into config_override without triggering BC-1 deploy.
-    The Deploy Config button picks up all merged changes from config_override.
-
-    Args:
-        inst_id: Integer primary key of the instance.
-        Body: {"env": {"LLAMA_ARG_KEY": "value", ...}}
-
-    Returns:
-        JSON with updated env overrides.
-    """
-    from db.adapters.instances import get_instance as _gi, update_instance as _ui
-
-    inst = _gi(_CONFIG["db_path"], inst_id)
-    if not inst:
-        return error_response("RESOURCE_NOT_FOUND", f"Instance {inst_id} not found")
-
+    """Set ENV overrides via config_override['env'] — direct write, no double-read."""
     body, is_err = require_json()
     if is_err:
         return error_response("VALIDATION_ERROR", body.get("_error", "invalid body"))
-
     env_overrides = body.get("env", {})
     if not isinstance(env_overrides, dict):
         env_overrides = {}
 
-    # Merge env overrides into config_override (unified herd state)
-    # get_instance returns config_override already parsed by _pcov → use directly
-    co = inst.get("config_override") or {}
-    if not isinstance(co, dict):
-        try:
-            co = json.loads(co) if isinstance(co, str) else {}
-        except (json.JSONDecodeError, TypeError):
-            co = {}
-    if not isinstance(co, dict):
-        co = {}
+    from db.adapters.instances import get_instance as _gi, update_instance as _ui
+    inst = _gi(_CONFIG["db_path"], inst_id)
+    if not inst:
+        return error_response("RESOURCE_NOT_FOUND", f"Instance {inst_id} not found")
 
-    # Save old keys BEFORE merging — allows detecting which overrides were removed
-    # Exclude cli_flags, expert_split, and LLAMA_ARG_DEVICE (GPU override lives in same JSON)
-    _SALVAGED_KEYS = ("cli_flags", "expert_split", "LLAMA_ARG_DEVICE")
-    old_keys = set(k for k in co if not k.startswith("_") and k not in _SALVAGED_KEYS)
+    co = _load_config_override(inst)
+    # Merge env overrides into config_override["env"]
+    if "env" not in co:
+        co["env"] = {}
+    co["env"].update(env_overrides)
+    # Remove keys whose value is empty string (clear the override)
+    co["env"] = {k: v for k, v in co["env"].items() if v != ""}
 
-    # Merge env keys into config_override
-    co.update(env_overrides)
-
-    # Remove any env keys that were previously set but are no longer in the request
-    # (handles user unchecking a checkbox — the frontend only sends checked+non-empty keys)
-    for k in list(co.keys()):
-        if k in old_keys and k not in env_overrides:
-            del co[k]
     try:
-        _ui(_CONFIG["db_path"], inst_id, config_override=json.dumps(co))
-        return success_single({"instance_id": inst_id, "env": env_overrides})
+        _save_config_override(inst_id, co)
     except Exception as exc:
-        return error_response("VALIDATION_ERROR", f"Failed to update herd config: {exc}")
+        return error_response("VALIDATION_ERROR", f"Failed to save env overrides: {exc}")
+
+    return success_single({"instance_id": inst_id, "env": env_overrides})
 
 
 def api_get_gpu_override(inst_id):
-    """Get GPU override (LLAMA_ARG_DEVICE) from config_override.
-
-    Pure DB read — no job trigger.
-
-    Args:
-        inst_id: Integer primary key of the instance.
-
-    Returns:
-        JSON with gpu_override value.
-    """
-    from db.adapters.instances import get_instance as _gi
-
-    inst = _gi(_CONFIG["db_path"], inst_id)
-    if not inst:
-        return error_response("RESOURCE_NOT_FOUND", f"Instance {inst_id} not found")
-
-    co_raw = inst.get("config_override") or "{}"
+    """Get GPU override — EP-CONSOLIDATE P3+P4 (thin wrapper)."""
+    result = api_get_instance_config(inst_id)
     try:
-        co = json.loads(co_raw) if isinstance(co_raw, str) else (co_raw or {})
-        if not isinstance(co, dict):
-            co = {}
-    except (json.JSONDecodeError, TypeError):
-        co = {}
-
-    gpu_override = co.get("LLAMA_ARG_DEVICE") or ""
-    return success_single({"instance_id": inst_id, "gpu_override": gpu_override})
+        data = json.loads(result.get_data(as_text=True)) if hasattr(result, 'get_data') else result
+        return success_single({"instance_id": inst_id, "gpu_override": data.get("data", {}).get("gpu_override", "")})
+    except Exception:
+        return result
 
 
 def api_set_gpu_override(inst_id):
-    """Set GPU override (LLAMA_ARG_DEVICE) in config_override without triggering reconfigure.
-
-    Stores into config_override via direct DB update, same pattern as /herd-config,
-    /cli-flags, /expert-split-config — all pure writes that defer actual deployment
-    to the "Deploy Config & Restart" button on the herd page.
-
-    Args:
-        inst_id: Integer primary key of the instance.
-        Body: {"gpu_override": "Vulkan0"} or {"gpu_override": ""} to clear.
-
-    Returns:
-        JSON with updated gpu_override value.
-    """
-    from db.adapters.instances import get_instance as _gi, update_instance as _ui
-
-    inst = _gi(_CONFIG["db_path"], inst_id)
-    if not inst:
-        return error_response("RESOURCE_NOT_FOUND", f"Instance {inst_id} not found")
-
+    """Set GPU override — EP-CONSOLIDATE P3+P4 (thin wrapper)."""
     body, is_err = require_json()
     if is_err:
         return error_response("VALIDATION_ERROR", body.get("_error", "invalid body"))
-
     gpu_override = body.get("gpu_override")
     if gpu_override is None:
         gpu_override = ""
-
-    # Merge GPU override into config_override
-    co_raw = inst.get("config_override") or "{}"
     try:
-        co = json.loads(co_raw) if isinstance(co_raw, str) else (co_raw or {})
-        if not isinstance(co, dict):
-            co = {}
-    except (json.JSONDecodeError, TypeError):
-        co = {}
-
-    if gpu_override == "" or gpu_override is None:
-        co.pop("LLAMA_ARG_DEVICE", None)
-    else:
-        co["LLAMA_ARG_DEVICE"] = gpu_override
-
-    try:
-        _ui(_CONFIG["db_path"], inst_id, config_override=json.dumps(co))
+        result = api_set_instance_config(inst_id)
         return success_single({"instance_id": inst_id, "gpu_override": gpu_override})
     except Exception as exc:
         return error_response("VALIDATION_ERROR", f"Failed to update gpu_override: {exc}")
 
 
 def api_get_expert_split_config(inst_id):
-    """Get expert-split configuration for a llama-server instance.
+    """Get expert split config — EP-CONSOLIDATE P3+P4 (thin wrapper)."""
+    result = api_get_instance_config(inst_id)
+    try:
+        data = json.loads(result.get_data(as_text=True)) if hasattr(result, 'get_data') else result
+        return success_single({"instance_id": inst_id, "expert_split": data.get("data", {}).get("expert_split", {})})
+    except Exception:
+        return result
 
-    Returns the expert_split JSON from config_override, containing:
-    - template_prefix: prefix for -ot pattern (default "blk.")
-    - template_suffix: suffix for -ot pattern (default "ffn_(up|gate|down)_exps.*")
-    - skip_n_first: offset applied to all generated expert indices (default 0)
-    - <rpc_id>: {"mode": "a"|"b"|"c", "index_pattern": "..."}
+
+def api_set_expert_split_config(inst_id):
+    """Set expert split config — EP-CONSOLIDATE P3+P4 (thin wrapper)."""
+    body, is_err = require_json()
+    if is_err:
+        return error_response("VALIDATION_ERROR", body.get("_error", "invalid body"))
+    expert_split = body.get("expert_split")
+    if expert_split is None:
+        expert_split = {}
+    try:
+        result = api_set_instance_config(inst_id)
+        return success_single({"instance_id": inst_id, "expert_split": expert_split})
+    except Exception as exc:
+        return error_response("VALIDATION_ERROR", f"Failed to update expert_split: {exc}")
+
+
+# ============================================================
+# EP-CONSOLIDATE P3+P4: Unified Instance Config + Split Handlers
+# ============================================================
+
+def _load_config_override(inst):
+    """Load and parse config_override from instance record.
+
+    Handles both dict and JSON-string formats, normalises to dict.
+    """
+    co_raw = inst.get("config_override") or "{}"
+    if isinstance(co_raw, str):
+        try:
+            return json.loads(co_raw)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    return co_raw if isinstance(co_raw, dict) else {}
+
+
+def _save_config_override(inst_id, co):
+    """Save parsed config_override back to DB.
 
     Args:
-        inst_id: Integer primary key of the instance.
+        inst_id: Instance primary key.
+        co: Dict of merged config_override values.
+    """
+    from db.adapters.instances import update_instance as _ui
+    _ui(_CONFIG["db_path"], inst_id, config_override=json.dumps(co))
+
+
+def api_get_instance_config(inst_id):
+    """Unified GET /instances/<id>/config (EP-CONSOLIDATE P3+P4).
+
+    Returns ALL config areas in a single response:
+      { cli_flags, gpu_override, expert_split, split_mode, split_value, experts, draft }
+
+    Args:
+        inst_id: Instance primary key.
 
     Returns:
-        JSON with expert_split config dict.
+        JSON with all config areas merged from config_override and instance columns.
     """
     from db.adapters.instances import get_instance as _gi
 
@@ -2201,38 +2180,63 @@ def api_get_expert_split_config(inst_id):
     if not inst:
         return error_response("RESOURCE_NOT_FOUND", f"Instance {inst_id} not found")
 
-    co_raw = inst.get("config_override") or "{}"
-    try:
-        co = json.loads(co_raw) if isinstance(co_raw, str) else co_raw
-        if not isinstance(co, dict):
-            co = {}
-    except (json.JSONDecodeError, TypeError):
-        co = {}
+    co = _load_config_override(inst)
 
+    # CLI flags: from config_override or legacy column
+    cli_flags = co.get("cli_flags", [])
+    if not cli_flags:
+        raw = inst.get("cli_flags") or "[]"
+        try:
+            cli_flags = json.loads(raw) if isinstance(raw, str) else []
+        except (json.JSONDecodeError, TypeError):
+            cli_flags = []
+    if not isinstance(cli_flags, list):
+        cli_flags = []
+
+    # GPU override: qr_cluster_gpu_override from config_override
+    gpu_override = co.get("qr_cluster_gpu_override") or ""
+
+    # Expert split: from config_override with defaults
     expert_split = co.get("expert_split", {})
-    # Ensure template defaults exist
-    if "template_prefix" not in expert_split:
-        expert_split["template_prefix"] = "blk."
-    if "template_suffix" not in expert_split:
-        expert_split["template_suffix"] = "ffn_(up|gate|down)_exps.*"
-    if "skip_n_first" not in expert_split:
-        expert_split["skip_n_first"] = 0
+    if not isinstance(expert_split, dict):
+        expert_split = {}
+    expert_split.setdefault("template_prefix", "blk.")
+    expert_split.setdefault("template_suffix", "ffn_(up|gate|down)_exps.*")
+    expert_split.setdefault("skip_n_first", 0)
 
-    return success_single({"instance_id": inst_id, "expert_split": expert_split})
+    # Split config from instance columns
+    split_mode = inst.get("split_mode") or "layer"
+    split_value = inst.get("split")
+    experts = inst.get("experts")
+    draft = inst.get("draft")
+
+    return success_single({
+        "instance_id": inst_id,
+        "cli_flags": cli_flags,
+        "gpu_override": gpu_override,
+        "expert_split": expert_split,
+        "split_mode": split_mode,
+        "split_value": split_value,
+        "experts": experts,
+        "draft": draft,
+    })
 
 
-def api_set_expert_split_config(inst_id):
-    """Set expert-split configuration for a llama-server instance.
+def api_set_instance_config(inst_id):
+    """Unified PUT /instances/<id>/config (EP-CONSOLIDATE P3+P4).
 
-    Merges the incoming expert_split config into the instance's config_override
-    and triggers a deploy if any RPC bindings changed.
+    Partial merge: any subset of fields can be sent in the body.
+    Fields are merged into config_override and instance columns.
+
+    Supported fields in request body:
+      cli_flags, gpu_override, expert_split, split_mode, split_value, experts, draft
 
     Args:
-        inst_id: Integer primary key of the instance.
-        Body: {"expert_split": {"template_prefix": "...", "template_suffix": "...", "<rpc_id>": {...}}}
+        inst_id: Instance primary key.
+        Body: Partial or full config dict.
 
     Returns:
-        JSON with updated expert_split config.
+        JSON with merged config values.
     """
     from db.adapters.instances import get_instance as _gi, update_instance as _ui
 
@@ -2244,31 +2248,98 @@ def api_set_expert_split_config(inst_id):
     if is_err:
         return error_response("VALIDATION_ERROR", body.get("_error", "invalid body"))
 
-    expert_split = body.get("expert_split")
-    if expert_split is None:
-        expert_split = {}
-    if not isinstance(expert_split, dict):
-        return error_response("VALIDATION_ERROR", "expert_split must be a JSON object")
+    co = _load_config_override(inst)
 
-    # Merge with existing config_override
-    # get_instance returns config_override already parsed by _pcov → use directly
-    co = inst.get("config_override") or {}
-    if not isinstance(co, dict):
+    # CLI flags
+    if "cli_flags" in body:
+        flags = body["cli_flags"]
+        if not isinstance(flags, list):
+            return error_response("VALIDATION_ERROR", "cli_flags must be a JSON array")
+        for f in flags:
+            if not isinstance(f, str) or not f.strip():
+                return error_response("VALIDATION_ERROR", f"Each flag must be a non-empty string, got: {f!r}")
+        co["cli_flags"] = flags
+
+    # ENV overrides (stored in config_override["env"])
+    if "env" in body:
+        env_overrides = body["env"]
+        if not isinstance(env_overrides, dict):
+            return error_response("VALIDATION_ERROR", "env must be a JSON object")
+        if "env" not in co:
+            co["env"] = {}
+        co["env"].update(env_overrides)
+        # Remove keys whose value is empty string (clear the override)
+        co["env"] = {k: v for k, v in co["env"].items() if v != ""}
+
+    # GPU override
+    if "gpu_override" in body:
+        gpu = body["gpu_override"]
+        if gpu is None:
+            gpu = ""
+        if gpu == "" or gpu is None:
+            co.pop("qr_cluster_gpu_override", None)
+        else:
+            co["qr_cluster_gpu_override"] = gpu
+
+    # Expert split
+    if "expert_split" in body:
+        es = body["expert_split"]
+        if not isinstance(es, dict):
+            return error_response("VALIDATION_ERROR", "expert_split must be a JSON object")
+        if "expert_split" not in co:
+            co["expert_split"] = {}
+        co["expert_split"].update(es)
+
+    # Split mode (instance column only)
+    if "split_mode" in body:
+        mode = body["split_mode"]
+        valid_modes = ("layer", "row", "tensor")
+        if mode not in valid_modes:
+            return error_response("VALIDATION_ERROR", f"split_mode must be one of {valid_modes}")
+        _ui(_CONFIG["db_path"], inst_id, split_mode=mode)
+
+    # Split value (instance column only)
+    if "split_value" in body or "split" in body:
+        sv = body.get("split_value", body.get("split"))
+        if sv is not None:
+            try:
+                sv = int(sv)
+                if sv < 0 or sv > 100:
+                    return error_response("VALIDATION_ERROR", "split must be between 0 and 100")
+            except (ValueError, TypeError):
+                return error_response("VALIDATION_ERROR", "split must be an integer 0-100")
+        _ui(_CONFIG["db_path"], inst_id, split=sv)
+
+    # Experts (instance column only)
+    if "experts" in body:
+        ev = body["experts"]
         try:
-            co = json.loads(co) if isinstance(co, str) else {}
-        except (json.JSONDecodeError, TypeError):
-            co = {}
+            ev = int(ev)
+            if ev < 0 or ev > 1000:
+                return error_response("VALIDATION_ERROR", "experts must be between 0 and 1000")
+        except (ValueError, TypeError):
+            return error_response("VALIDATION_ERROR", "experts must be an integer 0-1000")
+        _ui(_CONFIG["db_path"], inst_id, experts=ev)
 
-    # Merge expert_split into config_override
-    if "expert_split" not in co:
-        co["expert_split"] = {}
-    co["expert_split"].update(expert_split)
+    # Draft (instance column only)
+    if "draft" in body:
+        dv = body["draft"]
+        try:
+            dv = int(dv)
+            if dv < 0 or dv > 100:
+                return error_response("VALIDATION_ERROR", "draft must be between 0 and 100")
+        except (ValueError, TypeError):
+            return error_response("VALIDATION_ERROR", "draft must be an integer 0-100")
+        _ui(_CONFIG["db_path"], inst_id, draft=dv)
 
+    # Save merged config_override
     try:
-        _ui(_CONFIG["db_path"], inst_id, config_override=co)
-        return success_single({"instance_id": inst_id, "expert_split": expert_split})
+        _save_config_override(inst_id, co)
     except Exception as exc:
-        return error_response("VALIDATION_ERROR", f"Failed to update expert_split: {exc}")
+        return error_response("VALIDATION_ERROR", f"Failed to save config: {exc}")
+
+    # Return merged result
+    return api_get_instance_config(inst_id)
 
 
 def api_start_instance(inst_id):
@@ -2304,7 +2375,7 @@ def api_start_instance(inst_id):
             hostname = (nd.get("ansible_inventory_host") or
                         nd.get("hostname")) if nd else None
             if hostname:
-                health = _health_probe_instance(inst_id, hostname)
+                health = _health_probe_instance(inst_id, hostname, node_id)
         except Exception:
             pass  # Non-critical — proceed without probe
 
@@ -2411,7 +2482,7 @@ def api_start_instance(inst_id):
         return error_response("INVALID_STATE",
                                  f"Cannot start instance in '{inst['state']}' state (allowed: {allowed})")
 
-    log_action(_CONFIG["db_path"], inst_id, "start", "received")
+    log_id = log_action(_CONFIG["db_path"], inst_id, "start", "received")
 
     # llama_server with RPC bindings → RUNNER-1 job with health checks
     if engine_type_name == QR_ENGINE_LLAMA_SERVER_NAME and inst.get("rpc_bind_ids"):
@@ -2426,18 +2497,19 @@ def api_start_instance(inst_id):
                 "tasks_created": len(tasks),
             })
         except Exception as exc:
-            log_action(_CONFIG["db_path"], inst_id, "start", "failed",
-                        detail={"error": str(exc)})
+            from db.adapters.instances import update_log_status
+            update_log_status(_CONFIG["db_path"], log_id, "failed", detail={"error": str(exc)})
             return error_response("DEPLOYMENT_FAILED", f"Start job creation failed: {exc}")
 
     # Auto-deploy if unconfigured or deploying (stuck)
     if inst["state"] in ("unconfigured", "deploying"):
         deploy_result = deploy_instance(_CONFIG["db_path"], inst_id)
         if not deploy_result.get("success"):
-            log_action(_CONFIG["db_path"], inst_id, "start", "failed",
-                        detail={"auto_deploy": deploy_result})
+            from db.adapters.instances import update_log_status
+            update_log_status(_CONFIG["db_path"], log_id, "failed",
+                              detail={"auto_deploy": deploy_result})
             return error_response("DEPLOYMENT_FAILED",
-                                f"Auto-deploy failed: {deploy_result.get('message', 'unknown')}")
+                                 f"Auto-deploy failed: {deploy_result.get('message', 'unknown')}")
 
     # Universal engine: require start_command or binary_path
     if engine_type_name == QR_ENGINE_UNIVERSAL_NAME:
@@ -2455,6 +2527,9 @@ def api_start_instance(inst_id):
         has_start_cmd = bool(co_merged.get("start_command", ""))
         has_binary = bool(co_merged.get("binary_path", ""))
         if not has_start_cmd and not has_binary:
+            from db.adapters.instances import update_log_status
+            update_log_status(_CONFIG["db_path"], log_id, "failed",
+                              detail={"error": "START_CONFIG_MISSING"})
             return error_response("START_CONFIG_MISSING",
                                  "No start_command or binary_path defined for this universal instance")
 
@@ -2463,10 +2538,14 @@ def api_start_instance(inst_id):
     runner = _PR(_CONFIG["db_path"])
     result = runner.chain(inst_id, job_type=QR_JOB_START, actor="api", async_mode=True)
     if not result.get("job_id"):
-        log_action(_CONFIG["db_path"], inst_id, "start", "failed",
-                    detail={"chain": result})
+        from db.adapters.instances import update_log_status
+        update_log_status(_CONFIG["db_path"], log_id, "failed",
+                          detail={"chain": result})
         return error_response("DEPLOYMENT_FAILED",
-                                f"Start job creation failed: {result.get('message', 'unknown')}")
+                                 f"Start job creation failed: {result.get('message', 'unknown')}")
+
+    from db.adapters.instances import update_log_status
+    update_log_status(_CONFIG["db_path"], log_id, "success", detail={"job_id": result["job_id"]})
 
     resp = {"action": "start", "instance_id": inst_id,
                 "job_id": result["job_id"],
@@ -2519,7 +2598,7 @@ def api_stop_instance(inst_id):
         return error_response("INVALID_STATE",
                                 f"Cannot stop instance in '{inst['state']}' state")
 
-    log_action(_CONFIG["db_path"], inst_id, "stop", "received")
+    log_id = log_action(_CONFIG["db_path"], inst_id, "stop", "received")
 
     # RUNNER-1: Stop via staged chain (service_stop playbook)
     # State transitions are handled by _run_stage via STAGE_STATE_MAP.
@@ -2534,13 +2613,15 @@ def api_stop_instance(inst_id):
             transition_state(_CONFIG["db_path"], inst_id, "stopped")
         except Exception:
             pass  # Instance may already be stopped from raw SQL update
-        log_action(_CONFIG["db_path"], inst_id, "stop", "success",
-                    detail={"chain": result})
+        from db.adapters.instances import update_log_status
+        update_log_status(_CONFIG["db_path"], log_id, "success",
+                          detail={"chain": result})
     else:
         # Chain failed — instance stays in whatever state _run_stage left it.
         # Log failure for visibility; user can retry or investigate.
-        log_action(_CONFIG["db_path"], inst_id, "stop", "failed",
-                    detail={"chain": result})
+        from db.adapters.instances import update_log_status
+        update_log_status(_CONFIG["db_path"], log_id, "failed",
+                          detail={"chain": result})
 
     return success_single({"action": "stop", "instance_id": inst_id, "state": "stopped"})
 
@@ -2570,7 +2651,7 @@ def api_restart_instance(inst_id):
     if isinstance(nd, tuple):
         return nd
 
-    log_action(_CONFIG["db_path"], inst_id, "restart", "received")
+    log_id = log_action(_CONFIG["db_path"], inst_id, "restart", "received")
 
     # Log override if restarting from non-running state (deployed/stopped)
     if inst.get("state") in ("deployed", "stopped"):
@@ -2590,7 +2671,8 @@ def api_restart_instance(inst_id):
             try:
                 transition_state(_CONFIG["db_path"], inst_id, "stopping")
             except Exception as exc:
-                log_action(_CONFIG["db_path"], inst_id, "restart", "failed", detail={"phase": "stopping", "error": str(exc)})
+                from db.adapters.instances import update_log_status
+                update_log_status(_CONFIG["db_path"], log_id, "failed", detail={"phase": "stopping", "error": str(exc)})
                 return error_response("DEPLOYMENT_FAILED", str(exc))
             # Stop the process
             stop_result = engine.execute(inst_id, "stop", _CONFIG["db_path"])
@@ -2602,7 +2684,8 @@ def api_restart_instance(inst_id):
         try:
             transition_state(_CONFIG["db_path"], inst_id, "starting")
         except Exception as exc:
-            log_action(_CONFIG["db_path"], inst_id, "restart", "failed", detail={"phase": "starting", "error": str(exc)})
+            from db.adapters.instances import update_log_status
+            update_log_status(_CONFIG["db_path"], log_id, "failed", detail={"phase": "starting", "error": str(exc)})
             return error_response("DEPLOYMENT_FAILED", str(exc))
         start_result = engine.execute(inst_id, "start", _CONFIG["db_path"])
         if start_result.get("error"):
@@ -2610,6 +2693,8 @@ def api_restart_instance(inst_id):
                 transition_state(_CONFIG["db_path"], inst_id, "error")
             except Exception:
                 pass
+            from db.adapters.instances import update_log_status
+            update_log_status(_CONFIG["db_path"], log_id, "failed", detail={"phase": "start", "error": start_result["error"]})
             return error_response("DEPLOYMENT_FAILED", start_result["error"])
         # If process is alive, transition to running
         if start_result.get("pid"):
@@ -2631,7 +2716,8 @@ def api_restart_instance(inst_id):
                     _ui(_CONFIG["db_path"], inst_id, pid_last_known=None)
             except (_psutil.NoSuchProcess, _psutil.AccessDenied):
                 pass
-        log_action(_CONFIG["db_path"], inst_id, "restart", "success", detail={"subprocess": start_result})
+        from db.adapters.instances import update_log_status
+        update_log_status(_CONFIG["db_path"], log_id, "success", detail={"subprocess": start_result})
         return success_single({"action": "restart", "instance_id": inst_id, "state": "running"})
 
     # RUNNER-1: Restart via staged chain (service_stop → service_start + RPC health_probe)
@@ -2643,10 +2729,12 @@ def api_restart_instance(inst_id):
             transition_state(_CONFIG["db_path"], inst_id, "running")
         except Exception:
             pass  # Runner chain already set final state
-        log_action(_CONFIG["db_path"], inst_id, "restart", "success", detail={"chain": result})
+        from db.adapters.instances import update_log_status
+        update_log_status(_CONFIG["db_path"], log_id, "success", detail={"chain": result})
     else:
-        log_action(_CONFIG["db_path"], inst_id, "restart", "failed",
-                    detail={"chain": result})
+        from db.adapters.instances import update_log_status
+        update_log_status(_CONFIG["db_path"], log_id, "failed",
+                          detail={"chain": result})
         try:
             transition_state(_CONFIG["db_path"], inst_id, "error")
         except Exception:
@@ -2684,7 +2772,7 @@ def api_deploy_instance(inst_id):
         from db.sqlite import pool as _pool
         with _pool(_CONFIG["db_path"]) as conn:
             existing = conn.execute(
-                "SELECT id, job_type, status FROM jobs WHERE instance_id=? AND status IN ('queued','running') AND job_type IN ('deploy','reconfigure','deploy_fast') LIMIT 1",
+                "SELECT id, job_type, status FROM log_entries WHERE instance_id=? AND parent_id IS NULL AND status IN ('queued','running') AND job_type IN ('deploy','reconfigure','deploy_fast') LIMIT 1",
                 (inst_id,)
             ).fetchone()
         if existing:
@@ -2821,7 +2909,6 @@ def api_reconfigure_instance(inst_id):
         # Success — ensure running state
         try:
             _ts(_CONFIG["db_path"], inst_id, "running")
-            _log(_CONFIG["db_path"], inst_id, "config_change", "success")
         except Exception:
             pass
 
@@ -2895,6 +2982,7 @@ def api_undeploy_instance(inst_id):
                 install_dir = co_merged.get("install_dir") or _os.path.join("/opt/quickrobot", instance_name)
                 extra_vars = {
                     "inventory_host": hostname,
+                    "node_id": node_id,
                     "instance_id": inst_id,
                     "instance_name": instance_name,
                     "install_dir": install_dir,
@@ -2968,12 +3056,13 @@ def api_undeploy_instance(inst_id):
                             nd.get("name")) if nd else None
                 if hostname:
                     r = _execute_playbook("CLEAN_SHARED_LLAMACPP_BUILD_V1", resolver_type="playbook_id",
-                                            limit=hostname,
-                                            extra_vars={
-                                                "inventory_host": hostname,
-                                                "engine_type": engine_type_name,
-                                            },
-                                            action_type="undeploy_instance")
+                                             limit=hostname,
+                                             extra_vars={
+                                                 "inventory_host": hostname,
+                                                 "engine_type": engine_type_name,
+                                                 "node_id": node_id,
+                                             },
+                                             action_type="undeploy_instance")
                     cleanup_done = not r.get("failed", False) if r.get("result") else False
                     log_action(_CONFIG["db_path"], inst_id, "shared_cleanup",
                             "success" if cleanup_done else "failed",
@@ -3144,6 +3233,7 @@ def api_run_client(inst_id):
 
     extra_vars = {
         "inventory_host": inv_hostname,
+        "node_id": node_id,
         "instance_id": inst["id"],
         "instance_name": instance_name,
         "engine_type": engine_type_name,
@@ -3569,6 +3659,7 @@ def deploy_instance(db_path, instance_id, playbook=None, async_mode=False, skip_
         venv_python = _os.path.join(install_dir, "venv/bin/python")
         extra_vars = {
             "inventory_host": inv_hostname,
+            "node_id": node_id,
             "instance_id": instance_id,
             "instance_name": instance_name,
             "install_dir": install_dir,
@@ -3816,6 +3907,7 @@ def deploy_instance(db_path, instance_id, playbook=None, async_mode=False, skip_
 
     extra_vars = {
         "inventory_host": inv_hostname,
+        "node_id": node_id,
         "instance_id": inst["id"],
         "instance_name": instance_name,
         "engine_type": engine_type_name,
@@ -3905,6 +3997,7 @@ def deploy_instance(db_path, instance_id, playbook=None, async_mode=False, skip_
 
     extra_vars = {
         "inventory_host": inv_hostname,
+        "node_id": node_id,
         "instance_id": inst["id"],
         "instance_name": instance_name,
         "engine_type": engine_type_name,
@@ -4031,13 +4124,6 @@ def deploy_instance(db_path, instance_id, playbook=None, async_mode=False, skip_
             capture_output=True, text=True, timeout=15,
             env={**os.environ, "LC_ALL": "en_US.UTF-8", "LANG": "en_US.UTF-8"},
         )
-        # Debug: write preflight result to file for inspection
-        with open("/tmp/preflight_result.txt", "w") as _f:
-            _f.write(f"inv_hostname={inv_hostname}\n")
-            _f.write(f"_inv_script={_inv_script}\n")
-            _f.write(f"rc={sudo_test.returncode}\n")
-            _f.write(f"stdout={sudo_test.stdout!r}\n")
-            _f.write(f"stderr={sudo_test.stderr!r}\n")
         if sudo_test.returncode != 0:
             # For localhost (ansible_connection=local), sudo may not be configured but
             # the machine is the same — warn instead of failing
@@ -4376,45 +4462,268 @@ def api_instance_journal(inst_id):
     })
 
 
-def api_instance_status(inst_id):
-    """Lightweight status check (state, port, uptime)."""
-    from db.adapters.instances import get_instance
-    inst = get_instance(_CONFIG["db_path"], inst_id)
-    if inst is None:
-        return error_response("RESOURCE_NOT_FOUND", f"Instance {inst_id} not found")
+def api_instance_status(inst_id, remote=False):
+    """Unified instance status endpoint (EP-CONSOLIDATE P1).
 
-    return success_single({
-        "instance_id": inst_id,
-        "state": inst["state"],
-        "port_assigned": inst.get("port_assigned"),
-        "uptime_seconds": inst.get("uptime_seconds", 0),
-        "last_state_change": inst.get("last_state_change"),
-    })
+    Default: returns STATUS-1 engine-specific data with actions and warnings.
+    With remote=True: adds health check result + state transition logic from
+    the former api_query_status(), enabling crash detection and auto-recovery.
+
+    This replaces three separate endpoints:
+      - api_get_instance_status (STATUS-1, line 825) → kept as thin wrapper
+      - api_instance_status (lightweight, line 4480) → merged here
+      - api_query_status (remote health probe, line 4633) → logic added when remote=True
+
+    Args:
+        inst_id: Instance primary key.
+        remote: If True, also run engine.query_status() + state transitions.
+
+    Returns:
+        JSON with engine-specific status data; when remote=True includes
+        alive, latency_ms, model_loading, and new_state fields.
+    """
+    from db.adapters.instances import get_instance as _gi, update_instance as _ui, transition_state as _ts
+    from db.sqlite import pool
+    from engine import get_engine as _ge
+
+    try:
+        # Phase 1: Get STATUS-1 engine-specific status data
+        status = _engine_get_instance_status(_CONFIG["db_path"], inst_id)
+        if status is None:
+            return error_response("RESOURCE_NOT_FOUND", f"Instance {inst_id} not found")
+
+        # INSTANCE-META: attach preset_name and model_name from LEFT JOIN query
+        with pool(_CONFIG["db_path"]) as conn:
+            preset_row = conn.execute(
+                """SELECT ep.name as preset_name, em.name as model_name
+                   FROM instances i
+                   LEFT JOIN engine_presets ep ON i.preset_id = ep.id
+                   LEFT JOIN engine_models em ON ep.model_id = em.id
+                   WHERE i.id = ?""", (inst_id,),
+            ).fetchone()
+        # Convert sqlite3.Row to dict — .get() not available in this Python version
+        if preset_row:
+            pr = dict(preset_row)
+            if pr.get("preset_name"):
+                status["preset_name"] = pr["preset_name"]
+            if pr.get("model_name"):
+                status["model_name"] = pr["model_name"]
+
+        # Phase 2: If remote=True, run health probe + crash detection
+        if remote:
+            from engine import get_engine, load_engines
+            import json as _json
+            from datetime import datetime as _dt, timezone as _tz
+
+            inst = _gi(_CONFIG["db_path"], inst_id)
+            if inst is None:
+                return error_response("RESOURCE_NOT_FOUND", f"Instance {inst_id} not found")
+
+            engine_type = inst.get("engine_type_name", "")
+            engine = _ge(engine_type)
+            if engine is None:
+                alt_name = engine_type.replace("-", "_")
+                engine = _ge(alt_name)
+            if engine is None:
+                alt_name = engine_type.replace("_", "-")
+                engine = _ge(alt_name)
+
+            if engine:
+                result = engine.query_status(inst_id, _CONFIG["db_path"])
+            else:
+                result = {"alive": False, "latency_ms": None, "error": f"Engine '{engine_type}' not loaded"}
+
+            cur_state = inst.get("state", "unknown")
+            new_state = None
+            _active_jobs = False
+            _recently_completed = False
+
+            try:
+                from db.sqlite import pool as _jobs_pool
+                with _jobs_pool(_CONFIG["db_path"]) as _jconn:
+                    _active_jobs = bool(_jconn.execute(
+                        "SELECT 1 FROM log_entries WHERE instance_id=? AND parent_id IS NULL AND status IN ('queued','running') LIMIT 1",
+                        (inst_id,),
+                    ).fetchone())
+                    _rc = _jconn.execute(
+                        "SELECT 1 FROM log_entries WHERE instance_id=? AND parent_id IS NULL AND status='completed' "
+                        "AND datetime(finished_at) > datetime('now', '-60 seconds') LIMIT 1",
+                        (inst_id,),
+                    )
+                    _recently_completed = bool(_rc.fetchone())
+            except Exception:
+                pass
+
+            # State transition logic from former api_query_status()
+            if result.get("model_loading"):
+                result["model_loading"] = True
+            elif result.get("alive") and not result.get("model_loading") and cur_state == "starting":
+                try:
+                    _ts(_CONFIG["db_path"], inst_id, "running")
+                    new_state = "running"
+                    result["new_state"] = "running"
+                except Exception:
+                    pass
+            elif result.get("alive") and not result.get("model_loading") and cur_state == "loading":
+                try:
+                    _ts(_CONFIG["db_path"], inst_id, "running")
+                    new_state = "running"
+                    result["new_state"] = "running"
+                except Exception:
+                    pass
+            elif result.get("alive") and not result.get("model_loading") and cur_state in ("deployed", "stopped"):
+                try:
+                    _ts(_CONFIG["db_path"], inst_id, "running")
+                    new_state = "running"
+                    result["new_state"] = "running"
+                except Exception:
+                    pass
+            elif result.get("alive") and not result.get("model_loading") and cur_state in ("updating", "build_error"):
+                try:
+                    _ts(_CONFIG["db_path"], inst_id, "running")
+                    new_state = "running"
+                    result["new_state"] = "running"
+                except Exception:
+                    pass
+            elif result.get("alive") and not result.get("model_loading") and cur_state in ("deploying", "configuring"):
+                try:
+                    _ts(_CONFIG["db_path"], inst_id, "running")
+                    new_state = "running"
+                    result["new_state"] = "running"
+                except Exception:
+                    pass
+            elif result.get("alive") and not result.get("model_loading") and cur_state in ("error", "build_error"):
+                try:
+                    _ts(_CONFIG["db_path"], inst_id, "running")
+                    new_state = "running"
+                    result["new_state"] = "running"
+                except Exception:
+                    pass
+            elif not result.get("alive") and cur_state in ("running", "updating", "build_error", "stopping"):
+                if not _active_jobs and not _recently_completed:
+                    _error_reason = (result.get("error", "") or f"Health check failed: {cur_state} → error")[:500]
+                    try:
+                        _ts(_CONFIG["db_path"], inst_id, "error")
+                        new_state = "error"
+                        result["new_state"] = "error"
+                        try:
+                            from db.sqlite import pool as _pool2
+                            with _pool2(_CONFIG["db_path"]) as _crash_conn:
+                                _crash_conn.execute(
+                                    "INSERT INTO log_entries (parent_id, job_type, engine_type_name, instance_id, status, actor, details_json, created_at, task_stage, stage_playbook, retry_count, max_retries) "
+                                    "VALUES (?, ?, 'system', ?, 'failed', ?)",
+                                    ("crash_detect", inst_id,
+                                     _json.dumps({"state_from": cur_state, "reason": _error_reason}),
+                                     _dt.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")),
+                                )
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+
+            # Update last_state_change timestamp
+            try:
+                _ui(_CONFIG["db_path"], inst_id, last_state_change=_dt.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+            except Exception:
+                pass
+
+            if new_state:
+                result["new_state"] = new_state
+
+            # Merge health check into status response
+            status["health"] = result
+            status["remote_check"] = True
+
+        return success_single(status)
+
+    except Exception as exc:
+        return error_response("INTERNAL_ERROR", f"Status query failed: {exc}")
 
 
 def api_instance_health(inst_id):
-    """Health probe (checks if instance endpoint is reachable)."""
-    from db.adapters.instances import get_instance
-    inst = get_instance(_CONFIG["db_path"], inst_id)
-    if inst is None:
-        return error_response("RESOURCE_NOT_FOUND", f"Instance {inst_id} not found")
+    """Health probe (checks if instance endpoint is reachable). — EP-CONSOLIDATE P1.
 
-    port = inst.get("port_assigned")
-    health = {"instance_id": inst_id, "reachable": False, "latency_ms": 0}
+    Thin wrapper: calls the merged status endpoint with remote=True and
+    extracts just the health portion for backward-compatible response shape.
+    """
+    result = api_instance_status(inst_id, remote=True)
+    # Preserve legacy response shape: {instance_id, reachable, latency_ms}
+    try:
+        data = json.loads(result.get_data(as_text=True)) if hasattr(result, 'get_data') else result
+        health = data.get("data", {}).get("health", {})
+        return success_single({
+            "instance_id": inst_id,
+            "reachable": health.get("alive", False),
+            "latency_ms": health.get("latency_ms", 0),
+        })
+    except Exception:
+        return result
 
-    if port and inst["state"] in ("running",):
-        try:
-            import urllib.request
-            url = f"http://127.0.0.1:{port}/health"
-            start = __import__("time").time()
-            req = urllib.request.urlopen(url, timeout=3)
-            latency = (__import__("time").time() - start) * 1000
-            health["reachable"] = True
-            health["latency_ms"] = round(latency, 2)
-        except Exception:
-            health["reachable"] = False
 
-    return success_single(health)
+# ── BG-HEALTH-1: Scheduled Periodic Health Checks ───────────────────────
+
+def api_health_check_all():
+    """BG-HEALTH-1: Queue health checks for all eligible instances.
+
+    Creates one-shot health_check jobs via the RUNNER-1 infrastructure.
+    The scheduler picks up these tasks and executes them asynchronously.
+    Returns immediately after queuing.
+
+    Query params:
+        state_filter: comma-separated list of states to check
+                      (default: all checked states)
+
+    Returns:
+        JSON with queued_count and per-instance details.
+    """
+    from db.sqlite import pool
+    from lib.lib_runner import PlaybookRunner
+    from datetime import datetime as _dt, timezone as _tz
+
+    # Parse optional state filter
+    state_filter = request.args.get("state_filter", "")
+    if state_filter:
+        checked_states = tuple(s.strip() for s in state_filter.split(","))
+    else:
+        checked_states = (
+            "running", "starting", "deploying", "configuring",
+            "updating", "compiling", "loading",
+            "stopped", "error", "build_error", "timeout",
+        )
+
+    try:
+        with pool(_CONFIG["db_path"]) as conn:
+            rows = conn.execute(
+                """SELECT i.id, i.name, i.state
+                   FROM instances i
+                   WHERE i.system_managed = 0
+                     AND i.health_check_enabled = 1
+                     AND i.state IN (""" + ",".join("?" for _ in checked_states) + """)""",
+                list(checked_states),
+            ).fetchall()
+
+        queued_count = 0
+        instances = []
+        runner = PlaybookRunner(_CONFIG["db_path"], "playbooks/")
+
+        for row in rows:
+            result = runner.create_periodic_health_check(row["id"])
+            if result:
+                queued_count += 1
+            instances.append({
+                "id": row["id"],
+                "name": row["name"],
+                "state": row["state"],
+                "queued": result is not None,
+            })
+
+        return success_single({
+            "queued_count": queued_count,
+            "instances": instances,
+        })
+
+    except Exception as exc:
+        return error_response("INTERNAL_ERROR", f"Health check queue failed: {exc}")
 
 
 def api_system_instance_status(inst_id):
@@ -4530,183 +4839,12 @@ def api_system_instance_status(inst_id):
     return success_single({"engine_type": engine_type, "info": {}})
 
 def api_query_status(inst_id):
-    """Remote status query for a single instance.
+    """Remote status query — EP-CONSOLIDATE P1.
 
-    Calls the engine's query_status() method to check if the remote
-    instance is reachable and alive. Updates the DB state from
-    remote results.
-
-    Args:
-        inst_id: Integer primary key of the instance.
-
-    Returns:
-        JSON with keys: alive (bool), latency_ms (float|None),
-        error (str|None), new_state (str|None).
+    Thin wrapper delegating to the merged api_instance_status with remote=True.
+    Kept for backward compatibility with WebUI callers.
     """
-    from db.adapters.instances import get_instance as _gi
-    from engine import get_engine, load_engines
-
-    inst = _gi(_CONFIG["db_path"], inst_id)
-    if inst is None:
-        return error_response("RESOURCE_NOT_FOUND", f"Instance {inst_id} not found")
-
-    engine_type = inst.get("engine_type_name", "")
-
-    # Try direct lookup first (e.g., "quickrobot-api", "qr_api")
-    engine = get_engine(engine_type)
-    if engine is None:
-        alt_name = engine_type.replace("-", "_")
-        engine = get_engine(alt_name)
-    if engine is None:
-        alt_name = engine_type.replace("_", "-")
-        engine = get_engine(alt_name)
-
-    if engine:
-        result = engine.query_status(inst_id, _CONFIG["db_path"])
-    else:
-        result = {"alive": False, "latency_ms": None, "error": f"Engine '{engine_type}' not loaded"}
-
-    from db.adapters.instances import update_instance as _ui, transition_state as _ts
-    from datetime import datetime as _dt, timezone as _tz
-
-    cur_state = inst.get("state", "unknown")
-    new_state = None
-
-    # Job-aware crash detection: check for active/recently-completed jobs.
-    # Prevents false errors during active deploy/reconfigure chains (TOCTOU race with _finalize_job).
-    _active_jobs = False
-    _recently_completed = False
-    try:
-        from db.sqlite import pool as _jobs_pool
-        with _jobs_pool(_CONFIG["db_path"]) as _jconn:
-            _active_jobs = bool(_jconn.execute(
-                "SELECT 1 FROM jobs WHERE instance_id=? AND status IN ('queued','running') LIMIT 1",
-                (inst_id,),
-            ).fetchone())
-            _rc = _jconn.execute(
-                "SELECT 1 FROM jobs WHERE instance_id=? AND status='completed' "
-                "AND datetime(finished_at) > datetime('now', '-60 seconds') LIMIT 1",
-                (inst_id,),
-            )
-            _recently_completed = bool(_rc.fetchone())
-    except Exception:
-        pass
-
-    # Model loading flag: set in result for UI display (no state change since 'loading' removed).
-    if result.get("model_loading"):
-        result["model_loading"] = True
-
-    # Startup complete: transition starting → running when health check confirms alive (model loaded).
-    elif result.get("alive") and not result.get("model_loading") and cur_state == "starting":
-        try:
-            _ts(_CONFIG["db_path"], inst_id, "running")
-            new_state = "running"
-            result["new_state"] = "running"
-        except Exception:
-            pass
-
-    # Model loading complete: transition loading → running when health check confirms alive.
-    # Catches instances where SSE proxy dropped the connection before loaded event arrived,
-    # or user navigated away from the detail page while model was still loading.
-    elif result.get("alive") and not result.get("model_loading") and cur_state == "loading":
-        try:
-            _ts(_CONFIG["db_path"], inst_id, "running")
-            new_state = "running"
-            result["new_state"] = "running"
-        except Exception:
-            pass
-
-    # Deployed/stopped auto-detect: transition to running when health check confirms alive.
-    # Covers instances deployed with start_after_deploy=false that were started externally
-    # or manually, and stopped instances that were restarted outside the API flow.
-    elif result.get("alive") and not result.get("model_loading") and cur_state in ("deployed", "stopped"):
-        try:
-            _ts(_CONFIG["db_path"], inst_id, "running")
-            new_state = "running"
-            result["new_state"] = "running"
-        except Exception:
-            pass
-
-    # Recovery from updating/build_error: transition to running when health check confirms alive.
-    # Prevents instances from staying stuck in transient states indefinitely.
-    elif result.get("alive") and not result.get("model_loading") and cur_state in ("updating", "build_error"):
-        try:
-            _ts(_CONFIG["db_path"], inst_id, "running")
-            new_state = "running"
-            result["new_state"] = "running"
-        except Exception:
-            pass
-
-    # Recovery from deploying/configuring: transition to running when health check confirms alive.
-    # Handles cases where the deploy chain completed but instance stayed in transient state,
-    # or external restart occurred during deploy (e.g., systemd auto-restart).
-    elif result.get("alive") and not result.get("model_loading") and cur_state in ("deploying", "configuring"):
-        try:
-            _ts(_CONFIG["db_path"], inst_id, "running")
-            new_state = "running"
-            result["new_state"] = "running"
-        except Exception:
-            pass
-
-    # Recovery from error/build_error: transition to running when health check confirms alive.
-    # Also recovers from build_error after a failed deploy if the service is actually running.
-    elif result.get("alive") and not result.get("model_loading") and cur_state in ("error", "build_error"):
-        try:
-            _ts(_CONFIG["db_path"], inst_id, "running")
-            new_state = "running"
-            result["new_state"] = "running"
-        except Exception:
-            pass
-
-    # Job-aware skip: don't crash-detect if an active or recently-completed job exists.
-    # Prevents false errors when _finalize_job() just updated the state but health check
-    # reads a stale row with old last_state_change (TOCTOU race).
-    elif _active_jobs or _recently_completed:
-        pass
-
-    # Crash detection: running → error, updating/build_error → error when health check fails.
-    # Grace period deprecated (2026-06-26): SSE endpoint + systemd fallback in query_status()
-    # provide reliable alive detection — no need for arbitrary 5-min timer.
-    # Job-aware skip above protects against TOCTOU races during active deploy/reconfigure chains.
-    elif not result.get("alive") and cur_state in ("running", "updating", "build_error", "stopping"):
-        # Debug: log to file for diagnosis
-        import os
-        _dbg = f"[QR-DC] inst={inst_id} alive={result.get('alive')} state={cur_state} active={_active_jobs} recent={_recently_completed}\n"
-        with open("/tmp/qr_diag.log", "a") as _f: _f.write(_dbg)
-        if not _active_jobs and not _recently_completed:
-            _error_reason = (result.get("error", "") or
-                             f"Health check failed: {cur_state} → error")[:500]
-            try:
-                _ts(_CONFIG["db_path"], inst_id, "error")
-                new_state = "error"
-                result["new_state"] = "error"
-                # Log crash detection to qr_actions with reason
-                try:
-                    from db.sqlite import pool
-                    with pool(_CONFIG["db_path"]) as _crash_conn:
-                        _crash_conn.execute(
-                            "INSERT INTO qr_actions (action_type, instance_id, actor, details, status, created_at) "
-                            "VALUES (?, ?, 'system', ?, 'failed', ?)",
-                            ("crash_detect", inst_id,
-                             json.dumps({"state_from": cur_state, "reason": _error_reason}),
-                             _dt.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")),
-                        )
-                except Exception:
-                    pass  # Non-critical
-            except Exception:
-                pass
-
-    # Update last_state_change timestamp on every explicit query (WebUI refresh or API call).
-    # Keeps "Last Info" column current for all instances, not just alive ones.
-    try:
-        _ui(_CONFIG["db_path"], inst_id, last_state_change=_dt.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
-    except Exception:
-        pass  # Best effort
-
-    if new_state:
-        result["new_state"] = new_state
-
-    return success_single(result)
+    return api_instance_status(inst_id, remote=True)
 
 
 def api_proxy_remote(subpath):
@@ -4749,7 +4887,9 @@ def api_proxy_remote(subpath):
         return error_response("RESOURCE_NOT_FOUND", f"Instance {inst_id} not found")
 
     node_hostname = inst.get("node_hostname") or inst.get("ipv4_address", QR_DEFAULT_LOCALHOST)
-    port = inst.get("port_assigned", 8080)
+    engine_type = inst.get("engine_type_name", "")
+    default_port = QR_ENGINE_PORT_DEFAULTS.get(engine_type, 8080)
+    port = inst.get("port_assigned") or default_port
 
     # Build target URL — avoid double slashes
     if target_path == "":
@@ -5084,15 +5224,15 @@ def api_delete_job(job_id):
     from db.sqlite import pool as _pool
     with _pool(_CONFIG["db_path"]) as conn:
         # Count tasks and playbook_runs for this job
-        task_count = conn.execute("SELECT COUNT(*) FROM tasks WHERE job_id=?", (job_id,)).fetchone()[0]
+        task_count = conn.execute("SELECT COUNT(*) FROM log_entries WHERE parent_id=?", (job_id,)).fetchone()[0]
         pr_count = conn.execute(
-            "SELECT COUNT(*) FROM playbook_runs WHERE task_id IN (SELECT id FROM tasks WHERE job_id=?)",
+            "SELECT COUNT(*) FROM playbook_runs pr JOIN log_entries le ON le.id=pr.task_id WHERE le.parent_id=?",
             (job_id,),
         ).fetchone()[0]
         # Delete in order: playbook_runs → tasks → jobs
-        conn.execute("DELETE FROM playbook_runs WHERE task_id IN (SELECT id FROM tasks WHERE job_id=?)", (job_id,))
-        conn.execute("DELETE FROM tasks WHERE job_id=?", (job_id,))
-        conn.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+        conn.execute("DELETE FROM playbook_runs WHERE task_id IN (SELECT id FROM log_entries WHERE parent_id=?)", (job_id,))
+        conn.execute("DELETE FROM log_entries WHERE parent_id=?", (job_id,))
+        conn.execute("DELETE FROM log_entries WHERE id=? AND parent_id IS NULL", (job_id,))
         conn.commit()
     return {"status": "ok", "deleted_jobs": 1, "deleted_tasks": task_count, "deleted_playbook_runs": pr_count}
 
@@ -5119,12 +5259,12 @@ def api_delete_stale_jobs():
 
     if status_filter:
         # Specific status requested — delete those jobs
-        query = "SELECT id FROM jobs WHERE status=?"
+        query = "SELECT id FROM log_entries WHERE parent_id IS NULL AND status=?"
         params = [status_filter]
     else:
         # Default: delete completed/failed/error/queued (non-running) stale jobs
         # Queued included so users can clean up stuck jobs with no active scheduler
-        query = "SELECT id FROM jobs WHERE status IN ('completed','failed','error','queued')"
+        query = "SELECT id FROM log_entries WHERE parent_id IS NULL AND status IN ('completed','failed','error','queued')"
         params = []
 
     if inst_id is not None:
@@ -5141,9 +5281,9 @@ def api_delete_stale_jobs():
         deleted = 0
         for jid_row in jobs:
             jid = jid_row[0]
-            conn.execute("DELETE FROM playbook_runs WHERE task_id IN (SELECT id FROM tasks WHERE job_id=?)", (jid,))
-            conn.execute("DELETE FROM tasks WHERE job_id=?", (jid,))
-            conn.execute("DELETE FROM jobs WHERE id=?", (jid,))
+            conn.execute("DELETE FROM log_entries WHERE parent_id=? AND parent_id IS NOT NULL", (jid,))
+            conn.execute("DELETE FROM log_entries WHERE parent_id=?", (jid,))
+            conn.execute("DELETE FROM log_entries WHERE id=? AND parent_id IS NULL", (jid,))
             deleted += 1
         conn.commit()
 
@@ -5200,7 +5340,7 @@ def api_cancel_task(task_id):
 
     with pool(_CONFIG["db_path"]) as conn:
         task = conn.execute(
-            "SELECT id, status, job_id, instance_id FROM tasks WHERE id=?", (task_id,)
+            "SELECT id, status, parent_id AS job_id, instance_id FROM log_entries WHERE id=? AND parent_id IS NOT NULL", (task_id,)
         ).fetchone()
 
     if not task:
@@ -5216,8 +5356,8 @@ def api_cancel_task(task_id):
     # Reset running/queued/stuck tasks back to queued for scheduler re-pickup
     with pool(_CONFIG["db_path"]) as conn:
         conn.execute(
-            "UPDATE tasks SET status='queued', started_at=NULL, finished_at=NULL, "
-            "updated_at=strftime('%Y-%m-%dT%H:%M:%S','now') WHERE id=?", (task_id,)
+            "UPDATE log_entries SET status='queued', started_at=NULL, finished_at=NULL, "
+            "updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?", (task_id,)
         )
         conn.commit()
 
@@ -5245,7 +5385,7 @@ def api_delete_task(task_id):
 
     with pool(_CONFIG["db_path"]) as conn:
         task = conn.execute(
-            "SELECT id, status FROM tasks WHERE id=?", (task_id,)
+            "SELECT id, status FROM log_entries WHERE id=? AND parent_id IS NOT NULL", (task_id,)
         ).fetchone()
 
     if not task:
@@ -5261,7 +5401,7 @@ def api_delete_task(task_id):
             "DELETE FROM playbook_runs WHERE task_id=?", (task_id,)
         )
         # Delete the task
-        conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+        conn.execute("DELETE FROM log_entries WHERE id=? AND parent_id IS NOT NULL", (task_id,))
         conn.commit()
 
     return success_single({
@@ -5309,7 +5449,7 @@ def api_model_load_sse(inst_id):
             cur = conn.execute("SELECT state FROM instances WHERE id=?", (inst_id,)).fetchone()
             if cur and cur["state"] == "loading":
                 conn.execute(
-                    "UPDATE instances SET state='running', last_state_change=strftime('%Y-%m-%dT%H:%M:%S','now') WHERE id=?",
+                    "UPDATE instances SET state='running', last_state_change=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
                     (inst_id,),
                 )
         except Exception:

@@ -24,7 +24,7 @@ from engine.base import BaseEngine
 
 CAPABILITIES = {
     "name": "llama_rpc",
-    "display_name": "LLAMA.RPC Server",
+    "display_name": "llama.cpp RPC",
     "supports_models": False,
     "supports_presets": False,
     "max_instances": 99,
@@ -32,6 +32,26 @@ CAPABILITIES = {
     "sub_pages": [
         {"path": "/engines/llama_rpc/config", "label": "Config", "order": 1},
     ],
+    "config_defaults": {
+        "LLAMA_ARG_HOST": ("0.0.0.0", "Host to bind RPC server (0.0.0.0=all interfaces)"),
+        "base_port": ("50052", "Base port for RPC server instances (sequential allocation)"),
+        "binary_path": ("/opt/quickrobot/llama.cpp/build/bin/ggml-rpc-server", "Path to rpc-server binary (shared per-node)"),
+        "git_clone_url": ("https://github.com/ggml-org/llama.cpp.git", "Source git repository URL"),
+        "node_build_dir": ("/opt/quickrobot/llama.cpp/build", "Shared cmake build dir (per-node)"),
+        "node_build_install_depends": ("gcc libssl-dev cmake libvulkan-dev libvulkan1 glslc spirv-headers vulkan-tools libvulkan-dev libvulkan1 glslc spirv-headers", "Additional apt packages for Vulkan support"),
+        "node_build_run_cmd": ("cmake --build build --config Release -j 2", "CMake build command"),
+        "node_build_set_cmd": ("cmake -B build -DGGML_RPC=ON -DGGML_NATIVE=ON -DGGML_CPU=ON -DLLAMA_OPENSSL=ON -DGGML_AVX2=ON -DGGML_VULKAN=ON", "CMake configure command"),
+        "node_git_pull_cmd": ("git pull origin master", "Git pull command for source update"),
+        "node_src_dir": ("/opt/quickrobot/llama.cpp", "Shared llama.cpp source dir (per-node)"),
+        "restart_policy": ("no", "Systemd restart policy"),
+        "skip_build": ("false", "Skip cmake build (use when binary already exists or to pin a version)"),
+        "start_on_boot": ("false", "Enable systemd unit on boot (true/false)"),
+    },
+    "supported_jobs": ["deploy", "restart", "undeploy", "rebuild"],
+    # env_builder: function name in lib.lib_cluster_env_builder that produces
+    # merged_env + cli_args for config/start stages. Only llama_server and
+    # llama_rpc have these; other engines use their own extra_vars paths.
+    "env_builder": "build_rpc_server_env",
 }
 
 

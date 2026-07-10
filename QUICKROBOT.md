@@ -74,11 +74,11 @@
 
 ## Seed File — Chain-of-Trust Verification
 
-The seed file (`data/_seed/seed_v007.sql`) is a plain SQL file with `INSERT OR REPLACE` statements that populate all seed data: engine_types, engine_configs, engine_presets, engine_models, playbook_registry (with checksum_sha256 + file_size), and benchmark_prompts.
+The seed file (`data/_seed/seed_v008.sql`) is a plain SQL file with `INSERT OR REPLACE` statements that populate all static seed data: engine_types, engine_configs, engine_presets, engine_models, playbook_registry (with checksum_sha256 + file_size), and benchmark_prompts. **Note:** `log_entries` table schema comes from base migration `008_base.sql`. Log entries are transient runtime data — NOT stored in the seed file.
 
 ### Verification Flow (fresh DB creation)
 1. **Pre-flight:** Load `.quickrobot.env`, validate required keys + seed checksum BEFORE any filesystem change → **HARD EXIT** if mismatch
-2. **Apply base schema:** `007_base.sql` creates all tables (idempotent via CREATE TABLE IF NOT EXISTS)
+2. **Apply base schema:** `008_base.sql` creates all tables (idempotent via CREATE TABLE IF NOT EXISTS)
 3. **Seed import:** `import_seed_file()` executes seed SQL via `conn.executescript()` — idempotent, ONE TIME ONLY on fresh DB creation
 4. **Engine discovery** → auto-registers engine types from `engine/` subdirectories
 5. **Auto-provision system instances** (API, WebUI, MCP)
@@ -96,27 +96,34 @@ The seed file (`data/_seed/seed_v007.sql`) is a plain SQL file with `INSERT OR R
 | DB file does not exist | Warn user, create fresh DB with base schema + seed, backup skipped (nothing to back up) |
 | DB file exists | Backup first (timestamped copy), use existing DB in-place, seed skipped |
 
-### Development Workflow: `--mode dev-update`
+### Development Workflow: Three `--mode` Options for Playbook Sync
 
-For development sessions where you need current playbook checksums synced to the DB:
+Three modes control playbook scanning and checksum synchronization:
+
+| Mode | New Playbooks | Checksum Sync | Behavior |
+|------|--------------|---------------|----------|
+| `dev` | No | Warn only | Integrity check, warns on mismatch, continues running |
+| `dev-import` | **Yes** — registers new files | Yes | Scans disk, INSERTs new playbooks into registry, then syncs all checksums |
+| `dev-update` | No | Yes | Syncs checksums from disk to DB for already-registered playbooks only |
 
 ```bash
-# Sync disk checksums to DB records (keeps running, mode switches to prod after sync)
+# dev: just check integrity (warnings on mismatch)
+python3 quickrobot.py --mode dev
+
+# dev-import: scan + register new playbooks + sync all checksums
+python3 quickrobot.py --mode dev-import
+
+# dev-update: sync checksums only (no registration)
 python3 quickrobot.py --mode dev-update
 ```
 
-**What this does:**
-1. **`dev-update`:** Scans disk for new playbooks not in DB and registers them, then syncs all checksums from disk to DB records. On mismatches, prints detail diff. After sync, switches `pb_mode` to "prod" and **keeps running** (no longer one-shot — the `--init` flag that used to trigger exit-once behavior is now a no-op).
+**Common behavior:** All three modes keep the API running after completion (not one-shot). The `--init` flag is deprecated (no-op). After `dev-import` or `dev-update` completes, `pb_mode` switches to `"prod"` for the remainder of the session.
 
-**Why this is useful:** During active development, playbook files change frequently. The seed file embeds static checksums that become stale. Running `--mode dev-update` syncs them — no manual sed/regex surgery on the seed file needed.
-
-**Result:** Server running in prod mode with correct checksums. All `playbook_registry` entries reflect actual disk file hashes.
-
-> **NOTE:** `--mode dev` and `--mode dev-update` are development tools. Run only on explicit USER REQUEST — not as automatic pre-flight steps during session start.
+> **NOTE:** `dev`, `dev-import`, and `dev-update` are development tools. Run only on explicit USER REQUEST — not as automatic pre-flight steps during session start.
 
 ### Updating Seed File Checksums (Surgical)
 
-When playbook files change during development, update only the checksum entries without editing other seed data:
+When playbook files change during development, update the seed file to match:
 
 ```bash
 # Step 1: Run dev-update to sync DB with current disk checksums
@@ -126,11 +133,11 @@ python3 quickrobot.py --mode dev-update
 sqlite3 data/quickrobot.db "SELECT 'INSERT OR REPLACE INTO playbook_registry ... ' || 
   id || ', ' || file_path || ', ... FROM playbook_registry;" > /tmp/new_registry.sql
 
-# Step 3: Replace last section of seed_v006.sql with updated entries
+# Step 3: Replace last section of seed_v008.sql with updated entries
 # (Manual step — or automate by moving playbook_registry to end of seed file)
 ```
 
-**Future improvement:** Move `playbook_registry` INSERT statements to the end of `seed_v006.sql`. Then `dev-update` can truncate the seed at the last non-registry line and append fresh DB-exported entries — fully automated surgical update.
+**Future improvement:** Move `playbook_registry` INSERT statements to the end of `seed_v008.sql`. Then `dev-update` can truncate the seed at the last non-registry line and append fresh DB-exported entries — fully automated surgical update.
 
 ### Lesson: Concatenating Two Files (head + cat, not python)
 When rebuilding the seed file with a refreshed playbook_registry section:
@@ -164,6 +171,13 @@ When in doubt: check if the feature was previously disabled (commented out, guar
 
 ### Ansible Output Normalization
 Ansible 2.10+ stores results under `task["hosts"][hostname]` (dict keyed by hostname). The `parse_ansible_json()` function in `lib/lib_ansible_runner.py` normalizes to `task["results"]` (list) for consistent iteration. See `docs/design/ansible_output_format.md` for the full normalization schema.
+
+### Table Column Hiding — Remove from DOM, Don't Hide with CSS
+**Rule:** When hiding a table column in WebUI templates, remove the `<th>` and `<td>` entirely from the DOM — do NOT use CSS `display: none` or `visibility: hidden`. CSS hiding leaves the element in the DOM, which causes `table-layout: auto` to allocate width based on adjacent columns, resulting in visible column shift.
+
+**Correct approach:** Remove `<th data-col="N">` + `<td class="...">` from template, renumber remaining `data-col` attributes, update CSS selectors, clean up JS referencing the removed column.
+
+**Gotcha — inline styles override CSS:** Inline `style="display: block"` on a `<td>` overrides all stylesheet rules and breaks table cell layout. Always verify computed style (`getComputedStyle()`) when debugging table rendering issues.
 
 ### Playbook Vars — Fail on Missing, No Silent Defaults
 **Rule:** All domain configuration variables used by playbooks MUST be declared in the `vars:` section with NO `default()` filter. If a required var is not provided via extra_vars (from engine_configs, preset, or runtime), the playbook should fail with Ansible's built-in "undefined variable" error — not silently use a hardcoded default that masks configuration errors.
@@ -237,7 +251,7 @@ VALUES (<engine_id>, 'KEY_NAME', 'value', 'Description here');
 - Empty value (`value=''`) is valid — Jinja2 template filters it out
 - Takes effect immediately on next deploy
 
-**B) Full integration (seed file + env):** Add INSERT OR REPLACE to `data/_seed/seed_v007.sql`, update seed checksum in `.quickrobot.env`. Fresh DB creation (automatic, no `--init` flag needed) will include this config.
+**B) Full integration (seed file + env):** Add INSERT OR REPLACE to `data/_seed/seed_v008.sql`, update seed checksum in `.quickrobot.env`. Fresh DB creation (automatic, no `--init` flag needed) will include this config.
 
 ---
 
@@ -482,7 +496,7 @@ Registry is dynamically populated from playbook headers (`# @playbook_id:`) and 
 
 | Convention | Example | Description |
 |------------|---------|-------------|
-| `_V1` suffix | `APT_UPDATE_V1`, `DEPLOY_LLAMA_SERVER_V1` | Legacy naming, mostly node actions |
+| `_V1` suffix | `APT_UPDATE_V1` | Legacy naming — V1 deploy playbooks (DEPLOY_*_V1) removed from disk during RUNNER-1 migration; `_resolve_engine_playbook_id()` now returns `None` for them |
 | Descriptive | `preflight_check`, `service_start`, `deploy_config_env` | Modern naming, used by RUNNER-1 staged chain |
 
 **Core playbooks used by staged chain:**
@@ -512,6 +526,27 @@ Registry is dynamically populated from playbook headers (`# @playbook_id:`) and 
 | Instance 100+ | User instances | Always user-owned, deletable via API. | Deletable via API |
 
 **Key rule:** All protection is driven by the `system_managed=1` DB column on instances and the hard-coded `node_id == 1` check on nodes. The ID ranges are conventions, not enforced by DB constraints.
+
+### Localhost (Node 1) Deploy Support
+
+Starting in v0.07+, **all engine types can deploy to node_id=1 (the API host)**. The infrastructure already supported this via Ansible's `ansible_connection: local` mode — only the sudo detection and UI filters needed updates.
+
+**How it works:**
+- Dynamic inventory sets `ansible_connection: local` for node_id=1
+- Playbook execution prepends `sudo` when `node_id == 1` (detected via extra_vars)
+- All playbooks run natively on localhost with full `become: yes` support
+- Compile, git clone, cmake build all work on the local filesystem
+
+**Requirements for localhost deployment:**
+- Local user must have write access to `/opt/quickrobot/` (or configured `node_src_dir`)
+- Local user must have sudo privileges (for `become: yes` playbook tasks)
+- Build dependencies installed (cmake, git, vulkan dev libs, etc.)
+
+**Current behavior:**
+- Subprocess engine already restricted to node_id=1 (unchanged)
+- llama_server, llama_rpc, iperf3, universal: **can now deploy to node_id=1**
+- API list_instances shows localhost instances alongside remote nodes
+- WebUI instance list no longer filters out node_id=1
 
 ### System-Managed Engines
 System-managed instances use PID-based lifecycle via `lib/lib_system_engine.py`:
@@ -785,6 +820,24 @@ Creating a new instance changes port assignment, RPC bindings, build state, and 
 
 ---
 
+### Time Format Standard — UTC with Z Suffix
+
+**All datetime values stored in the SQLite DB MUST use UTC timezone.** The format is ISO-8601 with explicit `Z` suffix to distinguish UTC from local time.
+
+| Column | Format Example | Write Pattern |
+|--------|---------------|---------------|
+| `created_at`, `updated_at`, `finished_at`, `started_at` | `2026-07-08T19:49:11Z` | `strftime('%Y-%m-%dT%H:%M:%SZ','now')` in SQL, or `_dt.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")` in Python |
+| `last_state_change` | `2026-07-08T19:49:11Z` | Same as above |
+
+**Why Z suffix matters:** SQLite's `strftime('%Y-%m-%dT%H:%M:%S','now')` returns UTC time **without** the Z suffix (e.g., `2026-07-08T19:49:11`). Python's `_dt.now().strftime("%Y-%m-%dT%H:%M:%S")` returns LOCAL time without Z. These look identical but differ by 2 hours (CEST vs UTC), causing silent delta errors in interval checks like scheduler health check gates.
+
+**Correct SQL:** `strftime('%Y-%m-%dT%H:%M:%SZ','now')` — note the trailing `Z` in the format string.
+**Correct Python:** `_dt.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")` — explicitly use UTC timezone.
+
+**When adding new timestamp columns or queries:** always use the Z suffix format. When reading, parse with `_dt.strptime(ts.rstrip('Z'), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)` to handle both old (no-Z) and new (with-Z) entries.
+
+---
+
 ## Security
 
 ### Root Guard — All System Engines
@@ -810,7 +863,7 @@ quickrobot uses a **minimal security model** designed for trusted local networks
 - CORS enabled with wildcard origins (`*`) by default
 - MCP DNS rebinding protection configurable via `QUICKROBOT_MCP_DISABLE_DNS_REBINDING`
 - RPC servers bind to `0.0.0.0` by default — use per-instance override for local-only binding
-- Playbook integrity: `--mode dev` warns on checksum mismatch; prod mode kills API on mismatch ("Bad Robot!")
+- Playbook integrity: `--mode dev` warns on mismatch (no registration); `dev-import` registers new playbooks + warns; `dev-update` syncs checksums only. Prod mode hard-fails on mismatch ("Bad Robot!").
 
 ---
 

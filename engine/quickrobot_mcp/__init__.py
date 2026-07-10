@@ -560,7 +560,12 @@ class QrMcpEngine(BaseEngine):
                     break
 
             # Start new process
-            return self.execute(instance_id, "start", db_path)
+            result = self.execute(instance_id, "start", db_path)
+            # Add old_pid for PID change validation in restart responses
+            if old_pid and isinstance(result, dict):
+                result["old_pid"] = old_pid
+                result["pid_changed"] = result.get("pid") != old_pid
+            return result
 
         raise ValueError(f"Unknown action: {command}")
 

@@ -29,7 +29,7 @@ Usage:
 """
 
 # ── Version ───────────────────────────────────────────────────────────
-QUICKROBOT_VERSION = "v0.07"
+QUICKROBOT_VERSION = "v0.08"
 
 # ── Default bind host (localhost loopback) ────────────────────────────
 # SSOT for "127.0.0.1" fallbacks across the codebase.
@@ -132,6 +132,7 @@ _QR_NAV_DISPLAY_NAMES = {
     "quickrobot-scheduler": "Scheduler",
     "quickrobot-mcp":   "MCP Service",
     "subprocess":        "Subprocess",
+    "iperf3":            "iperf;3",
 }
 
 # Short display names for instance list VIEW ENGINE column.
@@ -310,7 +311,7 @@ QR_ENV_WEBUI_HOST = "QUICKROBOT_WEBUI_HOST"
 QR_ENV_WEBUI_PORT = "QUICKROBOT_WEBUI_PORT"
 QR_ENV_MCP_HOST = "QUICKROBOT_MCP_HOST"
 QR_ENV_MCP_PORT = "QUICKROBOT_MCP_PORT"
-QR_ENV_MCP_ALLOWED_HOSTS = "QUICKROBOT_MCP_ALLOWED_HOSTS"  # deprecated — ALLOWED_HOSTS collapsed to static defaults
+
 QR_ENV_MCP_DISABLE_DNS_REBINDING = "QUICKROBOT_MCP_DISABLE_DNS_REBINDING"
 QR_ENV_MCP_CORS_ORIGINS = "QUICKROBOT_MCP_CORS_ORIGINS"
 
@@ -340,6 +341,7 @@ _QR_JOB_TYPES = (
     "deploy", "rebuild", "reconfigure", "deploy_fast", "undeploy",
     "bind", "unbind", "start", "restart", "stop", "reboot",
     "apt_update", "apt_upgrade", "apt_update_upgrade",
+    "health_check",
 )
 
 # Job type constants for comparison (same strings, named constants)
@@ -357,18 +359,22 @@ QR_JOB_REBOOT      = "reboot"
 QR_JOB_APT_UPDATE  = "apt_update"
 QR_JOB_APT_UPGRADE = "apt_upgrade"
 QR_JOB_APT_ALL     = "apt_update_upgrade"
+QR_JOB_HEALTH_CHECK = "health_check"
 
 
 # Stage name constants
-QR_STAGE_PREFLIGHT = "preflight"
-QR_STAGE_DEPS      = "deps"
-QR_STAGE_SOURCE    = "source"
-QR_STAGE_COMPILE   = "compile"
-QR_STAGE_CONFIG_SVC = "config_svc"
-QR_STAGE_CONFIG_ENV = "config_env"
-QR_STAGE_START     = "start"
-QR_STAGE_STOP      = "stop"
+QR_STAGE_PREFLIGHT   = "preflight"
+QR_STAGE_DEPS        = "deps"
+QR_STAGE_SOURCE      = "source"
+QR_STAGE_COMPILE     = "compile"
+QR_STAGE_CONFIG_SVC  = "config_svc"
+QR_STAGE_CONFIG_ENV  = "config_env"
+QR_STAGE_START       = "start"
+QR_STAGE_STOP        = "stop"
 QR_STAGE_HEALTH_PROBE = "health_probe"
+QR_STAGE_UNDEPLOY    = "undeploy"
+QR_STAGE_VERIFY      = "verify"
+QR_STAGE_HEALTH_CHECK = "health_check"  # Periodic scheduler health check (read-only, no state change in Phase 1)
 
 # Stage → instance state mapping (what instances.state becomes while a task runs).
 # During deploy/rebuild chains, instance.state stays "deploying" through all stages
@@ -383,6 +389,8 @@ _QR_STAGE_STATES = {
     QR_STAGE_CONFIG_ENV: "deploying",
     QR_STAGE_STOP:       "stopped",
     QR_STAGE_START:      "running",
+    QR_STAGE_HEALTH_PROBE: "running",  # health_probe stage for RPC
+    "health_check":      "running",   # periodic scheduler health check keeps instance in running
 }
 
 # Stages that can be skipped when binary already exists (source, compile)
@@ -402,6 +410,7 @@ _QR_JOB_FINAL_STATES = {
     "apt_update":    "running",          # node-level apt update
     "apt_upgrade":   "running",          # node-level apt upgrade
     "apt_update_upgrade": "running",     # combined apt update + upgrade chain
+    "health_check":  "running",          # query-only, does not change instance state
 }
 
 
@@ -430,10 +439,33 @@ _QR_UNDEPLOY_CHAINS = {
 # ── Stage timeout defaults (SSOT for playbook header fallbacks) ─────
 # Playbook headers (# @timeout:) override these. These are the fallback
 # defaults when a playbook has no timeout header.
-QR_TIMEOUT_COMPILE    = 1800  # 30 min for cmake build
-QR_TIMEOUT_SOURCE     = 600   # 10 min for git clone
-QR_TIMEOUT_DEFAULT    = 300   # 5 min default for other stages
+QR_TIMEOUT_COMPILE       = 1800  # 30 min for cmake build
+QR_TIMEOUT_SOURCE        = 600   # 10 min for git clone
+QR_TIMEOUT_DEFAULT       = 300   # 5 min default for other stages
+QR_TIMEOUT_HEALTH_CHECK  = 60    # 1 min for health check playbooks (SSH/systemctl probe)
+QR_TIMEOUT_JOB           = 7200  # 2h global job timeout (stale task detection)
 QR_SSH_PORT_DEFAULT   = 22    # Default SSH port for node connections
+
+# ── MCP subprocess startup retry limits (configurable via .env) ──────
+# Overridden by QUICKROBOT_MCP_CONNECT_RETRIES / QUICKROBOT_MCP_CONNECT_DELAY in .env
+QR_MCP_CONNECT_RETRIES   = 8    # Startup retries before FATAL (~24s total for Flask init)
+QR_MCP_CONNECT_DELAY     = 3    # Seconds between retry attempts
+
+# ── Subprocess health check defaults (configurable via .env) ──────────
+# Overridden by QUICKROBOT_MCP_MAX_RETRIES, etc. in .env or engine_configs
+QR_WEBUI_MAX_RETRIES     = 3    # Health check retries before self-kill
+QR_MCP_MAX_RETRIES       = 3
+QR_SCHEDULER_MAX_RETRIES = 3
+QR_HEALTH_CHECK_SLEEP          = 25   # Grace period sleep in health check loop (API needs ~20s to bind)
+QR_HEALTH_CHECK_SPACING_DELAY  = 3    # Seconds between health check queue ops (prevents burst storms)
+
+# ── Restart adopt flags (per-engine, via .env) ───────────────────────
+# When orphaned process detected during API restart:
+#   adopt=true  → keep old process running (SSE session survives)
+#   adopt=false → kill + restart with new code
+QR_WEBUI_RESTART_ADOPT     = "false"
+QR_MCP_RESTART_ADOPT       = "true"
+QR_SCHEDULER_RESTART_ADOPT = "false"
 
 # Model path placeholder values treated as empty/omitted in merge chain
 _QR_MODEL_PATH_PLACEHOLDERS = frozenset(("none", "yes", "no", "true", "false"))

@@ -28,6 +28,7 @@
     </select>
     <div id="model-info" style="margin-top:8px;font-size:0.85em;color:#666;display:none;">
       <strong id="mi-name"></strong>
+      <a id="mi-edit-link" href="#" style="color:#2196f3;margin-left:8px;text-decoration:none;" title="Edit this model">[edit]</a>
       <span style="color:#888;margin-left:8px;" id="mi-quant"></span>
       <span style="color:#888;margin-left:8px;" id="mi-size"></span>
       <br><span style="color:#555;" id="mi-mmproj-wrap" style="display:none;">MMPROJ: <code id="mi-mmproj"></code></span>
@@ -180,6 +181,9 @@
   var currentCategory = '';
   var currentGpuDevice = '';
 
+  // Edit mode tracking — avoids one-time closure race conditions
+  var _envEditMode = 'full';   // 'full' or 'single' + key name
+
   // Loading state
   var loadStatus = document.getElementById('preset-title');
 
@@ -215,10 +219,11 @@
         gpuSelect.value = currentGpuDevice;
         loadStatus.textContent = currentName + ' (ID #' + p.id + ') — ' + engineType;
 
-        // Populate model select
+        // Populate model select — sort by name, display as "ID - Name"
         qrApi('/engine/' + engineType + '/models?include_inactive=false')
           .then(function(md) {
             var items = md.items || [];
+            items.sort(function(a, b) { return (a.name || '').localeCompare(b.name || ''); });
             items.forEach(function(m) {
               var opt = document.createElement('option');
               opt.value = m.id;
@@ -226,7 +231,7 @@
               var tags = [];
               if (m.mmproj_path) tags.push('(+ mmproj)');
               if (m.draft_model_path) tags.push('(+ draft)');
-              opt.textContent = m.name + q + (tags.length ? ' ' + tags.join(' ') : '');
+              opt.textContent = m.id + ' — ' + m.name + q + (tags.length ? ' ' + tags.join(' ') : '');
               modelSelect.appendChild(opt);
             });
             if (currentModelId) modelSelect.value = currentModelId;
@@ -257,13 +262,26 @@
     if (!modelSelect.value) { mi.style.display = 'none'; return; }
     mi.style.display = 'block';
     currentModelId = parseInt(modelSelect.value, 10);
-    document.getElementById('mi-name').textContent = modelSelect.options[modelSelect.selectedIndex].text;
 
+    // Set edit link to the model's edit page
+    var editLink = document.getElementById('mi-edit-link');
+    editLink.href = '/webui/models/' + currentModelId + '/edit';
+
+    // Show model name, quantization, size, params, and paths from API
     qrApi('/engine/' + engineType + '/models/' + currentModelId)
       .then(function(d) {
         if (d.status === 'ok' && d.data) {
-          document.getElementById('mi-quant').textContent = d.data.quantization || '';
-          document.getElementById('mi-size').textContent = d.data.size_bytes ? formatSize(d.data.size_bytes) : '';
+          document.getElementById('mi-name').textContent = d.data.name || '';
+          document.getElementById('mi-quant').textContent = d.data.quantization ? '(' + d.data.quantization + ')' : '';
+          document.getElementById('mi-size').textContent = d.data.size_bytes ? ' — ' + formatSize(d.data.size_bytes) : '';
+          // Show model_params if present (temp, top_p, top_k, etc.)
+          if (d.data.model_params) {
+            try {
+              var mp = JSON.parse(d.data.model_params);
+              var paramStr = Object.keys(mp).map(function(k) { return k + '=' + mp[k]; }).join(', ');
+              document.getElementById('mi-size').textContent += '  [' + paramStr + ']';
+            } catch(e) {}
+          }
           if (d.data.mmproj_path) {
             document.getElementById('mi-mmproj').textContent = d.data.mmproj_path;
             document.getElementById('mi-mmproj-wrap').style.display = 'inline';
@@ -292,7 +310,7 @@
         '<td style="padding:4px;"><code>' + escapeHtml(k) + '</code></td>' +
         '<td style="padding:4px;"><code>' + escapeHtml(String(val)) + '</code></td>' +
         '<td style="padding:4px;">' +
-        '<button class="btn btn-xs" onclick="editEnvKey(\'' + escapeJs(k) + '\')" title="Edit">✎</button> ' +
+        '<button class="btn btn-xs" type="button" onclick="editEnvKey(\'' + escapeJs(k) + '\')" title="Edit">✎</button> ' +
         '<button class="btn btn-xs btn-danger" onclick="removeEnvKey(\'' + escapeJs(k) + '\')" title="Remove">&times;</button>' +
         '</td>' +
         '</tr>');
@@ -306,7 +324,7 @@
         '<td style="padding:4px;"><code>cli[' + idx + ']</code></td>' +
         '<td style="padding:4px;"><code>' + escapeHtml(String(opt)) + '</code></td>' +
         '<td style="padding:4px;">' +
-        '<button class="btn btn-xs" onclick="editCliItem(' + idx + ')" title="Edit">✎</button> ' +
+        '<button class="btn btn-xs" type="button" onclick="editCliItem(' + idx + ')" title="Edit">✎</button> ' +
         '<button class="btn btn-xs btn-danger" onclick="removeCliItem(' + idx + ')" title="Remove">&times;</button>' +
         '</td>' +
         '</tr>');
@@ -320,44 +338,32 @@
 
   // Edit a specific env key by opening modal with just that key
   window.editEnvKey = function(key) {
+    _envEditMode = key;   // Track which key is being edited (non-empty = single-key mode)
     var obj = {};
     obj[key] = currentEnv[key];
     document.getElementById('env-modal-title').textContent = 'Edit Env Var: ' + key;
     document.getElementById('env-json').value = JSON.stringify(obj, null, 2);
     document.getElementById('env-status').textContent = '';
     document.getElementById('env-modal').style.display = 'block';
-
-    // Override save to do partial update
-    document.getElementById('env-save').onclick = function() {
-      try {
-        var parsed = JSON.parse(document.getElementById('env-json').value);
-        if (typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Must be a JSON object');
-        // Update only the specified key
-        for (var k in parsed) {
-          if (parsed[k] === null || parsed[k] === '') {
-            delete currentEnv[k];
-          } else {
-            currentEnv[k] = parsed[k];
-          }
-        }
-        renderConfigTable();
-        document.getElementById('env-status').innerHTML = '<span style="color:green;">OK</span>';
-        setTimeout(function() { document.getElementById('env-modal').style.display = 'none'; }, 400);
-        document.getElementById('env-save').onclick = saveEnvModal; // Reset to full save
-        document.getElementById('env-modal-title').textContent = 'Edit Environment Variables';
-      } catch(e) {
-        document.getElementById('env-status').innerHTML = '<span style="color:red;">' + e.message + '</span>';
-      }
-    };
+    // Use shared save handler — it checks _envEditMode to decide partial vs full
+    document.getElementById('env-save').onclick = saveEnvModal;
   };
 
   function saveEnvModal() {
     try {
       var parsed = JSON.parse(document.getElementById('env-json').value);
       if (typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Must be a JSON object');
-      currentEnv = parsed;
+      // Partial update for single-key edit, full replace for modal edit
+      if (_envEditMode && _envEditMode !== 'full') {
+        var k = _envEditMode;
+        if (parsed[k] === null || parsed[k] === '') { delete currentEnv[k]; }
+        else { currentEnv[k] = parsed[k]; }
+      } else {
+        currentEnv = parsed;
+      }
       renderConfigTable();
       document.getElementById('env-status').innerHTML = '<span style="color:green;">OK</span>';
+      _envEditMode = 'full';   // Reset mode
       setTimeout(function() { document.getElementById('env-modal').style.display = 'none'; }, 400);
     } catch(e) {
       document.getElementById('env-status').innerHTML = '<span style="color:red;">' + e.message + '</span>';
@@ -369,47 +375,36 @@
     renderConfigTable();
   };
 
+  // CLI edit mode tracking
+  var _cliEditIdx = -1;
+
   window.editCliItem = function(idx) {
+    _cliEditIdx = idx;   // Track which index is being edited
     var single = [currentCli[idx]];
     document.getElementById('cli-modal-title').textContent = 'Edit CLI Option [' + idx + ']';
     document.getElementById('cli-json').value = JSON.stringify(single, null, 2);
     document.getElementById('cli-status').textContent = '';
     document.getElementById('cli-modal').style.display = 'block';
-
-    document.getElementById('cli-save').onclick = function() {
-      var raw = document.getElementById('cli-json').value.trim();
-      if (!raw) { currentCli.splice(idx, 1); renderConfigTable(); document.getElementById('cli-modal').style.display = 'none'; return; }
-      try {
-        var parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) { currentCli[idx] = parsed[parsed.length - 1]; }
-        else if (typeof parsed === 'string') { currentCli[idx] = parsed; }
-        else throw new Error('Must be a string or array');
-        renderConfigTable();
-        document.getElementById('cli-status').innerHTML = '<span style="color:green;">OK</span>';
-        setTimeout(function() { document.getElementById('cli-modal').style.display = 'none'; }, 400);
-        document.getElementById('cli-save').onclick = saveCliModal;
-        document.getElementById('cli-modal-title').textContent = 'Edit CLI Options';
-      } catch(e) {
-        document.getElementById('cli-status').innerHTML = '<span style="color:red;">' + e.message + '</span>';
-      }
-    };
+    document.getElementById('cli-save').onclick = saveCliModal;
   };
 
   function saveCliModal() {
     var raw = document.getElementById('cli-json').value.trim();
-    if (!raw) { currentCli = []; renderConfigTable(); document.getElementById('cli-modal').style.display = 'none'; return; }
+    if (!raw) { currentCli.splice(_cliEditIdx, 1); renderConfigTable(); _cliEditIdx = -1; document.getElementById('cli-modal').style.display = 'none'; return; }
     try {
       var parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) { currentCli = parsed; }
-      else if (typeof parsed === 'string') { currentCli = [parsed]; }
+      if (Array.isArray(parsed)) { currentCli[_cliEditIdx] = parsed[parsed.length - 1]; }
+      else if (typeof parsed === 'string') { currentCli[_cliEditIdx] = parsed; }
       else throw new Error('Must be a string or array');
       renderConfigTable();
       document.getElementById('cli-status').innerHTML = '<span style="color:green;">OK</span>';
+      _cliEditIdx = -1;   // Reset mode
       setTimeout(function() { document.getElementById('cli-modal').style.display = 'none'; }, 400);
     } catch(e) {
-      currentCli = [raw];
+      currentCli[_cliEditIdx] = raw;
       renderConfigTable();
       document.getElementById('cli-status').innerHTML = '<span style="color:green;">Saved (as single arg)</span>';
+      _cliEditIdx = -1;
       setTimeout(function() { document.getElementById('cli-modal').style.display = 'none'; }, 400);
     }
   }
@@ -434,6 +429,30 @@
     // L1: Engine defaults — show what the engine provides
     rows.push('<tr><td style="padding:3px;color:#4caf50;font-weight:bold;">L1 Engine Default</td><td style="padding:3px;">(loaded at deploy time)</td><td style="padding:3px;color:#888;">—</td></tr>');
 
+    // L2: Model params — display model generation parameters if a model is selected
+    if (currentModelId) {
+      rows.push('<tr style="border-top:1px solid #ddd;"><td colspan="3" style="padding:4px;font-weight:bold;color:#ff9800;">L2 Model Params (from model)</td></tr>');
+      qrApi('/engine/' + engineType + '/models/' + currentModelId)
+        .then(function(d) {
+          if (d.status === 'ok' && d.data && d.data.model_params) {
+            try {
+              var mp = JSON.parse(d.data.model_params);
+              var keys = Object.keys(mp).sort();
+              keys.forEach(function(k) {
+                rows.push(
+                  '<tr><td style="padding:3px;color:#ff9800;">model.' + k + '</td>' +
+                  '<td style="padding:3px;">—</td>' +
+                  '<td style="padding:3px;"><code>' + escapeHtml(String(mp[k])) + '</code></td></tr>');
+              });
+              mergeChainBody.innerHTML = rows.join('');
+            } catch(e) {}
+          } else {
+            mergeChainBody.innerHTML = rows.join('');
+          }
+        })
+        .catch(function() { mergeChainBody.innerHTML = rows.join(''); });
+    }
+
     // L3: Preset template — our current edits
     var envKeys = Object.keys(currentEnv).sort();
     if (envKeys.length > 0) {
@@ -455,8 +474,8 @@
     }
 
     // L5: Instance override — placeholder (shown as "set per-instance at deploy time")
-    rows.push('<tr style="border-top:1px solid #ddd;"><td colspan="3" style="padding:4px;font-weight:bold;color:#ff9800;">L5 Instance Override</td></tr>');
-    rows.push('<tr><td style="padding:3px;color:#ff9800;">instance_override</td><td style="padding:3px;">(applied when instance uses this preset)</td><td style="padding:3px;color:#888;">—</td></tr>');
+    rows.push('<tr style="border-top:1px solid #ddd;"><td colspan="3" style="padding:4px;font-weight:bold;color:#9c27b0;">L5 Instance Override</td></tr>');
+    rows.push('<tr><td style="padding:3px;color:#9c27b0;">instance_override</td><td style="padding:3px;">(applied when instance uses this preset)</td><td style="padding:3px;color:#888;">—</td></tr>');
 
     mergeChainBody.innerHTML = rows.join('');
   }
@@ -481,14 +500,16 @@
     renderConfigTable();
   });
 
-  // Modal handlers
+  // Modal handlers — reset edit mode on cancel
   document.getElementById('env-cancel').addEventListener('click', function() {
     document.getElementById('env-modal').style.display = 'none';
+    _envEditMode = 'full';   // Reset mode
     document.getElementById('env-save').onclick = saveEnvModal;
     document.getElementById('env-modal-title').textContent = 'Edit Environment Variables';
   });
   document.getElementById('cli-cancel').addEventListener('click', function() {
     document.getElementById('cli-modal').style.display = 'none';
+    _cliEditIdx = -1;   // Reset mode
     document.getElementById('cli-save').onclick = saveCliModal;
     document.getElementById('cli-modal-title').textContent = 'Edit CLI Options';
   });

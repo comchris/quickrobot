@@ -78,8 +78,8 @@
     <div>
       <label style="color:#888;font-size:0.8em;">Start on Boot</label>
       <select id="sob-select" style="padding:4px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;width:100%;">
-        <option value="true"{% if start_on_boot == True or start_on_boot == 'true' or start_on_boot == 1 %} selected{% endif %}>True — auto-start on API restart</option>
-        <option value="false"{% if start_on_boot == False or start_on_boot == 'false' or start_on_boot == 0 %} selected{% endif %}>False — manual start required</option>
+        <option value="true"{% if start_on_boot == True or start_on_boot == 'true' or start_on_boot == 1 %} selected{% endif %}>True — systemd enabled, starts on boot/power-on</option>
+        <option value="false"{% if start_on_boot == False or start_on_boot == 'false' or start_on_boot == 0 %} selected{% endif %}>False — systemd disabled, manual start only</option>
       </select>
     </div>
     {% if is_llama or engine_name == 'llama_rpc' or engine_name == 'iperf3' or is_universal %}
@@ -682,7 +682,7 @@
   <td>{{ entry.created_at or entry.started_at }}</td>
   <td>{{ entry.action_type }}</td>
   <td>{{ entry.status }}</td>
-  <td>{{ '%dms'|format(entry.duration_ms) if entry.duration_ms else 'N/A' }}</td>
+   <td>{% if entry.duration_ms %}{{ '%dms'|format(entry.duration_ms|int) }}{% else %}N/A{% endif %}</td>
 </tr>
 {% else %}
 <tr><td colspan="4" style="text-align:center;color:#888;">No ansible actions for this instance</td></tr>
@@ -1006,13 +1006,13 @@
 
   if (saveBtn && sobSelect) {
     saveBtn.addEventListener('click', function() {
-      // Build structured override with env section for proper merge chain tracking
-      var override_env = {};
-      override_env.start_on_boot = sobSelect.value;
+      // System options stored at top-level of config_override (not nested under env)
+      // so _build_extra_vars and _resolve_metadata can read them correctly.
+      var config_obj = {};
+      config_obj.start_on_boot = sobSelect.value;
       if (restartPolicySelect) {
-        override_env.restart_policy = restartPolicySelect.value;
+        config_obj.restart_policy = restartPolicySelect.value;
       }
-      var config_obj = { env: override_env };
       var params = { config_override: JSON.stringify(config_obj) };
       saveBtn.disabled = true;
       saveBtn.textContent = 'Saving...';

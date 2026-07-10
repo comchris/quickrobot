@@ -44,26 +44,28 @@
 {% endif %}
 
 <style>
-   /* Age column (col 2) — hidden to save space */
-   table th[data-col="2"], td.age-cell { display: none; }
-   /* Host column (col 4) */
-   table th[data-col="4"] { min-width: 165px; }
+   /* Host column (col 3) */
+   table th[data-col="3"] { min-width: 120px; }
    td.host-cell { word-break: break-word; overflow-wrap: anywhere; }
-   /* Engine column (col 3) */
-   table th[data-col="3"] { min-width: 165px; }
-   td.engine-cell { word-break: break-word; overflow-wrap: anywhere; }
-   /* Remote column (col 5) */
-   table th[data-col="5"] { min-width: 165px; }
+   /* Engine column (col 2) */
+   table th[data-col="2"] { min-width: 120px; }
+   /* Remote column (col 4) */
+   table th[data-col="4"] { min-width: 165px; }
    td.remote-cell { font-size: 0.8em; overflow-wrap: anywhere; }
-   /* Preset & Actions merged column (col 6) — wider to fit buttons below dropdown */
-   table th[data-col="6"] { min-width: 280px; max-width: 400px; }
+   /* Preset & Actions merged column (col 5) — wider to fit buttons below dropdown */
+   table th[data-col="5"] { min-width: 280px; max-width: 400px; }
    td.preset-actions-cell .preset-sel { max-width: 100%; width: 100%; }
-   /* Action buttons in merged column: flex row with gap, no wrap */
-   td.preset-actions-cell .actions-render { display: flex; gap: 4px; align-items: center; flex-wrap: nowrap; }
-   /* Info column (col 8) */
-   table th[data-col="8"] { min-width: 90px; }
-   /* State column (col 7) */
-   table th[data-col="7"], table td.state-cell { min-width: 80px; white-space: nowrap; padding: 4px 2px; }
+     /* Action buttons in merged column: flex row with gap, no wrap */
+    td.preset-actions-cell .actions-render { display: flex; gap: 4px; align-items: center; flex-wrap: nowrap; }
+     /* Jobs column (col 7) — compact, stacked layout */
+     table th[data-col="7"] { min-width: 90px; max-width: 150px; }
+      td.job-cell { min-width: 90px; max-width: 150px; line-height: 1.3; overflow: hidden; }
+    /* Info column (col 8) */
+    table th[data-col="8"] { min-width: 90px; }
+     td.last-info-cell {}
+      /* State column (col 6) — compact, centered vertically */
+      table th[data-col="6"] { min-width: 70px; }
+      td.state-cell { white-space: nowrap; padding: 4px 2px; line-height: 1.3; vertical-align: middle; }
     .badge-over { display:inline-block;padding:2px 8px;border-radius:10px;font-size:0.8em;font-weight:600;vertical-align:middle;line-height:inherit;background:var(--badge-over, #fdebd0);color:var(--fg-over, #873b00); }
    #filter-form select, #filter-form .btn { white-space:nowrap; }
    /* Node ping state indicator dot */
@@ -85,12 +87,12 @@
   <tr>
     <th class="sortable" data-col="0">ID</th>
     <th class="sortable" data-col="1">Name</th>
-    <th class="sortable" data-col="2">Age</th>
-    <th class="sortable" data-col="3">Engine</th>
-    <th class="sortable" data-col="4">Host</th>
-    <th class="sortable" data-col="5">Remote</th>
-    <th class="sortable" data-col="6">PRESET &amp; ACTIONS</th>
-    <th class="sortable" data-col="7">State</th>
+    <th class="sortable" data-col="2">Engine</th>
+    <th class="sortable" data-col="3">Host</th>
+    <th class="sortable" data-col="4">Remote</th>
+    <th class="sortable" data-col="5">PRESET &amp; ACTIONS</th>
+    <th class="sortable" data-col="6">State</th>
+    <th class="sortable" data-col="7">Jobs</th>
     <th class="sortable" data-col="8">Info</th>
   </tr>
 </thead>
@@ -101,8 +103,7 @@
   <td>{{ inst.id }}</td>
   <!-- Name: link to instance detail -->
   <td><a class="row-link" href="/webui/instances/{{ inst.id }}">{{ inst.name }}</a></td>
-  <!-- Age: relative time, sortable via data-sort; system-managed + subprocess use process uptime -->
-  <td class="age-cell"{% if (inst.system_managed or inst.engine_type_name == 'subprocess') and inst.process_age_seconds is defined %} data-uptime="{{ inst.process_age_seconds }}"{% endif %} data-sort="{{ inst.created_at or '' }}">{{ inst.created_at or '-' }}</td>
+
    <!-- Engine + build number (RPC binding shown in REMOTE column only) -->
     <td>
       {{ inst.engine_display_name or inst.engine_type_name }}
@@ -203,39 +204,63 @@
         </select>
         {% endif %}
       </div>
-      {# Action buttons rendered here by initStatusActions() #}
-      <span class="actions-render" data-inst-id="{{ inst.id }}"></span>
-    </td>
-  <!-- State: pill badges (original style) -->
-    <td class="state-cell" data-sort="{{ inst.state or '' }}" style="display:flex;flex-direction:column;gap:1px;align-items:flex-start;">
-       {{ status_badge(inst.state) }}
-       {# Orphaned instance indicator (node was deleted) #}
-       {% if not inst.node_name and inst.node_id %}
-       <span title="Node deleted — instance may be orphaned" style="color:#e67e22;font-size:0.7em;">&#9888; ORPHAN</span>
-       {% endif %}
-       {# RPC binding warnings for llama_server instances #}
-       {% if inst.engine_type_name == 'llama_server' and inst._rpc_warnings %}
-         {% for warn in inst._rpc_warnings %}
-         <span title="{{ warn }}" style="color:#e67e22;font-size:0.7em;">&#9888;</span>
-         {% endfor %}
-       {% endif %}
-       {# Per-instance config override indicator #}
-        {% if inst.has_custom_config %}<span class="badge-over" title="Per-instance config overrides active">override</span>{% endif %}
-        {# MCP availability indicator #}
-        {% if inst.engine_type_name == 'quickrobot-mcp' and inst._mcp_available is defined and not inst._mcp_available %}
-          <span title="MCP Python package not installed — cannot start" style="color:#e67e22;font-size:0.7em;">&#9888; NO-MCP</span>
+      {# Action buttons — pre-rendered from API _actions array (no AJAX needed) #}
+      <span class="actions-render" data-inst-id="{{ inst.id }}">
+        {% for act in (inst._actions or []) %}
+        {% if not act.disabled %}
+        <button class="btn btn-{{ action_class_map(act.name) }} inst-action"
+                data-action="{{ act.name }}" data-id="{{ inst.id }}"
+                title="{{ action_help_text(act.name) }}">
+            {{ act.label }}
+        </button>
         {% endif %}
-     </td>
+        {% endfor %}
+      </span>
+    </td>
+      <!-- State: pill badges + override badge (stacked) -->
+       <td class="state-cell" data-sort="{{ inst.state or '' }}">
+         <div style="display:flex;flex-direction:column;gap:2px;align-items:flex-start;">
+         {{ status_badge(inst.state) }}
+         {# Per-instance config override indicator #}
+         {% if inst.has_custom_config %}<span class="badge-over" title="Per-instance config overrides active">override</span>{% endif %}
+         {# Orphaned instance indicator (node was deleted) #}
+         {% if not inst.node_name and inst.node_id %}
+         <span title="Node deleted — instance may be orphaned" style="color:#e67e22;font-size:0.7em;">&#9888; ORPHAN</span>
+         {% endif %}
+         {# RPC binding warnings for llama_server instances #}
+         {% if inst.engine_type_name == 'llama_server' and inst._rpc_warnings %}
+           {% for warn in inst._rpc_warnings %}
+           <span title="{{ warn }}" style="color:#e67e22;font-size:0.7em;">&#9888;</span>
+           {% endfor %}
+         {% endif %}
+         {# MCP availability indicator #}
+         {% if inst.engine_type_name == 'quickrobot-mcp' and inst._mcp_available is defined and not inst._mcp_available %}
+           <span title="MCP Python package not installed — cannot start" style="color:#e67e22;font-size:0.7em;">&#9888; NO-MCP</span>
+         {% endif %}
+         </div>
+      </td>
+      <!-- Jobs: count + link to filtered logs (stacked) -->
+        <td class="job-cell" data-sort="{{ inst.last_state_change or '' }}">
+          <div style="display:flex;flex-direction:column;gap:2px;align-items:flex-start;">
+          {# Active jobs count as link to Logs page filtered by instance_id #}
+          {% if inst.active_jobs and inst.active_jobs.count > 0 %}
+          <a class="job-badge job-{{ inst.active_jobs.job_type }}" href="/webui/logs?instance_id={{ inst.id }}&job_type={{ inst.active_jobs.job_type }}"
+             title="Job: {{ inst.active_jobs.job_type }}{% if inst.active_jobs.stage %} stage={{ inst.active_jobs.stage }}{% endif %}">
+              {% if inst.active_jobs.count == 1 %}1 job{% else %}{{ inst.active_jobs.count }} jobs{% endif %}
+          </a>
+          {% endif %}
+          </div>
+       </td>
    <!-- Info: relative time + refresh button (stacked vertically) -->
-  <td class="last-info-cell" data-ts="{{ inst.last_state_change or '' }}" data-ts-utc="{{ inst.last_state_change or '' }}" data-id="{{ inst.id }}">
-    {% if inst.last_state_change %}{{ inst.last_state_change[:19] }}<br>{% endif %}
-    <button class="btn btn-xs refresh-inst" data-id="{{ inst.id }}" title="Trigger remote health check" style="font-size:0.7em;padding:2px 5px;background:#90caf9;border:1px solid #64b5f6;color:#1565c0;">&#8635;</button>
-  </td>
+   <td class="last-info-cell" data-ts="{{ inst.last_state_change or '' }}" data-ts-utc="{{ inst.last_state_change or '' }}" data-id="{{ inst.id }}">
+     {% if inst.last_state_change %}{{ inst.last_state_change[:19] }}<br>{% endif %}
+     <button class="btn btn-xs refresh-inst" data-id="{{ inst.id }}" title="Trigger remote health check" style="font-size:0.7em;padding:2px 5px;background:#90caf9;border:1px solid #64b5f6;color:#1565c0;">&#8635;</button>
+   </td>
 </tr>
 {# Model Load Progress (list view) — llama_server only, shown as sub-row #}
 {% if inst.engine_type_name == 'llama_server' %}
 <tr class="model-load-row" data-inst-id="{{ inst.id }}" style="display:none;">
-  <td colspan="9" style="padding:4px 12px 8px 12px;background:#fafafa;border-top:1px solid #eee;">
+  <td colspan="10" style="padding:4px 12px 8px 12px;background:#fafafa;border-top:1px solid #eee;">
     <div class="model-load-progress" data-inst-id="{{ inst.id }}">
       <div style="display:flex;justify-content:space-between;font-size:0.75em;color:#666;margin-bottom:2px;">
         <span class="ml-stage"></span>
@@ -249,37 +274,15 @@
 </tr>
 {% endif %}
 {% else %}
-<tr><td colspan="9" style="text-align:center;color:#888;">No instances match filters</td></tr>
+<tr><td colspan="10" style="text-align:center;color:#888;">No instances match filters</td></tr>
 {% endfor %}
 </tbody>
 </table>
 
-<!-- Column sorting JS — sortable columns: 0(ID),1(Name),2(Age),3(Engine),4(Host),5(Remote),6(Preset),7(State),8(ACTIONS),9(Info) -->
+<!-- Column sorting JS — sortable columns: 0(ID),1(Name),2(Engine),3(Host),4(Remote),5(Preset),6(State),7(Jobs),8(Info) -->
 <script>
-// Apply relative time + localized timestamp formatting on load
 (function() {
-  document.querySelectorAll('.age-cell').forEach(function(cell) {
-    var uptime = cell.getAttribute('data-uptime');
-    if (uptime !== null) {
-      // System-managed instance: show process uptime directly
-      var secs = parseInt(uptime, 10);
-      if (!isNaN(secs) && secs >= 0) {
-        var d = Math.floor(secs / 86400);
-        secs %= 86400;
-        var h = Math.floor(secs / 3600);
-        secs %= 3600;
-        var m = Math.floor(secs / 60);
-        if (d > 0) cell.textContent = d + 'd ' + h + 'h';
-        else if (h > 0) cell.textContent = h + 'h ' + m + 'm';
-        else if (m > 0) cell.textContent = m + 'm';
-        else cell.textContent = secs + 's';
-      }
-      return;
-    }
-    var raw = cell.getAttribute('data-sort') || cell.textContent.trim();
-    cell.textContent = qrFmtRelative(raw);
-  });
-   document.querySelectorAll('.last-info-cell').forEach(function(cell) {
+  document.querySelectorAll('.last-info-cell').forEach(function(cell) {
     var raw = cell.getAttribute('data-ts-utc') || cell.getAttribute('data-ts') || '';
     var id = cell.getAttribute('data-id');
     var btnHtml = '<br><button class="btn btn-xs refresh-inst" data-id="' + (id||'') + '" title="Trigger remote health check" style="font-size:0.7em;padding:2px 5px;background:#90caf9;border:1px solid #64b5f6;color:#1565c0;">&#8635;</button>';
@@ -321,15 +324,6 @@ function sortTable(col, dir) {
     var cellB = getCellValue(b, col);
     if (col === 0) {
       return dir === 'asc' ? (parseInt(cellA, 10) || 0) - (parseInt(cellB, 10) || 0) : (parseInt(cellB, 10) || 0) - (parseInt(cellA, 10) || 0);
-    }
-    if (col === 2) {
-      var uptimeA = a.cells[col].getAttribute('data-uptime');
-      var uptimeB = b.cells[col].getAttribute('data-uptime');
-      if (uptimeA !== null && uptimeB !== null) {
-        var numA = parseInt(uptimeA, 10) || 0;
-        var numB = parseInt(uptimeB, 10) || 0;
-        return dir === 'asc' ? numA - numB : numB - numA;
-      }
     }
     return dir === 'asc' ? cellA.localeCompare(cellB) : cellB.localeCompare(cellA);
   });
@@ -399,13 +393,14 @@ function wrapActionButtons() {
      var id = this.getAttribute('data-id');
      var origHTML = btn.innerHTML;
      btn.innerHTML = '...';
-     qrApi('/instances/' + id + '/query-status')
-       .then(function(data) {
-         btn.innerHTML = origHTML;
-         // Reload to show updated state + last_state_change from DB
-         if (data.status === 'ok' && data.data.alive !== undefined) {
-           window.location.reload();
-         }
+       qrApi('/instances/' + id + '/status?remote=true')
+        .then(function(data) {
+          btn.innerHTML = origHTML;
+          // Reload to show updated state + last_state_change from DB
+          var health = (data.data && data.data.health) || {};
+          if (data.status === 'ok' && health.alive !== undefined) {
+            window.location.reload();
+          }
        }).catch(function(e) {
          btn.innerHTML = origHTML;
        });
@@ -417,7 +412,7 @@ function wrapActionButtons() {
   var presetCache = {};
 
   function getPresets(engineType) {
-    if (presetCache[engineType]) return Promise.resolve(presetCache[engineType]);
+    if (presetCache[engineType] !== undefined) return Promise.resolve(presetCache[engineType]);
     var etype = engineType.toLowerCase().replace(/\s+/g, '_');
     return qrApi('/engine/' + encodeURIComponent(etype) + '/presets')
       .then(function(data) {
@@ -426,9 +421,28 @@ function wrapActionButtons() {
         return items;
       })
       .catch(function(e) {
+        // NetworkError on first load can be a timing issue — retry once after 500ms
+        var isNetworkError = typeof e === 'string' && (e.indexOf('Network') !== -1 || e.indexOf('fetch') !== -1);
+        if (isNetworkError) {
+          return new Promise(function(resolve) {
+            setTimeout(function() {
+              qrApi('/engine/' + encodeURIComponent(etype) + '/presets')
+                .then(function(data2) {
+                  var items = (data2 && data2.data && data2.data.items) || (data2 && data2.items) || [];
+                  presetCache[engineType] = items;
+                  resolve(items);
+                })
+                .catch(function(e2) {
+                  console.warn('[preset] retry failed for ' + engineType + ':', e2);
+                  presetCache[engineType] = [];
+                  resolve([]);
+                });
+            }, 500);
+          });
+        }
         console.error('[preset] getPresets(' + engineType + ') failed:', e);
         presetCache[engineType] = [];
-        return [];
+        return Promise.resolve([]);
       });
   }
 
@@ -438,7 +452,7 @@ function wrapActionButtons() {
       var p = presets[i];
       var opt = document.createElement('option');
       opt.value = p.id;
-      opt.textContent = p.name;
+      opt.textContent = p.id + ' ' + p.name;
       if (p.id == currentPresetId) opt.selected = true;
       sel.appendChild(opt);
     }
@@ -520,7 +534,7 @@ function wrapActionButtons() {
               }
               details.push('Model ' + modelData.id + ': "' + modelData.name + '" ' + (modelData.quantization || '') + sizeStr);
             }
-            var instName = document.querySelector('#preset-name-' + instId) ? document.querySelector('#preset-name-' + instId).textContent : instData.name || '';
+            var instName = instData.name || '';
             details.push('On Instance: ' + instName);
             var nodeHost = instData.node_hostname || '';
             if (nodeHost) details.push('On Host: ' + nodeHost);
@@ -540,7 +554,8 @@ function wrapActionButtons() {
   });
 
   // ---- SSE Model Load Progress Client ----
-  var _mlConnections = {}; // instId -> { es, loaded }
+  var _mlConnections = {};     // instId -> { es, loaded }
+  var _qrPollIntervals = {};   // instId -> interval reference (clear on rapid preset changes)
   function mlConnectSSE(instId) {
     if (_mlConnections[instId]) return;
     var row = document.querySelector('tr.model-load-row[data-inst-id="' + instId + '"]');
@@ -585,7 +600,7 @@ function wrapActionButtons() {
         if (msg.status === 'loaded' || msg.status === 'sleeping') { updateProgress('loaded', 1.0); }
         else if (msg.status === 'unloaded') { row.style.display = 'none'; es.close(); delete _mlConnections[instId]; }
         else if (msg.progress) { updateProgress(msg.progress.stage, msg.progress.value); }
-      } catch(err) {}
+      } catch(err) { console.warn('[ml-sse] parse error:', err, 'data:', e.data); }
     });
     es.onerror = function() { row.style.display = 'none'; es.close(); delete _mlConnections[instId]; };
   }
@@ -605,21 +620,46 @@ function wrapActionButtons() {
         if (nameEl) nameEl.textContent = pn;
         // For llama_server, monitor model load progress via SSE
         if (data.data.engine_type_name === 'llama_server') {
+          // Close any stale SSE connection before creating a new one
+          if (_mlConnections[id] && _mlConnections[id].es) {
+            _mlConnections[id].es.close();
+            delete _mlConnections[id];
+          }
+          // Clear any previous poll interval for this instance (rapid preset change guard)
+          if (_qrPollIntervals[id]) { clearInterval(_qrPollIntervals[id]); delete _qrPollIntervals[id]; }
           mlConnectSSE(id);
           // Poll status to detect loading state and manage SSE connection lifecycle
-          var pollInterval = setInterval(function() {
+          var reloadTimer = null;
+          _qrPollIntervals[id] = setInterval(function() {
             qrApi('/instances/' + id + '/status').then(function(sd) {
               var st = (sd && sd.data && sd.data.state) || '';
               if (st === 'running' || st === 'error') {
-                clearInterval(pollInterval);
-                var row = document.querySelector('tr.model-load-row[data-inst-id="' + id + '"]');
-                if (row) row.style.display = 'none';
+                clearInterval(_qrPollIntervals[id]);
+                delete _qrPollIntervals[id];
+                if (reloadTimer) clearTimeout(reloadTimer);
+                if (_mlConnections[id] && _mlConnections[id].loaded) {
+                  // SSE already triggered reload — wait for it to complete
+                } else if (st === 'running') {
+                  // Skip-build path or fast restart: no SSE progress, force reload
+                  window.location.reload();
+                } else {
+                  var row = document.querySelector('tr.model-load-row[data-inst-id="' + id + '"]');
+                  if (row) row.style.display = 'none';
+                }
               } else if (st === 'loading' && !_mlConnections[id]) {
                 // SSE was closed (server not ready), reconnect now
                 mlConnectSSE(id);
               }
-            }).catch(function(){});
+            }).catch(function(e){ console.warn('[preset-change] status poll error:', e); });
           }, 3000);
+          // Fallback: if no SSE progress within 30s, force reload to avoid stuck UI
+          reloadTimer = setTimeout(function() {
+            clearInterval(_qrPollIntervals[id]);
+            delete _qrPollIntervals[id];
+            if (!_mlConnections[id] || !_mlConnections[id].loaded) {
+              window.location.reload();
+            }
+          }, 30000);
         }
       } else {
         if (sel) sel.disabled = false;
@@ -720,49 +760,32 @@ function apiReload() {
   window.location.href = url;
 }
 
-// Heavy health check: query-status on all active instances, skip inactive-host rows
+// Heavy health check: queue async scheduler jobs via single API call (BG-HEALTH-1)
 function healthCheckAll() {
   if (healthCheckAllBtn) {
     var origHTML = healthCheckAllBtn.innerHTML;
     healthCheckAllBtn.textContent = 'Checking...';
     healthCheckAllBtn.disabled = true;
   }
-  var buttons = document.querySelectorAll('.refresh-inst');
-  if (!buttons.length) {
-    // No instances — just reload
-    window.location.reload();
-    return;
-  }
-  var ids = [];
-  var skipped = 0;
-  buttons.forEach(function(b) {
-    var row = b.closest('tr');
-    if (row && row.classList.contains('row-inactive-host')) { skipped++; return; }
-    var id = b.getAttribute('data-id'); if (id) ids.push(id);
-  });
-  if (!ids.length) {
-    // All instances on inactive hosts — just reload
-    if (healthCheckAllBtn) { healthCheckAllBtn.textContent = origHTML; healthCheckAllBtn.disabled = false; }
-    window.location.reload();
-    return;
-  }
-  var idx = 0;
-  function next() {
-    if (idx >= ids.length) {
-      // All done — reload to show updated state
-      if (healthCheckAllBtn) {
-        healthCheckAllBtn.textContent = origHTML;
-        healthCheckAllBtn.disabled = false;
-      }
-      window.location.reload();
+  // Single API call queues all eligible instances → scheduler processes asynchronously.
+  // No loop needed — backend handles batching, interval gating, per-node locks.
+  qrApi('/instances/health-check-all', { method: 'POST' }).then(function(data) {
+    if (data.status !== 'ok') {
+      if (healthCheckAllBtn) { healthCheckAllBtn.textContent = origHTML; healthCheckAllBtn.disabled = false; }
+      alert('Health check failed: ' + (data.message || ''));
       return;
     }
-    var curId = ids[idx++];
-    qrApi('/instances/' + curId + '/query-status')
-      .catch(function() { /* best effort, continue */ });
-    setTimeout(next, 300);
-  }
-  next();
+    var queued = data.data && data.data.queued_count ? data.data.queued_count : 0;
+    if (healthCheckAllBtn) {
+      healthCheckAllBtn.textContent = 'Queued ' + queued + ' check(s)';
+    }
+    // Wait for scheduler to process all SSH playbooks, then reload.
+    var delay = Math.max(30000, queued * 5000);
+    setTimeout(function() { window.location.reload(); }, delay);
+  }).catch(function(err) {
+    if (healthCheckAllBtn) { healthCheckAllBtn.textContent = origHTML; healthCheckAllBtn.disabled = false; }
+    alert('Health check queue failed: ' + (err.message || JSON.stringify(err)));
+  });
 }
 
 function stopAutoRefresh() {
@@ -954,52 +977,10 @@ document.querySelectorAll('.mcp-perm-sel').forEach(function(sel) {
 });
 })();
 
-// STATUS-1: Use shared renderInstanceActions from base.html for action buttons
-// Adds system-managed badge in state column (not part of shared renderer)
+// STATUS-1: Action buttons are now pre-rendered from API _actions array (Jinja2).
+// No AJAX needed — initStatusActions only wraps long button rows.
 (function initStatusActions() {
-  
-  var _statusCache = {};
-
-  function fetchStatus(instId) {
-    if (_statusCache[instId]) return Promise.resolve(_statusCache[instId]);
-    return qrApi('/instances/' + instId + '/status')
-      .then(function(data) {
-        var statusData = (data && data.data) || {};
-        _statusCache[instId] = statusData;
-        return statusData;
-      })
-      .catch(function() { return null; });
-  }
-
-  // Auto-render for visible rows on load (non-blocking)
-  setTimeout(function() {
-    var actionCells = document.querySelectorAll('.actions-render[data-inst-id]');
-    
-    var promises = [];
-    for (var i = 0; i < actionCells.length; i++) {
-      (function(cell, instId) {
-        promises.push(
-          fetchStatus(instId).then(function(statusData) {
-            if (!statusData) return;
-            // Use shared renderer from base.html (renderInstanceActions)
-            renderInstanceActions(instId, statusData, cell);
-            // Add system-managed badge in state column if applicable
-            if (statusData.system_managed) {
-              var stateCell = document.querySelector('tr[data-inst-id="' + instId + '"] td.state-cell');
-              if (stateCell && !stateCell.querySelector('.badge-system')) {
-                var sysBadge = document.createElement('span');
-                sysBadge.className = 'badge badge-system';
-                sysBadge.textContent = 'system';
-                stateCell.appendChild(sysBadge);
-              }
-            }
-          })
-        );
-      })(actionCells[i], actionCells[i].getAttribute('data-inst-id'));
-    }
-    // After all renders complete, wrap buttons that exceed 3
-    Promise.all(promises).then(function() { setTimeout(wrapActionButtons, 100); });
-  }, 500);
+  setTimeout(function() { wrapActionButtons(); }, 50);
 })();
 
 </script>

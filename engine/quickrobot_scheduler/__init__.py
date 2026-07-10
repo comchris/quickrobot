@@ -1,196 +1,168 @@
-# Copyright 2026 comchris quickrobot .de project
-# Quickrobot Scheduler Engine — background job/task executor (RUNNER-1).
+# quickrobot scheduler engine package
+# Manages the background scheduler process via PID-in-DB tracking.
 
-"""Scheduler engine class for lifecycle management.
-
-The scheduler runs as a subprocess of the API server, polling for queued
-jobs and executing staged playbooks via PlaybookRunner.
-"""
+import os
+import sys
 
 from engine.base import BaseEngine
-from lib.qr_engine_ids import QR_DEFAULT_LOCALHOST
+from lib.qr_engine_ids import QR_ENGINE_SCHEDULER_NAME
+
 
 CAPABILITIES = {
-    "name": "quickrobot-scheduler",
-    "display_name": "Scheduler",
-    "category": "system",
-    "description": "Staged playbook job scheduler — polls for queued tasks and executes stages",
+    "name": QR_ENGINE_SCHEDULER_NAME,
+    "display_name": "Quickrobot Scheduler",
+    "supports_models": False,
+    "supports_presets": False,
+    "max_instances": 1,
 }
 
 
 class SchedulerEngine(BaseEngine):
-    """Engine wrapper for the quickrobot-scheduler subprocess.
+    """Manages the scheduler background process via PID-in-DB tracking."""
 
-    Delegates start/stop/restart to lib_system_engine functions.
-    The scheduler does not bind a port; it runs in the background.
-    """
+    STATE_MACHINE_NAME = QR_ENGINE_SCHEDULER_NAME
 
-    STATE_MACHINE_NAME = "scheduler"
+    def __init__(self, config=None):
+        self.config = config or {}
+        self._name = CAPABILITIES["name"]
 
-    def __init__(self):
-        self.name = CAPABILITIES["name"]
-        self.capabilities = CAPABILITIES
-
-    @classmethod
-    def get_instance_status(cls, db_path, instance_id):
-        """Return scheduler subprocess status (STATUS-1 format).
-
-        Args:
-            db_path: Database path.
-            instance_id: Instance primary key.
-
-        Returns:
-            Status dict in canonical STATUS-1 format.
-        """
-        eng = cls()
-        return eng.get_status(instance_id, db_path)
-
-    # ---- Abstract methods from BaseEngine (minimal implementations) ----
+    # ── Abstract method stubs (minimal for system-managed engine) ──
 
     def get_status(self, instance_id, db_path=None):
-        """Return scheduler subprocess status in canonical STATUS-1 format.
-
-        Args:
-            instance_id: Integer DB primary key.
-            db_path: Database path.
-
-        Returns:
-            Dict with id, state, engine_type_name, engine_data,
-            actions list, and warnings (canonical STATUS-1 shape).
-        """
-        from db.adapters.instances import get_instance as _gi
-
-        inst = _gi(db_path, instance_id) if db_path else None
+        """Return scheduler process status via PID-in-DB."""
+        from engine.base import build_canonical_status as _bcs
+        from db.adapters.instances import get_instance
+        inst = get_instance(db_path, instance_id)
         pid = inst.get("pid_last_known") if inst else None
-
         running = False
-        uptime_seconds = 0
-        rss_bytes = 0
         if pid:
             try:
-                import psutil as _ps
-                proc = _ps.Process(pid)
-                if proc.status() != "zombie":
-                    running = True
-                    uptime_seconds = int(__import__("time").time() - proc.create_time())
-                    rss_bytes = proc.memory_info().rss
-            except Exception:
+                os.kill(pid, 0)
+                running = True
+            except OSError:
                 pass
-
-        return {
-            "id": instance_id,
-            "state": "running" if running else (inst.get("state") if inst else "stopped"),
-            "engine_type_name": self.name,
-            "engine_data": {
-                "pid": pid if running else None,
-                "uptime_seconds": uptime_seconds,
-                "rss_bytes": rss_bytes,
-            },
-            "actions": [{"name": "restart", "label": "Restart"}],
-            "warnings": [],
-            "_meta": {"valid_next_states": ["stopping", "starting"], "is_transitioning": False},
-        }
+        return _bcs(self._name, instance_id,
+                    service_state="running" if running else "stopped",
+                    error=None, running=running, pid=pid if running else None)
 
     def query_status(self, instance_id, db_path=None):
-        """Alias for get_status."""
-        return self.get_status(instance_id, db_path)
-
-    def set_config(self, instance_id, config_dict, db_path=None):
-        """No-op — scheduler config is in engine_configs table."""
-        return {"status": "ok", "action": "set_config"}
+        """No HTTP endpoint — returns PID status."""
+        return {"alive": self.get_status(instance_id, db_path).get("running", False)}
 
     def get_config(self, instance_id, db_path=None):
-        """Return scheduler config from engine_configs table."""
+        """Return instance config_override."""
+        from db.adapters.instances import get_instance
+        inst = get_instance(db_path, instance_id)
+        if inst and isinstance(inst.get("config_override"), dict):
+            return inst["config_override"]
         return {}
 
-    def list_resources(self, instance_id, db_path=None):
-        """Return empty list — scheduler has no external resources."""
-        return []
+    def set_config(self, instance_id, config_dict, db_path=None):
+        """Update instance config_override."""
+        from db.adapters.instances import update_instance
+        if not config_dict:
+            return {"engine": QR_ENGINE_SCHEDULER_NAME, "config": {}}
+        try:
+            update_instance(db_path, instance_id, config_override=config_dict)
+            return {"engine": "quickrobot-scheduler", "config": config_dict, "applied": True}
+        except Exception as exc:
+            return {"engine": "quickrobot-scheduler", "error": str(exc)}
 
-    def get_presets(self, engine_type_id, db_path=None):
-        """Return empty list — scheduler has no presets."""
-        return []
-
-    def set_active_preset(self, instance_id, preset_id, db_path=None):
-        """No-op — scheduler has no presets."""
-        return {"status": "ok"}
-
-    def forward_request(self, instance_id, method, params=None, db_path=None):
-        """No-op — scheduler doesn't proxy HTTP requests."""
-        return {"error": "Scheduler does not forward HTTP requests"}
-
-    # ---- Lifecycle management ----
-
-    def execute(self, instance_id, action, db_path=None, **kwargs):
-        """Start/stop/restart the scheduler subprocess.
-
-        Args:
-            instance_id: Instance DB ID (4 for system scheduler).
-            action: "start", "stop", or "restart".
-            db_path: Database path.
-            **kwargs: Additional parameters.
-
-        Returns:
-            dict with action result, pid, and status.
-        """
-        import time as _time
-        from lib.lib_system_engine import (start_system_engine, stop_system_engine,
-                                          load_env_config, _get_pid_status)
-        from db.adapters.instances import get_instance, update_instance
-        import os
-
-        if db_path is None:
-            db_path = os.path.join(os.getcwd(), "data", "quickrobot.db")
+    def execute(self, instance_id, command, db_path=None, **kwargs):
+        """Start/stop/restart the scheduler process via lib_system_engine."""
+        from db.adapters.instances import get_instance, update_instance, transition_state
+        from lib.lib_system_engine import (
+            load_env_config, _build_command, _get_pid_status,
+            _log_lifecycle, build_subprocess_env, _register_child,
+        )
 
         inst = get_instance(db_path, instance_id)
         if not inst:
-            return {"error": "instance not found", "action": action}
+            return {"error": "instance not found", "action": command}
 
-        # Load env config (single source of truth for system engines)
         try:
             env_config = load_env_config(os.getcwd())
         except FileNotFoundError as exc:
-            return {"error": str(exc), "action": action}
+            return {"error": str(exc), "action": command}
 
-        api_host = env_config.get("QUICKROBOT_API_HOST", QR_DEFAULT_LOCALHOST)
+        api_host = env_config["QUICKROBOT_API_HOST"]
         raw_port = env_config.get("QUICKROBOT_API_PORT")
         if not raw_port:
             raise KeyError("QUICKROBOT_API_PORT not in .quickrobot.env")
         api_port = int(raw_port)
 
-        if action == "start":
-            # Check for existing live process via stored PID
+        if command == "start":
             old_pid = inst.get("pid_last_known")
             if old_pid and _get_pid_status(old_pid):
-                # REG-03-F1: Also scan by name — the old PID might be an orphan
-                # (PPID=1) from a previous API that survived PDEATHSIG.
+                import psutil
                 try:
-                    import psutil as _psutil
-                    proc = _psutil.Process(old_pid)
+                    proc = psutil.Process(old_pid)
                     ppid = proc.ppid()
-                    if ppid == 1:
-                        # Orphaned — kill and proceed to fresh start
-                        print(f"[qr] scheduler: orphaned process (pid={old_pid}), killing and restarting")
-                        try:
-                            proc.kill()
-                        except (_psutil.NoSuchProcess, _psutil.AccessDenied):
-                            pass
+                    if ppid == 1 or not _get_pid_status(ppid):
+                        print(f"[qr] scheduler: orphaned process (pid={old_pid}), restarting")
+                        proc.terminate()
+                        import time; time.sleep(1)
+                        update_instance(db_path, instance_id, pid_last_known=None)
                     else:
-                        return {"action": "start", "port": 0, "pid": old_pid,
+                        try:
+                            transition_state(db_path, instance_id, "deployed")
+                        except Exception:
+                            pass
+                        return {"action": "start", "pid": old_pid,
                                 "status": "existing_process_alive"}
-                except Exception:
-                    return {"action": "start", "port": 0, "pid": old_pid,
-                            "status": "existing_process_alive"}
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    update_instance(db_path, instance_id, pid_last_known=None)
 
-            result = start_system_engine(
-                engine_name="scheduler",
-                env_config=env_config,
-                api_host=api_host,
-                api_port=api_port,
-            )
-            return result
+            try:
+                cmd = _build_command("scheduler", env_config, api_host, api_port)
+            except Exception as exc:
+                _log_lifecycle(QR_ENGINE_SCHEDULER_NAME, "start", {"error": str(exc)})
+                return {"error": f"Failed to build command: {exc}", "action": command}
 
-        elif action == "stop":
+            try:
+                from lib.lib_system_engine import build_subprocess_env, _register_child
+                env = build_subprocess_env(
+                    engine_name="scheduler",
+                    env_config=env_config,
+                    api_host=api_host,
+                    api_port=api_port,
+                )
+                log_path = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)), "..", "..", "logs", "scheduler.log"
+                )
+                os.makedirs(os.path.dirname(log_path), exist_ok=True)
+                proc = subprocess.Popen(cmd, stdout=open(log_path, "a"), stderr=subprocess.STDOUT,
+                                        env=env, cwd=os.getcwd(), start_new_session=True)
+                import ctypes as _ctypes
+                _ctypes.CDLL("libc.so.6").prctl(1, 15)
+            except OSError as exc:
+                _log_lifecycle("scheduler", "start", {"error": str(exc)})
+                return {"error": f"Failed to start scheduler: {exc}", "action": command}
+
+            import time as _time; _time.sleep(1)
+            retcode = proc.poll()
+            if retcode is not None:
+                stdout, stderr = proc.communicate()
+                _err = (stderr or b"").decode("utf-8", errors="replace").strip()[:500]
+                _log_lifecycle("scheduler", "start", {"crashed": True, "returncode": retcode, "error": _err})
+                return {"error": f"Scheduler crashed immediately (rc={retcode}): {_err}",
+                        "action": command}
+
+            new_pid = proc.pid
+            _register_child(new_pid)
+            update_instance(db_path, instance_id, pid_last_known=new_pid)
+            try:
+                cur = get_instance(db_path, instance_id)
+                if cur and cur.get("state") == "unconfigured":
+                    transition_state(db_path, instance_id, "deployed")
+                transition_state(db_path, instance_id, "starting")
+                transition_state(db_path, instance_id, "running")
+            except Exception:
+                pass
+            _log_lifecycle("scheduler", "start", {"pid": new_pid, "api_host": api_host, "api_port": api_port})
+            return {"action": "start", "pid": new_pid, "status": "started"}
+
+        elif command == "stop":
             pid = inst.get("pid_last_known")
             if pid and _get_pid_status(pid):
                 try:
@@ -199,71 +171,55 @@ class SchedulerEngine(BaseEngine):
                 except (_psutil.NoSuchProcess, _psutil.AccessDenied):
                     pass
             update_instance(db_path, instance_id, pid_last_known=None)
+            _log_lifecycle("scheduler", "stop", {"pid": pid})
             return {"action": "stop", "pid": pid}
 
-        elif action == "restart":
+        elif command == "restart":
+            try:
+                transition_state(db_path, instance_id, "stopping")
+            except Exception:
+                pass
             old_pid = inst.get("pid_last_known")
-
-            # Clear PID from DB FIRST — prevents race condition where stale PID
-            # is detected as "running" during the kill window
             try:
                 update_instance(db_path, instance_id, pid_last_known=None)
             except Exception:
                 pass
-
-            # Step 1: Kill existing process (SIGKILL for immediate death)
             if old_pid and _get_pid_status(old_pid):
                 try:
                     import psutil as _psutil
                     _psutil.Process(old_pid).kill()
                 except (_psutil.NoSuchProcess, _psutil.AccessDenied):
                     pass
-
-            # Step 2-3: Wait for process to die (REG-03-F1: increased timeout + double-SIGKILL)
-            timeout = int(env_config.get("QUICKROBOT_SERVER_SPAWN_TIMEOUT", 10))
+            import time as _time
+            timeout = int(env_config.get("QUICKROBOT_SERVER_SPAWN_TIMEOUT", 5))
             deadline = _time.time() + timeout
-            dead_verified = False
             while _time.time() < deadline:
                 if not _get_pid_status(old_pid):
-                    dead_verified = True
                     break
                 _time.sleep(0.5)
-
-            if not dead_verified:
-                # Double-SIGKILL: first attempt may have been missed (e.g., syscall block)
-                print(f"[qr] scheduler restart: old PID {old_pid} didn't exit within {timeout}s, double-SIGKILL")
-                try:
-                    import psutil as _psutil
-                    if _get_pid_status(old_pid):
-                        _psutil.Process(old_pid).kill()
-                except (_psutil.NoSuchProcess, _psutil.AccessDenied):
-                    pass
-                # Wait another 3s for the double-SIGKILL to take effect
-                deadline2 = _time.time() + 3
-                while _time.time() < deadline2:
-                    if not _get_pid_status(old_pid):
-                        dead_verified = True
-                        break
-                    _time.sleep(0.5)
-                if not dead_verified:
-                    print(f"[qr] scheduler restart: PID {old_pid} survived double-SIGKILL, proceeding anyway")
-
-            # Step 4-5: Start new process
-            result = start_system_engine(
-                engine_name="scheduler",
-                env_config=env_config,
-                api_host=api_host,
-                api_port=api_port,
-            )
-            if result.get("status") == "started":
-                return {
-                    "action": "restart",
-                    "pid": result.get("pid"),
-                    "port": 0,
-                    "old_pid": old_pid,
-                    "dead_verified": dead_verified,
-                    "status": "restart_success",
-                }
+            result = self.execute(instance_id, "start", db_path)
+            if old_pid and isinstance(result, dict):
+                result["old_pid"] = old_pid
+                result["pid_changed"] = result.get("pid") != old_pid
             return result
 
-        return {"error": f"Unknown action: {action}", "action": action}
+        raise ValueError(f"Unknown action: {command}")
+
+    def list_resources(self, instance_id, db_path=None):
+        """No models or presets for the scheduler."""
+        return {"models": [], "presets": []}
+
+    def get_presets(self, engine_type_id, db_path=None):
+        """No presets for scheduler."""
+        return []
+
+    def set_active_preset(self, instance_id, preset_id, db_path=None):
+        """No presets for scheduler."""
+        pass
+
+    def forward_request(self, instance_id, method, params=None, db_path=None):
+        """Forward a request — returns scheduler status."""
+        return self.get_status(instance_id, db_path)
+
+
+import subprocess

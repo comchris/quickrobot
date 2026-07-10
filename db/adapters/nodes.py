@@ -243,9 +243,13 @@ def delete_node(db_path, node_id, stop_running=False):
 
         if not all_rows_raw:
             # Clean up FK-referencing rows before delete (no ON DELETE CASCADE)
-            conn.execute("DELETE FROM ansible_actions WHERE node_id = ?", (node_id,))
+            # Preserve log entries — audit data, keep across node lifecycle
+            # Disable FK temporarily to allow orphaned log_entries rows
+            conn.execute("PRAGMA foreign_keys = OFF")
+            # conn.execute("DELETE FROM log_entries WHERE node_id = ?", (node_id,))
             conn.execute("DELETE FROM engine_models WHERE host_id = ?", (node_id,))
             cursor = conn.execute("DELETE FROM nodes WHERE id = ?", (node_id,))
+            conn.execute("PRAGMA foreign_keys = ON")
             return cursor.rowcount > 0
 
         # Convert sqlite3.Row to dict for reliable access
@@ -281,10 +285,14 @@ def delete_node(db_path, node_id, stop_running=False):
             )
 
         # Clean up FK-referencing rows before delete (no ON DELETE CASCADE)
-        conn.execute("DELETE FROM ansible_actions WHERE node_id = ?", (node_id,))
+        # Preserve log entries — audit data, keep across node lifecycle
+        # Disable FK temporarily to allow orphaned log_entries rows
+        conn.execute("PRAGMA foreign_keys = OFF")
+        # conn.execute("DELETE FROM log_entries WHERE node_id = ?", (node_id,))
         conn.execute("DELETE FROM engine_models WHERE host_id = ?", (node_id,))
 
         cursor = conn.execute("DELETE FROM nodes WHERE id = ?", (node_id,))
+        conn.execute("PRAGMA foreign_keys = ON")
         return cursor.rowcount > 0
 
 

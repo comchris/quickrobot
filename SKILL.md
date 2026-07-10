@@ -9,6 +9,211 @@
 
 ---
 
+## DB Schema Quick Reference
+
+> **CRITICAL:** When using `SELECT * FROM <table>` in Python sqlite3, column positions are 0-indexed and ORDER BY does NOT change positions. Always verify with `PRAGMA table_info(<table>)` when in doubt. A wrong index silently returns the wrong data type (e.g., `rpc_bind_ids` is TEXT storing JSON, `split` is INTEGER).
+
+### instances (35 cols)
+```
+ 0: id                [INTEGER] PK     Instance ID
+ 1: name              [TEXT]           Display name
+ 2: engine_type_id    [INTEGER]        Engine type (21=llama_server, 22=llama_rpc, 31=iperf3)
+ 3: node_id           [INTEGER]        Target node ID
+ 4: preset_id         [INTEGER]        Preset template ID
+ 5: config_override   [TEXT]           JSON-as-text: {env:{}, cli_opts:[], model:{}}
+ 6: transport         [TEXT]           "ansible"
+ 7: ansible_playbook  [TEXT]           Legacy playbook name
+ 8: ansible_vars      [TEXT]           JSON-as-text: full config dict for this instance
+ 9: ansible_extra_args[TEXT]           
+10: state             [TEXT]           running|stopped|error|deploying|...
+11: last_state_change [TEXT]           ISO timestamp
+12: port_assigned     [INTEGER]        Assigned network port
+13: pid_last_known    [INTEGER]        Last known process PID
+14: uptime_seconds    [INTEGER]        
+15: system_managed    [INTEGER]        1=api/webui/mcp/scheduler (protected)
+16: rss_bytes         [INTEGER]        
+17: gpu_device        [TEXT]           
+18: instance_uuid     [TEXT]           Internal UUID
+19: build_number      [TEXT]           Build/commit hash
+20: start_after_deploy[INTEGER]        0/1
+21: rpc_bind_ids      [TEXT]           JSON-as-text: e.g. "[100,102]" — RPC instance IDs bound to this server
+22: split_mode        [TEXT]           "layer" or "tensor"
+23: tensor_split      [TEXT]           
+24: split             [INTEGER]        Server GPU split value (0-100)
+25: node_name         [TEXT]           
+26: node_hostname     [TEXT]           
+27: node_build_state  [TEXT]           idle|building|...
+28: created_at        [TEXT]           ISO timestamp
+29: updated_at        [TEXT]           
+30: start_on_boot     [TEXT]           "true"/"false" (systemd enabled)
+31: experts           [INTEGER]        Per-instance MoE expert count
+32: draft             [INTEGER]        Draft model token count
+33: cli_flags         [TEXT]           JSON-as-text: herd CLI flag overrides
+34: health_check_enabled [INTEGER]     0/1 toggle
+```
+
+**Trap:** `SELECT *` column index 5 is `config_override`, NOT `rpc_bind_ids`. `rpc_bind_ids` is index 21. JSON-as-text columns require `json.loads()` after reading.
+
+### nodes (25 cols)
+```
+ 0: id                [INTEGER] PK
+ 1: name              [TEXT]           Display name
+ 2: hostname          [TEXT]           DNS/IP for SSH
+ 3: transport         [TEXT]
+ 4: ansible_inventory_host [TEXT]
+ 5: ansible_user      [TEXT]
+ 6: ssh_port          [INTEGER]        Default: 22
+ 7: ansible_key_path  [TEXT]
+ 8: status            [TEXT]           active|inactive
+ 9: status_reason     [TEXT]
+10: capabilities      [TEXT]           JSON-as-text: CPU/RAM/GPU/OS info
+11: available_devices [TEXT]           JSON-as-text: GPU device list
+12: cpu_cores         [INTEGER]
+13: ram_mb            [INTEGER]
+14: os                [TEXT]
+15: created_at        [TEXT]
+16: updated_at        [TEXT]
+17: fs_free_gb        [REAL]
+18: ping_state        [TEXT]           online|offline|maintenance
+19: is_active         [INTEGER]        Admin active flag (separate from ping_state)
+20: ipv4_address      [TEXT]
+21: ipv6_address      [TEXT]
+22: model_base_path   [TEXT]
+23: node_build_state  [TEXT]
+24: host_type         [TEXT]
+```
+
+### engine_presets (10 cols)
+```
+ 0: id                [INTEGER] PK
+ 1: engine_type_id    [INTEGER]
+ 2: name              [TEXT]
+ 3: category          [TEXT]           system|default
+ 4: config_template   [TEXT]           JSON-as-text: {env:{}, cli_opts:[], model:{}}
+ 5: tags              [TEXT]           JSON-as-text array
+ 6: created_at        [TEXT]
+ 7: updated_at        [TEXT]
+ 8: model_id          [INTEGER]
+ 9: gpu_device        [TEXT]
+```
+
+### engine_models (23 cols)
+```
+ 0: id                [INTEGER] PK
+ 1: engine_type_id    [INTEGER]
+ 2: name              [TEXT]           Model display name
+ 3: model_path        [TEXT]           GGUF file path
+ 4: mmproj_path       [TEXT]           Multimodal projector
+ 5: draft_model_path  [TEXT]           Draft model for speculative decoding
+ 6: quantization      [TEXT]           e.g. Q4_0, Q2_K
+ 7: size_bytes        [INTEGER]
+ 8: last_modified     [TEXT]
+ 9: host_id           [INTEGER]
+10: is_sharded        [INTEGER]
+11: total_shards      [INTEGER]
+12: discovered        [INTEGER]        0/1
+13: created_at        [TEXT]
+14: model_params      [TEXT]           JSON-as-text
+15: preset_count      [INTEGER]
+16: sha256_model      [TEXT]
+17: sha256_mmproj     [TEXT]
+18: sha256_draft      [TEXT]
+19: sha256_verified_at_model [TEXT]
+20: sha256_verified_at_mmproj  [TEXT]
+21: sha256_verified_at_draft   [TEXT]
+22: is_active         [INTEGER]
+```
+
+### engine_configs (9 cols) — engine_type_id is PK part 1, key is PK part 2
+```
+ 0: engine_type_id    [INTEGER]        21=llama_server, 22=llama_rpc, 31=iperf3
+ 1: key               [TEXT]           e.g. LLAMA_ARG_HOST, binary_path, skip_build
+ 2: value             [TEXT]
+ 3: description       [TEXT]
+ 4: updated_at        [TEXT]
+ 5: default_value     [TEXT]
+ 6: polling_interval_local_sec [TEXT]
+ 7: polling_interval_remote_sec  [TEXT]
+ 8: refresh_interval_default_sec [TEXT]
+```
+
+### log_entries (21 cols) — serves as the unified job/task/activity log
+```
+ 0: id                [INTEGER] PK
+ 1: parent_id         [INTEGER]        Links child entries to parent job
+ 2: job_type          [TEXT]           deploy|health_check|stop|...
+ 3: engine_type_name  [TEXT]
+ 4: instance_id       [INTEGER]
+ 5: node_id           [INTEGER]
+ 6: status            [TEXT]           running|completed|failed|queued
+ 7: actor             [TEXT]
+ 8: error_message     [TEXT]
+ 9: created_at        [TEXT]
+10: started_at        [TEXT]
+11: finished_at       [TEXT]
+12: duration_ms       [INTEGER]
+13: task_stage        [TEXT]           preflight|source|compile|config_env|start|...
+14: stage_playbook    [TEXT]
+15: retry_count       [INTEGER]
+16: max_retries       [INTEGER]
+17: details_json      [TEXT]           JSON-as-text
+18: results_json      [TEXT]           JSON-as-text
+19: playbook_registry_id [INTEGER]
+20: playbook_version  [TEXT]
+```
+
+### scheduler_config (3 cols) — key-value store for scheduler intervals
+```
+ 0: key               [TEXT] PK       e.g. "interval_running_sec", "interval_error_sec"
+ 1: value             [TEXT]          Integer seconds
+ 2: description       [TEXT]
+```
+
+### playbook_registry (12 cols)
+```
+ 0: id                [INTEGER] PK
+ 1: file_path         [TEXT]           e.g. playbooks/core/preflight_check.yml
+ 2: version           [TEXT]
+ 3: checksum_sha256   [TEXT]
+ 4: file_type         [TEXT]           core|llama|node|...
+ 5: tags              [TEXT]           JSON-as-text array
+ 6: playbook_id       [TEXT]           Human-readable ID, e.g. "preflight_check"
+ 7: created_at        [TEXT]
+ 8: updated_at        [TEXT]
+ 9: usage_counter_since_update [INTEGER]
+10: error_counter_since_update [INTEGER]
+11: file_size         [INTEGER]
+```
+
+### playbook_runs (6 cols) — stores ansible JSON output per task
+```
+ 0: id                [INTEGER] PK
+ 1: task_id           [INTEGER]        Reference to the task that produced this run
+ 2: ansible_action_id [INTEGER]
+ 3: output            [TEXT]           Full parsed ansible JSON (2-44KB)
+ 4: timing_json       [TEXT]
+ 5: created_at        [TEXT]
+```
+
+### engine_types (11 cols)
+```
+ 0: id                [INTEGER] PK
+ 1: name              [TEXT]           e.g. llama_server, llama_rpc, iperf3
+ 2: display_name      [TEXT]
+ 3: module_path       [TEXT]
+ 4: version           [TEXT]
+ 5: enabled           [INTEGER]        0/1
+ 6: capabilities      [TEXT]           JSON-as-text
+ 7: created_at        [TEXT]
+ 8: updated_at        [TEXT]
+ 9: display_order     [INTEGER]
+10: category          [TEXT]           system|inference|networking|...
+```
+
+**JSON-as-text columns:** `config_override`, `ansible_vars`, `rpc_bind_ids`, `cli_flags`, `capabilities`, `available_devices`, `config_template`, `tags`, `model_params`, `details_json`, `results_json`. These are stored as SQLite TEXT containing JSON strings — use `json.loads()` to parse.
+
+---
+
 ## System Overview
 
 ### Services
@@ -21,7 +226,17 @@
 ### System-Managed Subprocess Lifecycle
 All 4 system instances (API in tmux, WebUI/MCP/Scheduler as subprocesses) are managed by `lib/lib_system_engine.py`. Subprocesses use a minimal env whitelist (engine-scoped, sensitive tokens filtered) and a health check thread that self-terminates after 3 failed API checks (~9s total). Logs are written to `logs/{webui,mcp,scheduler}.log` with structured startup banners.
 
-**`--mode exit`:** Test zombie behavior: `python3 quickrobot.py --mode exit` spawns engines, prints PIDs, exits. Engines self-terminate after ~9s when health check detects dead API.
+### Operational Modes (`--mode`)
+
+| Mode | Purpose |
+|------|---------|
+| `prod` | Default. Strict integrity — hard-fails on checksum mismatch. No auto-registration. |
+| `dev` | Development: warns on checksum mismatch but continues. No auto-registration. |
+| `dev-import` | Scans disk for new `.yml`/`.j2` files, registers them in `playbook_registry`, then syncs all checksums. |
+| `dev-update` | Syncs checksums from disk to DB only (no registration of new playbooks). |
+| `exit` | Start API, spawn system engines, print PIDs, exit main loop. Useful for zombie/self-termination testing. |
+
+All modes keep the API running after completing (not one-shot). Use explicitly on USER REQUEST — not as pre-flight.
 
 ### Environment Variable Whitelist
 Subprocesses receive only necessary vars (not full env inheritance):
@@ -134,6 +349,8 @@ curl -s http://127.0.0.1:<API_PORT>/api/v1/jobs?status=running | python3 -c "imp
 ### Instance Response Enrichment
 `GET /instances` returns each instance with an additional `_host_inactive` boolean field. When `true`, the instance's host node has `is_active=0` and operations on that instance will be blocked with `NODE_INACTIVE` error. Use this to visually distinguish inactive hosts in the WebUI (grey background) or to skip instances in agent logic.
 
+**Localhost deploy:** Node 1 (localhost/API host) is always `is_active` and no longer filtered from instance listings. All engine types can deploy to node_id=1 via Ansible's `ansible_connection: local` mode. Requires local sudo + write access to `/opt/quickrobot/`.
+
 ### Create an Instance
 ```bash
 curl -s -X POST http://127.0.0.1:<API_PORT>/api/v1/instances \
@@ -145,8 +362,8 @@ curl -s -X POST http://127.0.0.1:<API_PORT>/api/v1/instances \
 |-------|------|----------|-------------|
 | name | string | yes | Display name |
 | engine_type_id | int | yes | 1=API, 2=WebUI, 3=MCP, 4=scheduler, 11=universal, 12=subprocess, 21=llama_server, 22=llama_rpc, 31=iperf3 |
-| node_id | int | yes | Target node ID |
-| preset_id | int | no | Preset to apply (default: preset 1 for llama_server/llama_rpc) |
+| node_id | int | yes | Target node ID. **All engines now support node_id=1 (localhost/API host).** Subprocess is localhost-only; others can deploy to any active node including localhost. Requires local sudo + write access to `/opt/quickrobot/`. |
+| preset_id | int | no | Preset to apply (default: preset 100 "Router mode" for llama_server/llama_rpc — no model file required) |
 | config_override | dict | no | Per-instance overrides: `{env:{}, cli_opts:[], model:{}}` |
 | deploy | bool | no | Skip auto-deploy if false (default: true) |
 
@@ -432,21 +649,45 @@ The MCP server exposes tools wrapping the REST API for LLM agents. Two tiers ava
 `list_instances()`, `get_instance_status(id)`, `list_nodes()`, `list_presets(type)`, `get_preset(id,type)`, `list_models(type)`, `get_model(id,type)`
 
 ### Write Tools
-`create_instance(...)`, `deploy_instance(id)`, `change_preset(id, preset_id, skip_build=True)`, `start_instance(id)`, `stop_instance(id)`, `restart_instance(id)`, `delete_instance(id, force)`
+| Tool | Signature | Behavior |
+|------|-----------|----------|
+| `create_instance(name, engine_type_id, node_id, preset_id, config_override, skip_build)` | async (3s) | Creates DB record + triggers auto-deploy. Returns immediately with job info. |
+| `deploy_instance(id, start_after_deploy, skip_build)` | async (3s) | Triggers RUNNER-1 staged chain. Returns immediately. |
+| `start_instance(id)` | sync (30s) | Starts systemd service. Waits for actual result (success/fail). |
+| `stop_instance(id)` | sync (30s) | Stops systemd service. Waits for actual result. |
+| `restart_instance(id)` | sync (30s) | Stop+start cycle. Waits for actual result. |
+| `change_preset(id, preset_id, skip_build=True)` | async (3s) | Triggers BC-1 reconfigure chain (config_env + service_start). Config-only when skip_build=True. |
+| `delete_instance(id, force=False)` | async (3s) | Removes instance from DB. Force skips state check. |
+| `create_node(name, hostname, ...)` | async (3s) | Creates node record + triggers SSH validation in background. |
+| `delete_node(id, stop_running=False)` | async (3s) | Deletes node. With stop_running=True, undeploys running instances first (fire-and-forget). |
+| `discover_node(id)` | sync (30s) | SSH hardware discovery. Reports connection failures. |
+| `toggle_node_active(id, is_active)` | sync (5s) | Sets admin active/inactive flag. DB update only. |
+| `bind_rpc(instance_id, rpc_ids, split_mode)` | sync (10s) | Binds RPC instances to llama-server. Pure DB update + health check. Takes effect on next deploy/restart. |
+| `unbind_rpc(instance_id, rpc_id)` | sync (10s) | Removes single RPC binding. Pure DB update. Takes effect on next deploy/restart. |
+| `scan_models(engine_type, node_id)` | async (3s) | Scans nodes for GGUF files. Triggers playbook in background. Poll via list_models(). |
+| `run_benchmark(id, prompt_id)` | sync (15s) | Triggers benchmark job. Waits up to 15s for API reachability confirmation. |
+
+**Note on sync vs async:** Sync tools wait up to the stated timeout for the actual result from the remote host — useful when the operation completes quickly and you want immediate feedback. Async tools return within milliseconds after handing the job to the API/scheduler, regardless of how long the background operation takes.
 
 ### Proxy Tool (requires ALLOW_PROXY)
-`quickrobot_api(method, path, body)` — direct pass-through to any API endpoint
+`quickrobot_api(method, path, body)` — direct pass-through to any API endpoint. Uses 30s default timeout.
 
 **Common cluster operations via proxy:**
 ```python
 # Bind RPCs to a server
 quickrobot_api("POST", "/instances/<server_id>/bind-rpc", {"rpc_ids": [rpc1, rpc2]})
 
+# Unbind single RPC
+quickrobot_api("DELETE", "/instances/<server_id>/bind-rpc/<rpc_id>")
+
 # Set split mode
 quickrobot_api("PATCH", "/instances/<server_id>/split-mode", {"split_mode": "layer"})
 
 # Set server split to 0% (RPCs take all)
 quickrobot_api("PUT", "/instances/<server_id>/split", {"split": 0})
+
+# Scan models on a specific node
+quickrobot_api("POST", "/models/scan?node=12")
 
 # Get herd summary
 quickrobot_api("GET", "/rpccluster/summary", None)
@@ -455,7 +696,7 @@ quickrobot_api("GET", "/rpccluster/summary", None)
 **Rule of thumb:** Use summary tools for routine operations. Only use full tools when you need excluded fields (`config_override`, `capabilities`, `merged_config`).
 
 #### Known MCP proxy pitfalls
-- **`POST /instances/<id>/bind-rpc`**: Body must be `{"rpc_ids": [<instance_id>, ...]}` — **array**, not single int. Passing `{"rpc_instance_id": 100}` silently binds nothing (reads `body.get("rpc_ids", [])` → empty).
+- **`POST /instances/<id>/bind-rpc`**: Body must be `{"rpc_ids": [<instance_id>, ...]}` — **array**, not single int. Passing `{"rpc_instance_id": 100}` silently binds nothing (reads `body.get("rpc_ids", [])` → empty). Use the dedicated `bind_rpc(instance_id, rpc_ids, split_mode)` tool which handles array coercion automatically.
 - **`GET /api/v1/engines/llama_server/presets`** → 404. Use singular: `GET /api/v1/engine/llama_server/presets`.
 - **`GET /api/v1/benchmark/prompts`** → 404. Use plural: `GET /api/v1/benchmarks/prompts`.
 - **Cluster RPC ordering**: ALL bound RPCs must be in `running` state BEFORE restarting the main server. If any RPC is down, llama-server crashes on connect and enters error state immediately.
@@ -552,27 +793,27 @@ These are documented failures from real usage sessions. Keep this list current f
 |---|---------|------------|-------------|
 | 1 | `DELETE /instances/<id>` returns `UNDEPLOY_FAILED` but instance remains in DB | Standard delete runs remote undeploy first; if undeploy fails, instance kept for investigation (DESIGN-5). Force-delete bypasses this: `POST /instances/<id>/force-delete` | Use force-delete for error-state instances without remote files |
 | 2 | `POST /instances/<id>/delete` returns 404 | The delete endpoint is **DELETE** method on `/api/v1/instances/<id>`, NOT POST to `/instances/<id>/delete` (line 399 in `__init__.py`) | Always use `DELETE` method for instance deletion |
-| 3 | Herd "Save ENV Overrides" doesn't remove unchecked overrides | Frontend sends only checked+non-empty keys → backend does `co.update(overrides)` which merges but never removes stale keys | Fixed in v0.07e: `api_set_herd_config()` and `api_update_instance()` now remove old keys not in incoming request |
+| 3 | Herd "Save ENV Overrides" doesn't remove unchecked overrides | Frontend sends only checked+non-empty keys → backend merge preserves stale keys | Fixed: `api_set_herd_config()` and `api_update_instance()` now remove old keys not in incoming request |
 | 4 | Instance update via PUT doesn't clear config keys | Same merge-only bug as #3 — `new_override = dict(old_config)` preserves old keys unless explicitly set to `""` | Fixed: send `{config_override: {"KEY": ""}}` or use force-clear pattern |
 | 5 | `Content-Type: application/json` missing → 415 error on ALL POST/PUT/DELETE | Every route handler calls `require_json()` which rejects without this header | Always include `-H 'Content-Type: application/json'` on write operations |
-| 6 | Node validation returns `NODE_UNREACHABLE` for wrong SSH port | Ansible ping task marks unreachable hosts as `unreachable: true` (not `failed`) → `parse_ansible_json()` now checks both fields | Fixed in v0.07e |
+| 6 | Node validation returns `NODE_UNREACHABLE` for wrong SSH port | Ansible ping task marks unreachable hosts as `unreachable: true` (not `failed`) → `parse_ansible_json()` now checks both fields | Fixed |
 
 **Pattern to remember:** POST/PUT/DELETE always need `Content-Type: application/json`. GET never needs it. Delete uses `DELETE` method on the resource path, not POST to a sub-path.
 
-### Path Naming Gotchas (Session 2026-06-24)
+### Path Naming Gotchas
 | # | Mistake | Result | Correct |
 |---|---------|--------|---------|
 | 7 | `GET /api/v1/engines/llama_server/presets` | 404 | Use **singular** `engine`: `GET /api/v1/engine/llama_server/presets` |
 | 8 | `GET /api/v1/benchmark/prompts` | 404 | Use **plural** `benchmarks`: `GET /api/v1/benchmarks/prompts` |
 
-### Multi-Host Deploy Parallelism (Session 2026-06-24)
+### Multi-Host Deploy Parallelism
 When creating multiple instances across different nodes with preset_id:
 1. All instances are created and deploy jobs queued simultaneously
 2. **Parallel across hosts**: All nodes start deploying at the same time (e.g., dllama1/2/3 CPU-RPC all show `deploying`)
 3. **Serial per host**: Each node processes only one deploy chain at a time. Next instance on that node stays `unconfigured` until current chain completes
 4. Port allocation is per-node: instances 100,101,102 all got port 50052 (correct — different nodes)
 
-### Cluster RPC Binding & Tensor Split Semantics (Session 2026-06-27, updated 2026-06-28)
+### Cluster RPC Binding & Tensor Split Semantics
 When binding RPCs to a llama-server and configuring expert splits:
 A) **RPC restart not needed after bind** — After `PUT /instances/<id>/bind-rpc`, only the server instance needs restart for config changes to take effect. Individual RPC instances keep running with their existing config; no restart required for them.
 B) **RPC startup ordering is critical** — ALL bound RPC instances must be in `running` state BEFORE the server gets (re)started. If any RPC is down, the llama-server crashes on connect and enters error state immediately. Workflow: create all RPCs → wait for running → create server → bind RPCs → deploy+restart only the server.
@@ -591,5 +832,5 @@ I) **3-device tensor_split with 100,100,100 and -dev RPC0,RPC1 only uses 2 devic
    - Option B (GPU-equipped server): Add the GPU device to `-dev` chain with a GPU override: `-dev Vulkan0,RPC0,RPC1` and `tensor_split="50,50,50"` (or any distribution). The GPU gets its share of normal tensors, RPCs handle the rest.
 J) **Benchmark metrics empty** — The `benchmark_results` table has no `metrics` column; the API returns `"metrics": {}` as a default/empty field. This is a schema gap, not a failure. When a benchmark shows `success=1`, it means: the llama-server responded, text was captured in the `output` column, and the run completed (not just started). The `response_json` column contains the raw llama.cpp `/completion` response which includes `tokens_predicted` and `tokens_evaluated` — these can serve as proxy metrics. If timing data (`timings_total`, `timings_prompt_ms`) is needed, the benchmark would need to use the `/v1/completions` endpoint instead of `/completion`, and add a `metrics` TEXT column to store parsed timing JSON.
 
-### Crash Detection Bug (Session 2026-06-24)
+### Crash Detection Bug
 The scheduler crash_detect task logged: `name '_CONFIG' is not defined`. This is a runtime bug where `_CONFIG` variable reference was undefined during a crash detection check. Track separately — does not block normal operations.

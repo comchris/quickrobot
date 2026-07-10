@@ -34,17 +34,27 @@ Return complete API responses. Use only when you need fields excluded from summa
 | `get_model(model_id, engine_type)` | `model_id` (int), `engine_type` (str) | Single model detail |
 
 ### 3. Write Tools (requires MCP_WRITE)
-| Tool | Signature | Purpose |
-|------|-----------|---------|
-| `create_instance(name, engine_type_id, node_id, preset_id, config_override)` | All params required except config_override | Create new instance |
-| `deploy_instance(instance_id, start_after_deploy)` | instance_id (int), start_after_deploy (bool) | Build + deploy systemd unit |
-| `change_preset(instance_id, preset_id, skip_build=True)` | instance_id (int), preset_id (int), skip_build (bool) | Change preset (async, <100ms response) |
-| `start_instance(instance_id)` | instance_id (int) | Start service |
-| `stop_instance(instance_id)` | instance_id (int) | Stop service |
-| `restart_instance(instance_id)` | instance_id (int) | Graceful restart |
-| `delete_instance(instance_id, force)` | instance_id (int), force (bool) | Remove instance |
+| Tool | Signature | Behavior | Purpose |
+|------|-----------|----------|---------|
+| `create_instance(name, engine_type_id, node_id, preset_id, config_override, skip_build)` | async (3s) | Creates DB record + triggers auto-deploy | New instance |
+| `deploy_instance(instance_id, start_after_deploy, skip_build)` | async (3s) | Triggers RUNNER-1 staged chain | Rebuild/deploy |
+| `start_instance(instance_id)` | sync (30s) | Waits for systemd result | Start service |
+| `stop_instance(instance_id)` | sync (30s) | Waits for systemd result | Stop service |
+| `restart_instance(instance_id)` | sync (30s) | Waits for stop+start result | Graceful restart |
+| `change_preset(id, preset_id, skip_build=True)` | async (3s) | Returns instantly with `"config_update_triggered": true` | Fast config change (BC-1 chain) |
+| `delete_instance(instance_id, force=False)` | async (3s) | Removes from DB | Delete instance |
+| `create_node(name, hostname, ...)` | async (3s) | Creates record + SSH validation in background | Add host |
+| `delete_node(id, stop_running=False)` | async (3s) | Deletes node; with stop_running=True, undeploys instances first (fire-and-forget) | Remove host |
+| `discover_node(id)` | sync (30s) | SSH discovery, reports connection status | Refresh hardware info |
+| `toggle_node_active(id, is_active)` | sync (5s) | DB update only | Admin active/inactive flag |
+| `bind_rpc(instance_id, rpc_ids, split_mode="layer")` | sync (10s) | Pure DB update + RPC health check. Takes effect on next deploy/restart. | Bind RPCs to server |
+| `unbind_rpc(instance_id, rpc_id)` | sync (10s) | Pure DB update. Takes effect on next deploy/restart. | Remove RPC binding |
+| `scan_models(engine_type, node_id)` | async (3s) | Triggers playbook scan in background | Discover GGUF models |
+| `run_benchmark(instance_id, prompt_id)` | sync (15s) | Triggers benchmark job, reports if API reachable | Run benchmark |
 
-**NOTE on `change_preset`:** Runs async via RUNNER-1 (async_mode=True). Returns instantly with `"config_update_triggered": true`. Instance stays in running state — the scheduler transitions it to "configuring" → "deploying" → "running". Do NOT poll for "running" immediately after calling.
+**NOTE on `change_preset`:** Runs async via RUNNER-1 (async_mode=True). Returns instantly with `"config_update_triggered": true`. The scheduler transitions the instance to "configuring" → "deploying" → "running". Do NOT poll for "running" immediately after calling. Also accepts `{preset_id: N, skip_build: True}` via `PUT /instances/<id>` for config-only updates even without changing presets (same preset ID is valid — this triggers a reconfigure cycle to regenerate the env file).
+
+**Note on sync vs async:** Sync tools wait up to the stated timeout for actual results from the remote host. Async tools return within milliseconds after handing the job to the API/scheduler — poll via `list_instances_summary()` or `list_benchmark_results()` for final status.
 
 ### 4. Proxy Tool (requires MCP_FULLPROXY)
 | Tool | Signature | Purpose |
@@ -106,10 +116,14 @@ status = get_instance_status(106)
 instances = list_instances_summary()
 stopped_servers = [i for i in instances if i['state'] == 'stopped' and 'llama' in i['engine_type_name']]
 
-# Restart them one by one
+# Restart them one by one (each is a separate MCP call)
 for inst in stopped_servers:
     restart_instance(inst['id'])
 ```
+
+**NOTE on parallel vs sequential:** Each MCP tool call is independent. When calling multiple write tools in sequence, the first call will wait up to its timeout (e.g., 30s for restart). Subsequent calls start after the previous completes. For truly parallel operations, use `quickrobot_api` proxy which returns immediately for async endpoints.
+
+**delete_node semantics:** `delete_node(id)` without `stop_running` simply deletes the node record — instances on that node become orphans in DB. Use `delete_node(id, stop_running=True)` to trigger cleanup (undeploy all running instances first), though the undeploy runs asynchronously and this tool returns immediately.
 
 ---
 
@@ -164,6 +178,10 @@ quickrobot_api("GET", f"/jobs/{job_id}", None)
 6. **Preset changes are async** — `change_preset` returns <100ms with `"config_update_triggered": true`. The instance state transitions (running → configuring → deploying → running) happen in background. Check status via `GET /instances/<id>` after a few seconds.
 7. **Config changes need no daemon-reload** — `$QR_CLI_ARGS_JOINED` env file pattern: preset/config changes write the env file and restart the service. No systemctl reload needed (CONFIG-1).
 8. **RPC preset must match node cores** — Check `list_nodes_summary()` for each node's `cpu_cores`. If a node has 2 cores, use an RPC preset with 2 threads (not 4). Over-allocating threads on thin clients causes thrashing and slower inference.
-9. **Bind requires manual reconfigure** — After `bind-rpc` via MCP proxy, the server needs `change_preset(instance_id, same_preset_id, skip_build=True)` or `deploy_instance(instance_id)` to regenerate the remote env file with updated `--rpc`, `-dev`, and `LLAMA_ARG_TENSOR_SPLIT`. Without this, the server still uses the old config.
+9. **Bind requires manual reconfigure** — After `bind_rpc(instance_id, rpc_ids)` or `unbind_rpc(instance_id, rpc_id)`, the server needs `change_preset(instance_id, same_preset_id, skip_build=True)` or `deploy_instance(instance_id)` to regenerate the remote env file with updated `--rpc`, `-dev`, and `LLAMA_ARG_TENSOR_SPLIT`. The bind/unbind tools do NOT trigger a reconfigure. Without this step, the server still uses the old config.
 10. **MCP tools may have stale SSE session** — Early in a session, MCP tools can return `MCP error -32602: Invalid request parameters` if the opencode harness has a cached stale SSE session ID from a prior API restart. This typically resolves after 5-30 minutes of API activity as the session auto-recovers. If all tools fail simultaneously, retry after a short wait or use `quickrobot_api` proxy as fallback.
 11. **Benchmark metrics are always `{}`** — The `benchmark_results` table has no `metrics` column; the API returns it as an empty default. This is a schema gap, not a failure. `success=1` means: the llama-server responded, text was captured in the `output` column, and the run completed (not just started). The `response_json` column contains `tokens_predicted` and `tokens_evaluated` from the llama.cpp `/completion` response — these are useful proxy metrics for throughput comparison. Use `duration_ms` for total wall-clock time.
+
+12. **scan_models is async** — `scan_models(engine_type, node_id)` triggers a playbook execution in the background. Use 3s timeout so it returns immediately. Check discovered models via `list_models(engine_type)` after a few seconds. For engine-agnostic scan: `scan_models("", node_id=12)` (empty engine_type = all engines, requires node_id).
+
+13. **run_benchmark reports reachability** — `run_benchmark(instance_id, prompt_id)` uses 15s timeout to confirm the API can trigger the benchmark. If the API is unreachable within 15s, returns an error. If it succeeds, poll via `list_benchmark_results()` for final results (the actual benchmark may take minutes).

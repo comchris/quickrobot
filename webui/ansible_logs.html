@@ -1,15 +1,36 @@
 <style>
-  /* Timeout rows: orange background, distinct from red failed */
-  tr.ansible-log-timeout { background-color: #fff3e0 !important; }
-  tr.ansible-log-timeout td:first-child { color: #e65100; font-weight: 600; }
+  /* Stage progress bar colors */
+  .stage-bar { display:inline-block;height:6px;border-radius:3px;margin-right:8px;vertical-align:middle;width:50px; }
+  .stage-queued { background:#bdc3c7; }
+  .stage-running { background:#1565c0;animation:stagePulse 2s infinite; }
+  .stage-success,.stage-completed { background:#4caf50; }
+  .stage-failed { background:#f44336; }
+  .stage-error { background:#ff9800; }
+  .stage-exception { background:#9c27b0; }
+  @keyframes stagePulse { 0%,100%{opacity:1}50%{opacity:0.5} }
+
+  /* Job header row */
+  tr.job-header-row { cursor:pointer; }
+  tr.job-header-row:hover { background:#f5f5f5 !important; }
+  tr.job-detail-row { display:none; }
+  tr.job-detail-row.expanded { display:table-row; }
+  tr.job-detail-cell { padding:10px 12px !important; }
+
+  /* Status highlighting for parent rows */
+  tr.log-entry-running { background-color:#e8f5e9 !important; }
+  tr.log-entry-received { background-color:#f5f5f5 !important; }
+  tr.log-entry-failed { background-color:#ffebee !important; }
+  tr.log-entry-timeout { background-color:#fff3e0 !important; }
 </style>
-<!-- Single row header with controls and filters -->
+
+<!-- Filter controls bar -->
 <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
   <h1 style="margin:0;font-size:1.3em;">Logs</h1>
   <span id="log-count" style="display:inline-block;padding:2px 8px;background:#555;color:#fff;border-radius:10px;font-size:0.75em;font-weight:normal;"></span>
-  <form method="get" action="/webui/ansible-logs" id="filter-form" style="display:flex;gap:8px;align-items:center;margin:0;">
-    <label style="font-size:0.85em;color:#666;">Action:</label>
-    <select name="action_type" id="filter-action" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+
+  <form method="get" action="/webui/logs" id="filter-form" style="display:flex;gap:8px;align-items:center;margin:0;">
+    <label style="font-size:0.85em;color:#666;">Type:</label>
+    <select name="job_type" id="filter-action" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
       <option value="">Any</option>
       {% for at in action_types %}
       <option value="{{ at }}" {% if at == filter_action %}selected="selected"{% endif %}>{{ at }}</option>
@@ -19,8 +40,11 @@
     <label style="font-size:0.85em;color:#666;">Status:</label>
     <select name="status" id="filter-status" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
       <option value="">Any</option>
+      <option value="running" {% if filter_status == 'running' %}selected="selected"{% endif %}>Running</option>
+      <option value="received" {% if filter_status == 'received' %}selected="selected"{% endif %}>Received</option>
       <option value="success" {% if filter_status == 'success' %}selected="selected"{% endif %}>Success</option>
       <option value="failed" {% if filter_status == 'failed' %}selected="selected"{% endif %}>Failed</option>
+      <option value="exception" {% if filter_status == 'exception' %}selected="selected"{% endif %}>Exception</option>
     </select>
 
     <label style="font-size:0.85em;color:#666;">Limit:</label>
@@ -33,18 +57,18 @@
 
     <button type="submit" class="btn btn-primary" style="padding:4px 10px;font-size:0.85em;">Apply &amp; Refresh</button>
     {% if filter_action or filter_status or filter_limit != 100 %}
-    <a href="/webui/ansible-logs" class="btn" style="padding:4px 10px;font-size:0.85em;text-decoration:none;background:#999;color:#fff;">Clear</a>
+    <a href="/webui/logs" class="btn" style="padding:4px 10px;font-size:0.85em;text-decoration:none;background:#999;color:#fff;">Clear</a>
     {% endif %}
   </form>
+
   <div style="display:flex;gap:6px;align-items:center;margin-left:auto;">
     <label style="font-size:0.8em;color:#666;">Clear logs &gt;:</label>
     <select id="clear-days" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
-      <option value="1" selected>1d</option>
-      <option value="7">7d</option>
-      <option value="14">14d</option>
-      <option value="30">30d</option>
-      <option value="60">60d</option>
-      <option value="90">90d</option>
+      <option value="600" selected>10min</option>
+      <option value="3600">1h</option>
+      <option value="36000">10h</option>
+      <option value="86400">24h</option>
+      <option value="604800">7 days</option>
       <option value="0">All</option>
     </select>
     <button id="clear-logs-btn" class="btn btn-danger" style="font-size:0.85em;padding:4px 10px;">Remove Selected</button>
@@ -52,156 +76,617 @@
   </div>
 </div>
 
-<table>
-<thead><tr><th class="sortable" data-col="0">ID</th><th class="sortable" data-col="1">Timestamp</th><th class="sortable" data-col="2">Action</th><th class="sortable" data-col="3">Host</th><th class="sortable" data-col="4">Instance</th><th class="sortable" data-col="5">Status</th><th>Duration</th><th>Details</th></tr></thead>
-<tbody>
-{% for entry in ansible_entries %}
-<tr class="{% if entry.status == 'failed' %}{% if 'timed out' in (entry.detail_str or '').lower() %}ansible-log-timeout{% else %}ansible-log-failed{% endif %}{% else %}ansible-log-{{ entry.action_type }}{% endif %}">
-  <td>{{ entry.id }}</td>
-  <td class="ts-cell" data-sort="{{ entry.created_at or entry.started_at or '' }}" data-ts-utc="{{ entry.created_at or entry.started_at or '' }}">{{ entry.created_at or entry.started_at }}</td>
-  <td>{{ entry.action_type }}</td>
-  <td>{% if entry.node_id %}<a class="row-link" href="/webui/hosts">{{ entry.node_name }}</a>{% else %}{{ entry.node_name }}{% endif %}</td>
-  <td>{% if entry.instance_id %}<a class="row-link" href="/webui/instances/{{ entry.instance_id }}">{{ entry.instance_name }}</a>{% else %}{{ entry.instance_name }}{% endif %}</td>
-  <td>{{ entry.status }}{% if 'timed out' in (entry.detail_str or '').lower() %} <span style="color:#ff9800;font-weight:600;">⚠ timeout</span>{% endif %}</td>
-  <td>{{ entry.dur_str }}</td>
-  <td style="color:#666;font-size:0.85em;">{{ entry.detail_str or 'N/A' }}</td>
-</tr>
-{% else %}
-<tr><td colspan="8" style="text-align:center;color:#888;">No ansible actions logged</td></tr>
-{% endfor %}
+<table id="logs-table">
+<thead><tr>
+  <th class="sortable" data-col="0">ID</th>
+  <th class="sortable" data-col="1" data-sort="started">Age</th>
+  <th class="sortable" data-col="2">Type</th>
+  <th class="sortable" data-col="3">Host</th>
+  <th class="sortable" data-col="4">Instance</th>
+  <th class="sortable" data-col="5">Status</th>
+  <th class="sortable" data-col="6" data-sort="duration">Duration</th>
+  <th>Details</th>
+  <th style="width:80px;"></th>
+</tr></thead>
+<tbody id="logs-tbody">
+<tr><td colspan="9" style="text-align:center;color:#888;">Loading logs...</td></tr>
 </tbody>
 </table>
 
-<!-- Column sorting JS — sortable: 0(ID),1(Timestamp),2(Action),3(Node),4(Instance),5(Status) -->
 <script>
-// Format ISO timestamp as relative time — uses global qrFmtRelative from base.html
+// ── Expand/collapse state ──
+var expandedJobIds = {};
+var refreshInterval = null;
 
-// Compact timestamp display — no full timestamps, only compact date + relative
-// < 24h: relative only (e.g. "2h ago")
-// >= 24h and < 7d: compact date + relative (e.g. "May 28 (3d ago)")
-// >= 7d: full date + relative (e.g. "May 20, 2026 (10d ago)")
+// ── Utility helpers ──
+function qrNormIso(iso) {
+    if (!iso) return iso;
+    // SQLite stores naive UTC — append +00:00 so JS parses as UTC
+    if (iso.indexOf('+') === -1 && iso.indexOf('Z') === -1 && iso.length > 10) {
+        return iso.replace(' ', 'T') + '+00:00';
+    }
+    return iso;
+}
+
+function qrFmtRelative(iso) {
+    if (!iso || iso === '-') return '-';
+    var normIso = qrNormIso(iso);
+    var ts = new Date(normIso);
+    if (isNaN(ts.getTime())) return '-';
+    var diff = Math.floor((Date.now() - ts.getTime()) / 1000);
+    if (diff < 0) return '-';
+    if (diff < 60) return diff + 's ago';
+    var m = Math.floor(diff / 60);
+    if (m < 60) { var s = diff % 60; return m + 'm ' + s + 's ago'; }
+    var h = Math.floor(m / 60);
+    if (h < 24) { var m2 = m % 60; return h + 'h ' + m2 + 'm ago'; }
+    var d = Math.floor(h / 24);
+    if (d < 30) return d + 'd ago';
+    var mo = Math.floor(d / 30);
+    return mo + 'mo ago';
+}
+
 function fmtCompact(iso) {
     if (!iso || iso === '-') return '-';
-    // Normalize ISO: SQLite stores naive UTC or space-separated, JS parses as local without suffix.
     var normIso = qrNormIso(iso);
     var ts = new Date(normIso);
     if (isNaN(ts.getTime())) return iso;
     var now = new Date();
     var diff = Math.floor((now - ts) / 1000);
     if (diff < 0) return iso;
+    var relStr = qrFmtRelative(iso);
     var tzName = typeof window._qr_tz_name !== 'undefined' ? window._qr_tz_name : null;
     var fmtOpts = { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false };
     if (tzName) fmtOpts.timeZone = tzName;
-    var dateStr = ts.toLocaleString(undefined, fmtOpts);
-    return { date: dateStr, diff: diff };
+    if (diff < 86400) {
+        return { date: ts.toLocaleString(undefined, fmtOpts), diff: diff, rel: relStr };
+    } else {
+        var fullDate = ts.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+        return { date: fullDate + ' ' + ts.toLocaleTimeString(undefined, fmtOpts), diff: diff, rel: relStr };
+    }
 }
 
-// Apply relative time + compact timestamp formatting on load
-(function() {
-  document.querySelectorAll('.ts-cell, .age-cell').forEach(function(cell) {
-    var raw = cell.getAttribute('data-ts-utc') || cell.getAttribute('data-sort') || cell.textContent.trim();
-    var info = fmtCompact(raw);
-    var relStr = qrFmtRelative(raw);
-    if (relStr !== '-') {
-        if (info.diff !== undefined && info.diff < 86400) {
-            cell.textContent = relStr;
-        } else if (info.date) {
-            cell.innerHTML = info.date + ' <span style="color:#888;font-size:0.85em;">(' + relStr + ')</span>';
+function calcDuration(started, finished) {
+    if (!started) return '-';
+    var s = qrNormIso(started);
+    var start = new Date(s);
+    if (isNaN(start.getTime())) return '-';
+    if (finished) {
+        var end = new Date(qrNormIso(finished));
+        if (!isNaN(end.getTime())) {
+            var diff = Math.floor((end - start) / 1000);
+            return formatDuration(diff);
+        }
+    }
+    // Still running
+    var diff = Math.floor((Date.now() - start.getTime()) / 1000);
+    return formatDuration(diff) + ' (active)';
+}
+
+function formatDuration(seconds) {
+    if (seconds < 0) return '-';
+    if (seconds < 60) return seconds + 's';
+    var m = Math.floor(seconds / 60);
+    var s = seconds % 60;
+    if (m < 60) return m + 'm ' + s + 's';
+    var h = Math.floor(m / 60);
+    var rm = m % 60;
+    return h + 'h ' + rm + 'm ' + s + 's';
+}
+
+function parseDurationToSeconds(durStr) {
+    if (!durStr || durStr === '-') return 0;
+    var total = 0;
+    var hMatch = durStr.match(/(\d+)h/); if (hMatch) total += parseInt(hMatch[1]) * 3600;
+    var mMatch = durStr.match(/(\d+)m/); if (mMatch) total += parseInt(mMatch[1]) * 60;
+    var sMatch = durStr.match(/(\d+)s$/); if (sMatch) total += parseInt(sMatch[1]);
+    return total;
+}
+
+function taskColor(status) {
+    switch(status) {
+        case 'running': return '#1565c0';
+        case 'success': case 'completed': return '#2e7d32';
+        case 'failed': case 'error': return '#c62828';
+        case 'exception': return '#7b1fa2';
+        case 'received': return '#9e9e9e';
+        default: return '#666';
+    }
+}
+
+function statusBadge(status) {
+    var cls = '';
+    switch(status) {
+        case 'running': cls = 'log-entry-running'; break;
+        case 'received': cls = 'log-entry-received'; break;
+        case 'failed': case 'error': cls = 'log-entry-failed'; break;
+    }
+    return cls;
+}
+
+// ── Group entries by parent_id ──
+function groupByParent(entries) {
+    var groups = {};
+    var headers = [];
+    entries.forEach(function(entry) {
+        var pid = entry.parent_id;
+        if (pid === null || pid === undefined || pid === '') {
+            // Job header
+            headers.push(entry);
+            groups[entry.id] = [entry];
         } else {
-            cell.textContent = relStr;
+            // Task — append to existing group
+            if (!groups[pid]) {
+                groups[pid] = [];
+            }
+            groups[pid].push(entry);
+        }
+    });
+    // Sort headers by created_at desc (newest first)
+    headers.sort(function(a, b) {
+        var ta = a.created_at || '';
+        var tb = b.created_at || '';
+        return tb.localeCompare(ta);
+    });
+    return { headers: headers, groups: groups };
+}
+
+// ── Determine composite status for job header ──
+function compositeStatus(tasks) {
+    if (tasks.length === 0) return 'queued';
+    var hasRunning = tasks.some(function(t){ return t.status === 'running'; });
+    var hasPending = tasks.some(function(t){ return t.status === 'received' || t.status === 'queued'; });
+    var hasFailed = tasks.some(function(t){ return t.status === 'failed' || t.status === 'error' || t.status === 'exception'; });
+    if (hasRunning) return 'running';
+    if (hasPending) return 'received';
+    if (hasFailed) return 'failed';
+    var allSuccess = tasks.every(function(t){ return t.status === 'success' || t.status === 'completed'; });
+    return allSuccess ? 'success' : 'queued';
+}
+
+// ── Render job header row ──
+function renderJobHeader(job, tasks) {
+    if (!job) return '';
+    var compStatus = compositeStatus(tasks);
+    var statusClass = 'stage-' + (compStatus === 'success' ? 'completed' : compStatus);
+    var dur = calcDuration(job.created_at, job.finished_at);
+    var tsInfo = fmtCompact(job.created_at || job.started_at);
+    var expanded = !!expandedJobIds[job.id];
+    var expandIcon = expanded ? '\u25B2' : '\u25BC';
+
+    // Host link — resolve node_name or node_id
+    var hostDisplay = '-';
+    var hostLink = '';
+    if (job.node_name) {
+        hostLink = ' href="/webui/hosts"';
+        hostDisplay = job.node_name;
+    } else if (job.node_id) {
+        hostLink = ' href="/webui/hosts"';
+        hostDisplay = '(node ' + job.node_id + ')';
+    }
+
+    // Instance link
+    var instDisplay = '-';
+    var instLink = '';
+    if (job.instance_id) {
+        instLink = ' href="/webui/instances/' + job.instance_id + '"';
+        instDisplay = job.instance_name || job.instance_id;
+    }
+
+    // Detail string from error_message or details_json
+    var detailStr = job.error_message || '';
+    if (!detailStr && job.details_json) {
+        try { detailStr = JSON.stringify(job.details_json); } catch(e) {}
+    }
+    if (!detailStr && job.results_json) {
+        try { detailStr = JSON.stringify(job.results_json).substring(0, 120); } catch(e) {}
+    }
+    if (!detailStr) detailStr = 'N/A';
+
+    var statusHtml = '<span class="task-stage-bar ' + statusClass + '" style="width:40px;"></span>' + compStatus;
+    if (compStatus === 'running') statusHtml += ' <span style="color:#4caf50;font-weight:600;">&#9654;</span>';
+    if (detailStr.toLowerCase().indexOf('timed out') !== -1) statusHtml += ' <span style="color:#ff9800;font-weight:600;">&#9888; timeout</span>';
+
+    var delBtn = (compStatus === 'success' || compStatus === 'failed' || compStatus === 'error' || compStatus === 'received')
+        ? '<button class="btn-task-action" data-job-id="' + job.id + '" data-action="delete-job" style="font-size:0.7em;padding:1px 5px;margin-left:4px;background:#f44336;color:#fff;border:none;border-radius:2px;cursor:pointer;" title="Delete job and all tasks">Del</button>'
+        : '';
+
+    var row = '<tr class="job-header-row" data-job-id="' + job.id + '" data-parent-id="null" onclick="toggleJobDetail(' + job.id + ')"' + (statusClass === 'log-entry-failed' ? ' style="background:#ffebee"' : '') + '>' +
+        '<td>' + job.id + '</td>' +
+        '<td data-sort="' + (job.created_at || '') + '" class="ts-cell" data-ts-utc="' + (job.created_at || job.started_at || '') + '">' + (tsInfo.rel || tsInfo.date || '-') + '</td>' +
+        '<td>' + (job.job_type || '-') + '</td>' +
+        '<td><a class="row-link"' + hostLink + '>' + hostDisplay + '</a></td>' +
+        '<td><a class="row-link"' + instLink + '>' + instDisplay + '</a></td>' +
+        '<td style="white-space:nowrap;">' + statusHtml + '</td>' +
+        '<td data-sort="' + parseDurationToSeconds(dur) + '">' + dur + '</td>' +
+        '<td style="color:#666;font-size:0.85em;max-width:200px;overflow:hidden;text-overflow:ellipsis;" title="' + detailStr.replace(/"/g, '&quot;') + '">' + detailStr.substring(0, 60) + (detailStr.length > 60 ? '...' : '') + '</td>' +
+        '<td><span class="expand-arrow" style="font-size:0.75em;color:#888;margin-right:4px;cursor:pointer;" onclick="event.stopPropagation();toggleJobDetail(' + job.id + ')">' + expandIcon + '</span>' + delBtn + '</td>' +
+        '</tr>';
+
+    // Detail row with task sub-rows (pre-rendered from grouped data, refreshed via loadJobTasks on expand)
+    var taskHtml = '';
+    if (tasks.length > 0) {
+        taskHtml = tasks.map(function(t) {
+            var stageCls = 'stage-' + (t.status === 'success' ? 'completed' : t.status);
+            var started = t.started_at ? fmtCompact(t.started_at).date : '-';
+            var durTask = calcDuration(t.started_at, t.finished_at);
+            var playbook = t.stage_playbook || '-';
+            var statusHtml = '<span class="stage-bar ' + stageCls + '"></span><span style="color:' + taskColor(t.status) + ';">' + (t.task_stage || t.status) + '</span>';
+            if (t.error_message) {
+                statusHtml += '<br><span style="color:#c62828;font-size:0.9em;">' + t.error_message.substring(0, 50) + '</span>';
+            }
+            return '<tr style="border-bottom:1px solid #eee;"><td style="padding:2px 4px;font-weight:600;color:#666;">' + t.id + '</td>' +
+                '<td style="padding:2px 4px;">' + statusHtml + '</td>' +
+                '<td style="padding:2px 4px;color:#888;font-size:0.85em;">' + playbook + '</td>' +
+                '<td style="padding:2px 4px;white-space:nowrap;">' + statusHtml + '</td>' +
+                '<td style="padding:2px 4px;font-size:0.8em;color:#888;">' + started + '</td>' +
+                '<td style="padding:2px 4px;font-size:0.8em;color:#888;">' + durTask + '</td></tr>';
+        }).join('');
+    } else {
+        taskHtml = '<tr><td colspan="6" style="padding:6px;color:#888;">No stages recorded</td></tr>';
+    }
+    var detailRow = '<tr class="job-detail-row' + (expanded && tasks.length > 0 ? ' expanded' : '') + '" data-parent="' + job.id + '" id="job-detail-' + job.id + '">' +
+        '<td colspan="9" class="job-detail-cell">' +
+        '<div style="font-size:0.8em;color:#666;margin-bottom:4px;">Stage Progress</div>' +
+        '<table style="width:100%;border-collapse:collapse;font-size:0.85em;">' +
+        '<thead><tr style="border-bottom:1px solid #ddd;"><th style="text-align:left;padding:2px 4px;width:30px;">Task</th>' +
+        '<th style="text-align:left;padding:2px 4px;">Stage</th>' +
+        '<th style="text-align:left;padding:2px 4px;">Playbook</th>' +
+        '<th style="text-align:left;padding:2px 4px;min-width:120px;">Status</th>' +
+        '<th style="text-align:left;padding:2px 4px;width:80px;">Started</th>' +
+        '<th style="text-align:left;padding:2px 4px;width:70px;">Duration</th></tr></thead>' +
+        '<tbody id="job-tasks-' + job.id + '">' + taskHtml + '</tbody></table></td></tr>';
+    return row + detailRow;
+}
+
+// ── Render flat entry (no parent relationship, legacy) ──
+function renderFlatEntry(entry) {
+    var tsInfo = fmtCompact(entry.created_at || entry.started_at);
+    var dur = calcDuration(entry.created_at, entry.finished_at);
+    var detailStr = entry.error_message || '';
+    if (!detailStr && entry.details_json) {
+        try { detailStr = JSON.stringify(entry.details_json).substring(0, 120); } catch(e) {}
+    }
+    if (!detailStr) detailStr = 'N/A';
+
+    var hostDisplay = '-';
+    var hostLink = '';
+    if (entry.node_name) {
+        hostLink = ' href="/webui/hosts"';
+        hostDisplay = entry.node_name;
+    }
+    var instDisplay = '-';
+    var instLink = '';
+    if (entry.instance_id) {
+        instLink = ' href="/webui/instances/' + entry.instance_id + '"';
+        instDisplay = entry.instance_name || entry.instance_id;
+    }
+
+    var statusHtml = entry.status || '?';
+    if (statusHtml === 'running') statusHtml += ' <span style="color:#4caf50;font-weight:600;">&#9654;</span>';
+    if ((entry.detail_str || '').toLowerCase().indexOf('timed out') !== -1) statusHtml += ' <span style="color:#ff9800;font-weight:600;">&#9888; timeout</span>';
+
+    return '<tr class="log-entry-' + (entry.job_type || 'unknown').replace(/ /g,'-') + '">' +
+        '<td>' + entry.id + '</td>' +
+        '<td data-sort="' + (entry.created_at || '') + '" class="ts-cell" data-ts-utc="' + (entry.created_at || entry.started_at || '') + '">' + (tsInfo.rel || tsInfo.date || '-') + '</td>' +
+        '<td>' + (entry.job_type || '-') + '</td>' +
+        '<td><a class="row-link"' + hostLink + '>' + hostDisplay + '</a></td>' +
+        '<td><a class="row-link"' + instLink + '>' + instDisplay + '</a></td>' +
+        '<td style="white-space:nowrap;">' + statusHtml + '</td>' +
+        '<td data-sort="' + parseDurationToSeconds(dur) + '">' + dur + '</td>' +
+        '<td style="color:#666;font-size:0.85em;max-width:200px;overflow:hidden;text-overflow:ellipsis;" title="' + detailStr.replace(/"/g, '&quot;') + '">' + detailStr.substring(0, 60) + (detailStr.length > 60 ? '...' : '') + '</td>' +
+        '<td></td>' +
+        '</tr>';
+}
+
+// ── Expand/Collapse toggle ──
+function toggleJobDetail(jobId) {
+    var detail = document.getElementById('job-detail-' + jobId);
+    if (!detail) return;
+    if (expandedJobIds[jobId]) {
+        expandedJobIds[jobId] = false;
+        detail.classList.remove('expanded');
+        // Update arrow to collapse
+        var arrowCell = detail.previousElementSibling;
+        if (arrowCell) {
+            var arrow = arrowCell.querySelector('.expand-arrow');
+            if (arrow) arrow.innerHTML = '\u25BC';
         }
     } else {
-        cell.textContent = relStr;
+        expandedJobIds[jobId] = true;
+        detail.classList.add('expanded');
+        // Update arrow to expand
+        var arrowCell = detail.previousElementSibling;
+        if (arrowCell) {
+            var arrow = arrowCell.querySelector('.expand-arrow');
+            if (arrow) arrow.innerHTML = '\u25B2';
+        }
+        // Load tasks via API (async — don't re-render which would wipe the tbody)
+        loadJobTasks(jobId);
     }
-  });
-})();
-var ths = document.querySelectorAll('.sortable');
+}
 
-// Auto-apply saved sort state on load
-(function() {
-  var _sortCol = parseInt(qrSettings.get('ansible_logs', 'sort_col', '-1'), 10);
-  var _sortDir = qrSettings.get('ansible_logs', 'sort_dir', '');
-  if (_sortCol >= 0 && _sortDir) {
-    sortTable(_sortCol, _sortDir);
-    applyArrows(_sortCol, _sortDir);
-  }
-})();
+// ── Load child tasks for a job from the API ──
+function loadJobTasks(jobId) {
+    var tbody = document.getElementById('job-tasks-' + jobId);
+    if (!tbody) return;
+    tbody.innerHTML = '<tr><td colspan="6" style="padding:6px;color:#888;">Loading tasks...</td></tr>';
 
+    // Query: parent_id=jobId to get child task entries
+    qrApi('/log_entries?parent_id=' + jobId + '&limit=100')
+        .then(function(data) {
+            if (data.status !== 'ok' || !data.items || data.items.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="6" style="padding:6px;color:#888;">No stages recorded</td></tr>';
+                return;
+            }
+            var tasks = data.items;
+            // Sort by created_at asc (execution order)
+            tasks.sort(function(a, b){ return (a.created_at || '').localeCompare(b.created_at || ''); });
+
+            var html = '';
+            tasks.forEach(function(task) {
+                var stageCls = 'stage-' + (task.status === 'success' ? 'completed' : task.status);
+                var started = task.started_at ? fmtCompact(task.started_at).date : '-';
+                var durTask = calcDuration(task.started_at, task.finished_at);
+                var playbook = task.stage_playbook || '-';
+                var statusHtml = '<span class="stage-bar ' + stageCls + '"></span><span style="color:' + taskColor(task.status) + ';">' + (task.task_stage || task.status) + '</span>';
+                if (task.error_message) {
+                    statusHtml += '<br><span style="color:#c62828;font-size:0.9em;">' + task.error_message.substring(0, 50) + '</span>';
+                }
+                html += '<tr style="border-bottom:1px solid #eee;">' +
+                    '<td style="padding:2px 4px;font-weight:600;color:#666;">' + task.id + '</td>' +
+                    '<td style="padding:2px 4px;">' + statusHtml + '</td>' +
+                    '<td style="padding:2px 4px;color:#888;font-size:0.85em;">' + playbook + '</td>' +
+                    '<td style="padding:2px 4px;white-space:nowrap;">' + statusHtml + '</td>' +
+                    '<td style="padding:2px 4px;font-size:0.8em;color:#888;">' + started + '</td>' +
+                    '<td style="padding:2px 4px;font-size:0.8em;color:#888;">' + durTask + '</td>' +
+                    '</tr>';
+            });
+            tbody.innerHTML = html;
+        })
+        .catch(function(e) {
+            tbody.innerHTML = '<tr><td colspan="6" style="padding:6px;color:#f44336;">Load error: ' + e + '</td></tr>';
+        });
+}
+
+// ── Delete job handler (delegated) ──
+document.addEventListener('click', function(e) {
+    var btn = e.target.closest('.btn-task-action');
+    if (!btn) return;
+    var jobId = parseInt(btn.getAttribute('data-job-id'), 10);
+    var action = btn.getAttribute('data-action');
+    if (action === 'delete-job') {
+        if (!confirm('Delete job #' + jobId + ' and all its tasks?')) return;
+        qrApi('/log_entries/cleanup', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({older_than_minutes: 0, status: ''})
+        }).then(function(data) {
+            if (data.status === 'ok') {
+                delete expandedJobIds[jobId];
+                renderAllLogs();
+            } else {
+                alert('Delete failed: ' + (data.message || JSON.stringify(data)));
+            }
+        });
+    }
+});
+
+// ── Main render function ──
+function renderAllLogs() {
+    // Load from API (respects current filter params in URL)
+    var params = new URLSearchParams(window.location.search);
+    var qs = [];
+    if (params.get('job_type')) qs.push('job_type=' + encodeURIComponent(params.get('job_type')));
+    if (params.get('status')) qs.push('status=' + encodeURIComponent(params.get('status')));
+    if (params.get('limit')) qs.push('limit=' + encodeURIComponent(params.get('limit')));
+    var query = qs.length ? '?' + qs.join('&') : '';
+
+    qrApi('/log_entries' + query)
+        .then(function(data) {
+            if (data.status !== 'ok') {
+                document.getElementById('logs-tbody').innerHTML = '<tr><td colspan="9" style="text-align:center;color:#f44336;">Failed to load logs</td></tr>';
+                return;
+            }
+            var entries = data.items || [];
+            document.getElementById('log-count').textContent = data.total || entries.length;
+
+            if (entries.length === 0) {
+                document.getElementById('logs-tbody').innerHTML = '<tr><td colspan="9" style="text-align:center;color:#888;">No logs found</td></tr>';
+                return;
+            }
+
+            // Group by parent_id
+            var grouped = groupByParent(entries);
+            var html = '';
+            grouped.headers.forEach(function(job) {
+                var tasks = grouped.groups[job.id] || [];
+                html += renderJobHeader(job, tasks);
+            });
+
+            // Smart render: if any jobs are expanded, rebuild only parent rows (preserves detail row content)
+            var hasExpanded = Object.keys(expandedJobIds).some(function(id){ return expandedJobIds[id]; });
+            if (hasExpanded) {
+                var fragment = document.createDocumentFragment();
+                var tmp = document.createElement('tbody');
+                tmp.innerHTML = html;
+                while (tmp.firstChild) fragment.appendChild(tmp.firstChild);
+                var tbody = document.getElementById('logs-tbody');
+                // Remove old parent rows but keep detail rows that are expanded
+                var newParentRows = Array.from(fragment.querySelectorAll('tr[data-job-id]'));
+                var newDetailRows = Array.from(fragment.querySelectorAll('tr.job-detail-row'));
+                // Build new set: new parent rows + preserved expanded detail rows
+                var existingDetailIds = {};
+                tbody.querySelectorAll('tr.job-detail-row.expanded').forEach(function(d){
+                    var pid = d.getAttribute('data-parent');
+                    if (pid) existingDetailIds[pid] = true;
+                });
+                var newDetailIds = {};
+                newDetailRows.forEach(function(d){ newDetailIds[d.id.replace('job-detail-','')] = true; });
+                // Rebuild: keep detail rows for expanded jobs that are still in new data
+                var rebuildHtml = '';
+                var parentIdx = 0, detailIdx = 0;
+                var allRows = [];
+                newParentRows.forEach(function(r){ allRows.push(['parent', r]); });
+                newDetailRows.forEach(function(r){ allRows.push(['detail', r]); });
+                // Simpler: just rebuild parent rows, reload tasks for expanded jobs
+                tbody.innerHTML = newParentRows.map(function(r){ return r.outerHTML; }).join('');
+                // Reload tasks for expanded jobs
+                Object.keys(expandedJobIds).forEach(function(id){
+                    if (expandedJobIds[id]) loadJobTasks(parseInt(id, 10));
+                });
+            } else {
+                document.getElementById('logs-tbody').innerHTML = html || '<tr><td colspan="9" style="text-align:center;color:#888;">No logs</td></tr>';
+            }
+
+            // Rebind sort after DOM replacement
+            rebindSort();
+        })
+        .catch(function(e) {
+            document.getElementById('logs-tbody').innerHTML = '<tr><td colspan="9" style="text-align:center;color:#f44336;">Load error: ' + e + '</td></tr>';
+        });
+}
+
+// Track which parent IDs have headers (for orphan detection)
+var groupedHeaders = [];
+
+// ── Column sorting (parent+detail pairs stay together) ──
 function sortTable(col, dir) {
-  var table = ths[0] ? ths[0].closest('table') : null;
-  if (table) {
+    var table = document.getElementById('logs-table');
+    if (!table) return;
     var tbody = table.querySelector('tbody');
-    if (tbody) {
-      var rows = Array.from(tbody.rows);
-      rows.sort(function(a, b) {
-        var cellA = a.cells[col] ? (a.cells[col].getAttribute('data-sort') || a.cells[col].textContent.trim()) : '';
-        var cellB = b.cells[col] ? (b.cells[col].getAttribute('data-sort') || b.cells[col].textContent.trim()) : '';
-        // Numeric sort: ID (col 0)
+    if (!tbody) return;
+
+    var parentRows = Array.from(tbody.querySelectorAll('tr[data-job-id]'));
+    var pairs = [];
+    parentRows.forEach(function(parent) {
+        var jobId = parent.getAttribute('data-job-id');
+        var detailId = 'job-detail-' + jobId;
+        var detail = document.getElementById(detailId);
+        pairs.push([parent, detail]);
+    });
+
+    pairs.sort(function(a, b) {
+        var pa = a[0], pb = b[0];
+        var cellA = pa.cells[col] ? (pa.cells[col].getAttribute('data-sort') || pa.cells[col].textContent.trim()) : '';
+        var cellB = pb.cells[col] ? (pb.cells[col].getAttribute('data-sort') || pb.cells[col].textContent.trim()) : '';
         if (col === 0) {
-          return dir === 'asc' ? (parseInt(cellA, 10) || 0) - (parseInt(cellB, 10) || 0) : (parseInt(cellB, 10) || 0) - (parseInt(cellA, 10) || 0);
+            return dir === 'asc' ? (parseInt(cellA,10)||0) - (parseInt(cellB,10)||0) : (parseInt(cellB,10)||0) - (parseInt(cellA,10)||0);
+        }
+        if (col === 1) return dir === 'asc' ? cellA.localeCompare(cellB) : cellB.localeCompare(cellA);
+        if (col === 4) {
+            var instA = parseInt(cellA,10)||0; var instB = parseInt(cellB,10)||0;
+            return dir === 'asc' ? instA - instB : instB - instA;
+        }
+        if (col === 6) {
+            var durA = parseDurationToSeconds(cellA); var durB = parseDurationToSeconds(cellB);
+            return dir === 'asc' ? durA - durB : durB - durA;
         }
         return dir === 'asc' ? cellA.localeCompare(cellB) : cellB.localeCompare(cellA);
-      });
-      rows.forEach(function(row) { tbody.appendChild(row); });
-    }
-  }
+    });
+
+    pairs.forEach(function(pair) {
+        tbody.appendChild(pair[0]);
+        if (pair[1]) tbody.appendChild(pair[1]);
+    });
 }
 
 function applyArrows(col, dir) {
-  ths.forEach(function(t) {
-    t.textContent = t.textContent.replace(/\s*[\u2191\u2193]\s*$/, '').trim();
-  });
-  var arrow = dir === 'asc' ? ' \u2191' : ' \u2193';
-  ths[col].textContent = ths[col].textContent.trim() + arrow;
+    document.querySelectorAll('#logs-table .sortable').forEach(function(t) {
+        t.textContent = t.textContent.replace(/\s*[\u2191\u2193]\s*$/, '').trim();
+    });
+    var ths = document.querySelectorAll('#logs-table .sortable');
+    if (ths[col]) {
+        ths[col].textContent = ths[col].textContent.trim() + (dir === 'asc' ? ' \u2191' : ' \u2193');
+    }
 }
 
-ths.forEach(function(th) {
-  th.style.cursor = 'pointer';
-  th.addEventListener('click', function() {
-    var col = parseInt(this.getAttribute('data-col'), 10);
-    var dir = qrSettings.get('ansible_logs', 'sort_dir', '') === 'desc' ? 'asc' : 'desc';
-    qrSettings.set('ansible_logs', 'sort_col', col.toString());
-    qrSettings.set('ansible_logs', 'sort_dir', dir);
-
-    sortTable(col, dir);
-    applyArrows(col, dir);
-  });
-});
-
-// Clear logs button
-document.getElementById('clear-logs-btn').addEventListener('click', function() {
-  var days = parseInt(document.getElementById('clear-days').value, 10);
-  // days=0 means clear all — require confirmation
-  if (days === 0 && !confirm('Clear ALL ansible action logs? This cannot be undone.')) return;
-  var statusEl = document.getElementById('clear-status');
-  var btn = this;
-  btn.disabled = true;
-  btn.textContent = 'Clearing...';
-  statusEl.textContent = '';
-
-  qrApi('/ansible_actions/clear-old', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({days: days})
-  })
-    .then(function(data) {
-      if (data.status === 'ok') {
-        var count = data.data.deleted_count || 0;
-        var msg = data.data.clear_all ? 'Cleared all ' + count + ' entries.' : 'Cleared ' + count + ' entries older than ' + days + ' days.';
-        statusEl.style.color = '#4caf50';
-        statusEl.textContent = msg;
-        setTimeout(function() { window.location.reload(); }, 1500);
-      } else {
-        statusEl.style.color = '#f44336';
-        statusEl.textContent = 'Error: ' + (data.message || JSON.stringify(data));
-      }
-      btn.disabled = false;
-      btn.textContent = 'Remove Selected';
-    }).catch(function(e) {
-      statusEl.style.color = '#f44336';
-      statusEl.textContent = 'Request failed: ' + e;
-      btn.disabled = false;
-      btn.textContent = 'Remove Selected';
+function rebindSort() {
+    var ths = document.querySelectorAll('#logs-table .sortable');
+    ths.forEach(function(th) {
+        th.style.cursor = 'pointer';
+        // Remove old listeners by cloning
+        var newTh = th.cloneNode(true);
+        th.parentNode.replaceChild(newTh, th);
+        newTh.addEventListener('click', function() {
+            var col = parseInt(this.getAttribute('data-col'), 10);
+            var dir = qrSettings.get('log_entries', 'sort_dir', '') === 'desc' ? 'asc' : 'desc';
+            qrSettings.set('log_entries', 'sort_col', col.toString());
+            qrSettings.set('log_entries', 'sort_dir', dir);
+            sortTable(col, dir);
+            applyArrows(col, dir);
+        });
     });
+    // Restore saved sort on load
+    var _sortCol = parseInt(qrSettings.get('log_entries', 'sort_col', '-1'), 10);
+    var _sortDir = qrSettings.get('log_entries', 'sort_dir', '');
+    if (_sortCol >= 0 && _sortDir) {
+        setTimeout(function(){ sortTable(_sortCol, _sortDir); applyArrows(_sortCol, _sortDir); }, 100);
+    }
+}
+
+// ── Clear logs button ──
+document.getElementById('clear-logs-btn').addEventListener('click', function() {
+    var days = parseInt(document.getElementById('clear-days').value, 10);
+    if (days === 0 && !confirm('Clear ALL logs? This cannot be undone.')) return;
+    var statusEl = document.getElementById('clear-status');
+    var btn = this;
+    btn.disabled = true;
+    btn.textContent = 'Clearing...';
+    statusEl.textContent = '';
+
+    // Dropdown values are in seconds; API expects minutes
+    var mins = Math.max(1, Math.round(days / 60));
+    qrApi('/log_entries/cleanup', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({older_than_minutes: mins})
+    })
+        .then(function(data) {
+            if (data.status === 'ok') {
+                var count = data.data.deleted_count || 0;
+                var msg = 'Cleared ' + count + ' log entries.';
+                statusEl.style.color = '#4caf50';
+                statusEl.textContent = msg;
+                setTimeout(function() { renderAllLogs(); }, 800);
+            } else {
+                statusEl.style.color = '#f44336';
+                statusEl.textContent = 'Error: ' + (data.message || JSON.stringify(data));
+            }
+            btn.disabled = false;
+            btn.textContent = 'Remove Selected';
+        }).catch(function(e) {
+            statusEl.style.color = '#f44336';
+            statusEl.textContent = 'Request failed: ' + e;
+            btn.disabled = false;
+            btn.textContent = 'Remove Selected';
+        });
 });
+
+// ── Auto-refresh for running jobs ──
+function startAutoRefresh(secs) {
+    if (refreshInterval) clearInterval(refreshInterval);
+    renderAllLogs();
+    if (secs <= 0) return;
+    refreshInterval = setInterval(renderAllLogs, secs * 1000);
+}
+
+// ── Init: load saved filter params and start rendering ──
+(function() {
+    // Sync select with URL params
+    var params = new URLSearchParams(window.location.search);
+    var actionSel = document.getElementById('filter-action');
+    var statusSel = document.getElementById('filter-status');
+    var limitSel = document.getElementById('filter-limit');
+    if (actionSel && params.get('job_type')) actionSel.value = params.get('job_type');
+    if (statusSel && params.get('status')) statusSel.value = params.get('status');
+    if (limitSel && params.get('limit')) limitSel.value = params.get('limit');
+
+    // Load logs immediately
+    renderAllLogs();
+
+    // Auto-refresh: 30s default for running jobs
+    var autoRefresh = parseInt(qrSettings.get('log_entries', 'refresh_sec', '30') || '30', 10);
+    startAutoRefresh(autoRefresh);
+})();
 </script>

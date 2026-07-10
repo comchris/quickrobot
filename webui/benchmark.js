@@ -379,7 +379,7 @@
     while (sel.options.length > 1) sel.remove(1);
     allInstances.forEach(function(inst) {
       if (inst.state !== 'running') return;
-      if (inst.engine_type_name !== 'llama_server' && inst.engine_type_name !== 'llama.cpp') return;
+      if (inst.engine_type_name !== 'llama_server') return;
       let opt = document.createElement("option");
       opt.value = inst.id;
       opt.textContent = inst.name + ' (' + (inst.node_hostname || inst.node_name) + ')';
@@ -423,13 +423,12 @@
       return;
     }
 
-    // Running first (stable), then completed/failed sorted by started_at DESC
-    let running = items.filter(function(r){ return r.success === BENCH_RUNNING || r.success == null; });
-    let done = items.filter(function(r){ return r.success !== BENCH_RUNNING && r.success != null; });
-    done.sort(function(a,b) { return (b.started_at || '').localeCompare(a.started_at || ''); });
-
-    running.forEach(function(r) { renderRow(r, tbody, true); });
-    done.forEach(function(r) { renderRow(r, tbody, false); });
+    // Items pre-split by loadResults: running first, then done sorted DESC.
+    // Just render in order — no re-filtering needed.
+    items.forEach(function(r) {
+      let isRunning = r.success === BENCH_RUNNING || r.success == null;
+      renderRow(r, tbody, isRunning);
+    });
 
     // Re-apply sort if we have saved sort state (auto-refresh or manual re-sort)
     if (sortKey && sortDir) {

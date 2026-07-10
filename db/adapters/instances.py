@@ -139,7 +139,7 @@ def _resolve_rpc_bindings(db_path, bind_ids):
 
 def create_instance(db_path, name, engine_type_id, node_id, preset_id=None,
                     config_override=None, system_managed=0, start_on_boot=None,
-                    start_after_deploy=0, gpu_device=None):
+                    start_after_deploy=0, gpu_device=None, node_hostname=None):
     """Create a new instance entry.
 
     Args:
@@ -185,22 +185,22 @@ def create_instance(db_path, name, engine_type_id, node_id, preset_id=None,
                     """INSERT INTO instances
                        (id, name, engine_type_id, node_id, preset_id, config_override,
                         system_managed, start_on_boot, start_after_deploy, gpu_device,
-                        created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        node_hostname, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (inst_id, name, engine_type_id, node_id, preset_id, co_json,
                      system_managed, start_on_boot_val, start_after_deploy_val, gpu_device,
-                     now),
+                     node_hostname or "", now),
                 )
             else:
                 cursor = conn.execute(
                     """INSERT INTO instances
                        (name, engine_type_id, node_id, preset_id, config_override,
                         system_managed, start_on_boot, start_after_deploy, gpu_device,
-                        created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        node_hostname, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (name, engine_type_id, node_id, preset_id, co_json,
                      system_managed, start_on_boot_val, start_after_deploy_val, gpu_device,
-                     now),
+                     node_hostname or "", now),
                 )
                 inst_id = cursor.lastrowid
             row = conn.execute(
@@ -228,16 +228,19 @@ def get_instance(db_path, instance_id):
     with pool(db_path) as conn:
         row = conn.execute(
             """SELECT i.*,
-                      et.name as engine_type_name,
-                      et.display_name as engine_display_name,
-                      n.name as node_display_name,
-                      n.hostname as node_display_hostname,
-                      ep.name as preset_name
-               FROM instances i
-               LEFT JOIN engine_types et ON i.engine_type_id = et.id
-               LEFT JOIN nodes n ON i.node_id = n.id
-               LEFT JOIN engine_presets ep ON i.preset_id = ep.id
-               WHERE i.id = ?""",
+                       et.name as engine_type_name,
+                       et.display_name as engine_display_name,
+                       n.name as node_display_name,
+                       n.hostname as node_display_hostname,
+                       n.ping_state as node_ping_state,
+                       ep.name as preset_name,
+                       em.name as model_name
+                 FROM instances i
+                 LEFT JOIN engine_types et ON i.engine_type_id = et.id
+                 LEFT JOIN nodes n ON i.node_id = n.id
+                 LEFT JOIN engine_presets ep ON i.preset_id = ep.id
+                 LEFT JOIN engine_models em ON ep.model_id = em.id
+                 WHERE i.id = ?""",
             (instance_id,),
         ).fetchone()
         if row is None:
@@ -246,7 +249,8 @@ def get_instance(db_path, instance_id):
         # Fix SQLite Row factory duplicate column name shadowing (same issue as list_instances)
         if result.get("node_display_name"):
             result["node_name"] = result.pop("node_display_name")
-        if result.get("node_display_hostname"):
+        # Only use node's hostname as fallback — don't overwrite instance-level node_hostname
+        if result.get("node_display_hostname") and not result.get("node_hostname"):
             result["node_hostname"] = result.pop("node_display_hostname")
         # Parse config_override — handle both single and double-encoded JSON strings
         co_raw = result.get("config_override") or "{}"
@@ -275,11 +279,14 @@ def list_instances(db_path, engine_type_id=None, node_id=None, state=None, orpha
     from db.sqlite import pool
     query = """SELECT i.*, et.name as engine_type_name, et.display_name as engine_display_name,
                n.name as node_display_name, n.hostname as node_display_hostname,
-               ep.name as preset_name
-                FROM instances i
-                LEFT JOIN engine_types et ON i.engine_type_id = et.id
-                LEFT JOIN nodes n ON i.node_id = n.id
-                LEFT JOIN engine_presets ep ON i.preset_id = ep.id"""
+               n.ping_state as node_ping_state,
+               ep.name as preset_name,
+               em.name as model_name
+                 FROM instances i
+                 LEFT JOIN engine_types et ON i.engine_type_id = et.id
+                 LEFT JOIN nodes n ON i.node_id = n.id
+                 LEFT JOIN engine_presets ep ON i.preset_id = ep.id
+                 LEFT JOIN engine_models em ON ep.model_id = em.id"""
     params = []
     conditions = []
 
@@ -312,7 +319,8 @@ def list_instances(db_path, engine_type_id=None, node_id=None, state=None, orpha
             # Rename the joined aliases back to expected field names.
             if d.get("node_display_name"):
                 d["node_name"] = d.pop("node_display_name")
-            if d.get("node_display_hostname"):
+            # Only use node's hostname as fallback — don't overwrite instance-level node_hostname
+            if d.get("node_display_hostname") and not d.get("node_hostname"):
                 d["node_hostname"] = d.pop("node_display_hostname")
             d["config_override"] = _pcov(d.get("config_override") or "{}")
             d["ansible_vars"] = json.loads(d.get("ansible_vars") or "{}")
@@ -407,7 +415,8 @@ def update_instance(db_path, instance_id, **fields):
                "port_assigned", "pid_last_known", "uptime_seconds",
                "start_on_boot", "restart_policy", "gpu_device", "instance_uuid", "last_state_change",
                "rpc_bind_ids", "split_mode", "tensor_split", "split",
-                "experts", "draft", "cli_flags"}
+                "experts", "draft", "cli_flags",
+               "node_hostname", "node_name"}
     updates = {k: v for k, v in fields.items() if k in allowed}
     if not updates:
         raise InstanceError("No valid fields to update")
@@ -495,11 +504,13 @@ def delete_instance(db_path, instance_id):
             )
 
         # Cascading delete of related records (mimics ON DELETE CASCADE)
+        # Disable FK temporarily — benchmark_results and log_entries have FKs to instances
+        conn.execute("PRAGMA foreign_keys = OFF")
         conn.execute("DELETE FROM benchmark_results WHERE instance_id = ?", (instance_id,))
-        conn.execute("DELETE FROM instance_logs WHERE instance_id = ?", (instance_id,))
-        conn.execute("DELETE FROM ansible_actions WHERE instance_id = ?", (instance_id,))
-
+        # Preserve log entries on instance delete — logs are audit data, keep them as orphans
+        # conn.execute("DELETE FROM log_entries WHERE instance_id = ?", (instance_id,))
         conn.execute("DELETE FROM instances WHERE id = ?", (instance_id,))
+        conn.execute("PRAGMA foreign_keys = ON")
         return True
 
 
@@ -799,7 +810,7 @@ def assign_port(db_path, node_id, engine_type_id=None, exclude_instance_id=None,
 # ---------------------------------------------------------------------------
 
 def log_action(db_path, instance_id, action, status, detail=None, duration_ms=None):
-    """Append a log entry to the instance_logs table.
+    """Append a log entry to the unified log table.
 
     Args:
         db_path: Path to the SQLite database.
@@ -816,12 +827,44 @@ def log_action(db_path, instance_id, action, status, detail=None, duration_ms=No
     detail_json = json.dumps(detail or {})
     with pool(db_path) as conn:
         cursor = conn.execute(
-            """INSERT INTO instance_logs
-               (instance_id, action, status, detail, duration_ms)
-               VALUES (?, ?, ?, ?, ?)""",
-            (instance_id, action, status, detail_json, duration_ms),
+            """INSERT INTO log_entries
+               (parent_id, job_type, engine_type_name, instance_id, status, actor,
+                created_at, started_at, finished_at, task_stage, stage_playbook,
+                retry_count, max_retries, details_json, duration_ms)
+               VALUES (NULL, ?, NULL, ?, ?, 'system',
+                       strftime('%Y-%m-%dT%H:%M:%SZ','now'), NULL, NULL, NULL, NULL,
+                       0, 1, ?, ?)""",
+            (action, instance_id, status, detail_json, duration_ms or 0),
         )
         return cursor.lastrowid
+
+
+def update_log_status(db_path, log_id, status, detail=None):
+    """Update an existing log entry's status and optional fields.
+
+    Used for synchronous operations that create a 'received' entry first
+    then need to transition it to 'success' or 'failed'.
+
+    Args:
+        db_path: Path to the SQLite database.
+        log_id: Primary key of the log entry to update.
+        status: New status value ('success', 'failed', etc.).
+        detail: Optional dict of updated details (will be JSON-encoded).
+
+    Returns:
+        True if a row was updated, False otherwise.
+    """
+    from db.sqlite import pool
+    detail_json = json.dumps(detail or {})
+    now = "strftime('%Y-%m-%dT%H:%M:%SZ','now')"
+    with pool(db_path) as conn:
+        cursor = conn.execute(
+            f"""UPDATE log_entries
+                SET status=?, details_json=?, finished_at={now}
+                WHERE id=?""",
+            (status, detail_json, log_id),
+        )
+        return cursor.rowcount > 0
 
 
 def get_instance_logs(db_path, instance_id, limit=50, offset=0):
@@ -839,8 +882,12 @@ def get_instance_logs(db_path, instance_id, limit=50, offset=0):
     from db.sqlite import pool
     with pool(db_path) as conn:
         cursor = conn.execute(
-            """SELECT * FROM instance_logs
-               WHERE instance_id = ?
+            """SELECT id, parent_id, job_type, engine_type_name, instance_id, node_id, status, actor,
+                    error_message, created_at, started_at, finished_at, duration_ms,
+                    task_stage, stage_playbook, retry_count, max_retries,
+                    details_json, results_json, playbook_registry_id, playbook_version
+               FROM log_entries
+               WHERE instance_id = ? AND parent_id IS NULL
                ORDER BY created_at DESC
                LIMIT ? OFFSET ?""",
             (instance_id, limit, offset),
@@ -848,9 +895,10 @@ def get_instance_logs(db_path, instance_id, limit=50, offset=0):
         results = []
         for row in cursor.fetchall():
             d = _row_to_dict(row)
-            if d.get("detail"):
+            if d.get("details_json"):
                 try:
-                    d["detail"] = json.loads(d["detail"])
+                    d["detail"] = json.loads(d["details_json"])
+                    del d["details_json"]
                 except (json.JSONDecodeError, TypeError):
                     pass
             results.append(d)
@@ -869,8 +917,9 @@ def cleanup_old_logs(db_path, days=30):
     """
     from db.sqlite import pool
     with pool(db_path) as conn:
+        # Delete all log entries older than N days (both parent and child rows)
         cursor = conn.execute(
-            "DELETE FROM instance_logs WHERE created_at < datetime('now', ?)",
+            "DELETE FROM log_entries WHERE created_at < datetime('now', ?)",
             (f"-{days} days",),
         )
         return cursor.rowcount

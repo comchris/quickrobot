@@ -9,9 +9,7 @@
     <input type="text" name="q" placeholder="Search..." value="{{ request.args.get('q', '') }}"
             style="padding:4px 10px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;" />
     <button type="submit" class="btn btn-primary" style="padding:4px 10px;font-size:0.85em;">Search</button>
-   {% if request.args.get('q') or request.args.get('engine') or request.args.get('draft_filter') %}
-     <button id="clear-filter-btn" class="btn btn-secondary" style="padding:4px 10px;font-size:0.85em;">Clear</button>
-     {% endif %}
+    <button id="clear-filter-btn" class="btn btn-secondary" style="padding:4px 10px;font-size:0.85em;">Clear</button>
   </form>
   <div style="display:flex;gap:6px;align-items:center;">
     <label style="font-size:0.8em;color:#666;">Show:</label>
@@ -23,7 +21,7 @@
    <div style="display:flex;gap:6px;align-items:center;margin-left:auto;">
     <label style="font-size:0.8em;color:#666;">Scan host:</label>
     <select id="scan-node" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
-      {% for n in nodes %}<option value="{{ n.id }}">{{ n.name }}</option>{% endfor %}
+      {% for n in nodes %}<option value="{{ n.id }}" data-path="{{ n.model_base_path or '/mnt/llama/gguf/models' }}">{{ n.name }}</option>{% endfor %}
     </select>
     <button class="btn btn-success" id="scan-btn" style="padding:4px 10px;font-size:0.85em;">Scan</button>
    <button class="btn btn-secondary" id="clear-highlight-btn" style="padding:4px 10px;font-size:0.85em;display:none;">Clear highlights</button>
@@ -375,26 +373,32 @@ function _fmtDraft(val) {
 
   loadModels();
 
-  // Clear draft_filter when search query is empty (on form submit)
-  var _ff = document.getElementById('filter-form');
-  if (_ff) {
-    _ff.addEventListener('submit', function(e) {
-      var qInput = document.querySelector('[name="q"]');
-      var dfInput = document.querySelector('[name="draft_filter"]');
-      if (qInput && (!qInput.value || !qInput.value.trim())) {
-        if (dfInput) dfInput.value = '';
-      }
-    });
-  }
+  // Clear draft_filter on any form submit — search or empty search both reset it
+   var _ff = document.getElementById('filter-form');
+   if (_ff) {
+     _ff.addEventListener('submit', function(e) {
+       var dfInput = document.querySelector('[name="draft_filter"]');
+       if (dfInput) {
+         dfInput.value = '';
+         qrSettings.set('models', 'draft_filter', '');
+       }
+     });
+   }
 
-  // Attach change handler for active/inactive filter select
-   var _filterSel = document.getElementById('filter-inactive');
-  if (_filterSel) {
-    _filterSel.addEventListener('change', function() {
-      qrSettings.set('models', 'filter_inactive', this.value);
-      loadModels();
-    });
-  }
+   // Attach change handler for active/inactive filter select
+    var _filterSel = document.getElementById('filter-inactive');
+   if (_filterSel) {
+     _filterSel.addEventListener('change', function() {
+       qrSettings.set('models', 'filter_inactive', this.value);
+       // Any filter change resets draft_filter too
+       var dfInput = document.querySelector('[name="draft_filter"]');
+       if (dfInput) {
+         dfInput.value = '';
+         qrSettings.set('models', 'draft_filter', '');
+       }
+       loadModels();
+     });
+   }
 
    var ths = document.querySelectorAll('.sortable');
 
@@ -470,17 +474,24 @@ qrApi('/models/clear-all', {method: 'POST', headers: {'Content-Type': 'applicati
   });
   }
 
- // Scan button handler — stores new_model_ids for WebUI highlighting
- var _sbn = document.getElementById('scan-btn');
-   if (_sbn) {
-   _sbn.addEventListener('click', function() {
-     var resultDiv = document.getElementById('scan-result');
-      var countdownDiv = document.getElementById('scan-countdown');
-      var nodeSelect = document.getElementById('scan-node');
-      var nodeId = nodeSelect.value;
-      if (!nodeId) { alert('Please select a host to scan.'); return; }
-      resultDiv.innerHTML = '<span class="badge badge-other">Scanning...</span>';
-  qrApi('/models/scan?node=' + encodeURIComponent(nodeId), {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({})})
+  // Scan button handler — stores new_model_ids for WebUI highlighting
+  var _sbn = document.getElementById('scan-btn');
+    if (_sbn) {
+    _sbn.addEventListener('click', function() {
+      var resultDiv = document.getElementById('scan-result');
+       var countdownDiv = document.getElementById('scan-countdown');
+       var nodeSelect = document.getElementById('scan-node');
+       var nodeId = nodeSelect.value;
+       if (!nodeId) { alert('Please select a host to scan.'); return; }
+       // Build confirmation message with node name and path from select text
+       var selectedOpt = nodeSelect.options[nodeSelect.selectedIndex];
+       var nodeDisplay = selectedOpt ? selectedOpt.textContent : 'Unknown';
+       // Extract model_base_path from option title if present, or use default
+       var scanPath = (selectedOpt && selectedOpt.getAttribute('data-path')) || '/mnt/llama/gguf/models';
+        var confirmMsg = 'This will scan path ' + scanPath + ' on node ' + nodeDisplay + '. Continue?';
+       if (!confirm(confirmMsg)) return;
+       resultDiv.innerHTML = '<span class="badge badge-other">Scanning...</span>';
+   qrApi('/models/scan?node=' + encodeURIComponent(nodeId), {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({})})
           .then(function(data) {
            if (data.status === 'ok') {
              var d = data.data || {};
@@ -490,12 +501,14 @@ qrApi('/models/clear-all', {method: 'POST', headers: {'Content-Type': 'applicati
              var totalFiles = d.total_files_found || 0;
              var modifiedCount = d.modified_model_ids ? d.modified_model_ids.length : 0;
              var draftCount = d.unresolved_draft_ids ? d.unresolved_draft_ids.length : 0;
-             var html = '<p>New: ' + newCount + '</p>' +
-               '<p>Missing: ' + missingCount + '</p>' +
-               '<p>Existing: ' + existingCount + '</p>' +
-               (modifiedCount > 0 ? '<p class="scan-modified-row" style="padding:2px 4px;margin:0;display:inline-block;">Modified on disk: ' + modifiedCount + '</p>' : '') +
-               (draftCount > 0 ? '<p class="scan-unresolved-draft-row" style="padding:2px 4px;margin:0;display:inline-block;">Unresolved draft refs: ' + draftCount + '</p>' : '') +
-               '<p>Files found: ' + totalFiles + '</p>';
+              var nodeInfo = d.target_node_name ? 'Host: ' + d.target_node_name + (d.target_model_path ? ' (' + d.target_model_path + ')' : '') + '<br>' : '';
+              var html = nodeInfo +
+                '<p>New: ' + newCount + '</p>' +
+                '<p>Missing: ' + missingCount + '</p>' +
+                '<p>Existing: ' + existingCount + '</p>' +
+                (modifiedCount > 0 ? '<p class="scan-modified-row" style="padding:2px 4px;margin:0;display:inline-block;">Modified on disk: ' + modifiedCount + '</p>' : '') +
+                (draftCount > 0 ? '<p class="scan-unresolved-draft-row" style="padding:2px 4px;margin:0;display:inline-block;">Unresolved draft refs: ' + draftCount + '</p>' : '') +
+                '<p>Files found: ' + totalFiles + '</p>';
              resultDiv.innerHTML = html;
              // Store model IDs for highlighting after reload
              if (d.new_model_ids && d.new_model_ids.length > 0) {

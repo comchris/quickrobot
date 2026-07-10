@@ -26,7 +26,7 @@ from lib.lib_constants import DEFAULT_ANSIBLE_USER
 
 CAPABILITIES = {
     "name": "llama_server",
-    "display_name": "LLAMA.cpp",
+    "display_name": "llama.cpp server",
     "supports_models": True,
     "supports_presets": True,
     "max_instances": 99,
@@ -36,6 +36,35 @@ CAPABILITIES = {
         {"path": "/engines/llama_server/presets", "label": "Presets", "order": 2},
         {"path": "/engines/llama_server/models", "label": "Models", "order": 3},
     ],
+    # --- engine config defaults (SSOT — replaces seed file INSERTs) ---
+    "config_defaults": {
+        "LLAMA_ARG_FIT": ("off", "Fit mode off for production (on=enable fit)"),
+        "LLAMA_ARG_HOST": ("0.0.0.0", "Host to bind llama-server (0.0.0.0=all interfaces)"),
+        "LLAMA_ARG_MMAP": ("false", "Memory map models"),
+        "LLAMA_ARG_MODELS_DIR": ("", "Model directory for router mode — preset 1 (no model ID) uses this"),
+        "LLAMA_ARG_PORT": ("8080", "Default port for llama-server instances"),
+        "LLAMA_ARG_SEED": ("1337", "Random seed for sampling (LLAMA_ARG_SEED)"),
+        "LLAMA_ARG_UI": ("true", "Enable llama.cpp built-in Web UI (valid: on/enabled/true/1 or off/disabled/false/0)"),
+        "LLAMA_ARG_UI_MCP_PROXY": ("true", "Enable MCP CORS proxy in Web UI (valid: on/enabled/true/1 or off/disabled/false/0)"),
+        "binary_path": ("/opt/quickrobot/llama.cpp/build/bin/llama-server", "Path to llama-server binary (shared per-node)"),
+        "git_clone_url": ("https://github.com/ggml-org/llama.cpp.git", "Source git repository URL"),
+        "model_root_path": ("/mnt/llama/gguf/models", "Root path for model scan (searches this directory for .gguf files)"),
+        "node_build_dir": ("/opt/quickrobot/llama.cpp/build", "Shared cmake build dir (per-node)"),
+        "node_build_install_depends": ("gcc libssl-dev cmake libvulkan-dev libvulkan1 glslc spirv-headers vulkan-tools libvulkan-dev libvulkan1 glslc spirv-headers", "Additional apt packages for Vulkan support"),
+        "node_build_run_cmd": ("cmake --build build --config Release -j 2", "CMake build command"),
+        "node_build_set_cmd": ("cmake -B build -DGGML_RPC=ON -DGGML_NATIVE=ON -DGGML_CPU=ON -DLLAMA_OPENSSL=ON -DGGML_AVX2=ON -DGGML_VULKAN=ON", "CMake configure command"),
+        "node_git_pull_cmd": ("git pull origin master", "Git pull command for source update"),
+        "node_src_dir": ("/opt/quickrobot/llama.cpp", "Shared llama.cpp source dir (per-node)"),
+        "restart_policy": ("no", "Systemd restart policy"),
+        "skip_build": ("true", "Skip cmake build (use when binary already exists or to pin a version)"),
+        "start_on_boot": ("false", "Enable systemd unit on boot (true/false)"),
+    },
+    "supported_jobs": ["deploy", "restart", "undeploy", "rebuild", "reconfigure"],
+    # env_builder: function name in lib.lib_cluster_env_builder that produces
+    # merged_env + cli_args for config/start stages. Only llama_server and
+    # llama_rpc have these; other engines (iperf3, universal, subprocess) use
+    # their own extra_vars paths and skip the config merge chain.
+    "env_builder": "build_llama_server_env",
 }
 
 
@@ -485,7 +514,7 @@ class LlamaServerEngine(BaseEngine):
 
             # Get recent job status for running builds
             job = conn.execute(
-                "SELECT status FROM jobs WHERE instance_id=? AND status='running' ORDER BY created_at DESC LIMIT 1",
+                "SELECT status FROM log_entries WHERE instance_id=? AND status='running' AND parent_id IS NULL ORDER BY created_at DESC LIMIT 1",
                 (instance_id,),
             ).fetchone()
 

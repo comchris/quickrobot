@@ -17,11 +17,12 @@ AGENTS.md is the source of truth for coding rules. During a session, agents MUST
 ### 1a. No Silent Database Wipe
 **DB creation is automatic** on startup (no `--init` flag needed). If no `.db` file exists, quickrobot creates a fresh database with base schema + seed data — all instances, nodes, ansible actions, build history are lost. Existing DB is backed up first (timestamped copy) before in-place use.
 - Fresh DB creation fires without explicit confirmation when file doesn't exist. This IS the normal behavior — do NOT run `--init` just to "refresh" (it's a no-op now).
-- **--mode dev** = normal operation, playbook verification with warnings on mismatch. Use during development/playbook changes.
-- **--mode dev-update** = update current DB's `playbook_registry` checksums to match disk files, then continue running in prod mode (no longer exits). Does NOT touch seed file or `.quickrobot.env`.
-- Both `dev` and `dev-update` are **development tools** — only run on explicit USER REQUEST, not as automatic pre-flight.
+- **--mode dev** = playbook integrity check with warnings on mismatch. Use during development/playbook changes.
+- **--mode dev-import** = scan disk for new playbooks, register them in DB, then sync all checksums. Run after adding new `.yml`/`.j2` files to `playbooks/`.
+- **--mode dev-update** = sync existing playbook checksums from disk to DB (no registration). Run after editing registered playbooks.
+- All three (`dev`, `dev-import`, `dev-update`) are **development tools** — only run on explicit USER REQUEST, not as automatic pre-flight.
 - **--init is deprecated (no-op).** DB creation is automatic based on file existence: no DB → warn + create fresh; DB exists → backup + reuse in-place.
-- When in doubt about `--mode dev-update`, the semantics are defined in `QUICKROBOT.md` §Seed File — they do not change.
+- When in doubt about mode semantics, see `QUICKROBOT.md` §Development Workflow — they are defined there.
 - **AGENTS.md is protected:** Agents MUST NOT edit `AGENTS.md` directly during a session. Changes go into `AGENTS_new.md`. The user reviews `AGENTS_new.md` and manually replaces `AGENTS.md` before the next session. This prevents rule drift mid-session.
 
 ### 1b. No Force by Default
@@ -202,17 +203,19 @@ After editing any file that supports syntax checking, you MUST run a single-comm
 
 ## 5. Startup & Lifecycle Discipline
 
-### 5a. API Server — tmux Session
-The API runs in a dedicated tmux session (`qr_api`) with explicit socket path (avoids stale `/tmp/tmux-1001` permission issues in this environment). Production deployment uses systemd.
+### 5a. Process Management — tmux Only (Dev) / systemd (Prod)
+**HARD RULE:** Agents MUST NOT start or manage processes using `&` (background) or `nohup`. These are fragile — the shell exits, the process becomes orphaned with no way to capture output or verify state.
 
-**Socket:** `-S /tmp/qr.sock`  
-**Session:** `qr_api`  
-- `remain-on-exit on` — survives process crashes
+- **Development:** Use tmux sessions exclusively. Every long-running process gets a named tmux session.
+- **Production:** systemd unit files handle lifecycle (start/stop/restart/status). Agents use API endpoints → systemd takes over.
 
-**Create session:** `tmux -S /tmp/qr.sock new-session -d -s qr_api`  
-**Check status:** `tmux -S /tmp/qr.sock has-session -t qr_api 2>&1` (exit 0 = exists)  
-**Start:** `tmux -S /tmp/qr.sock send-keys -t qr_api 'cd /CORE/projects/quickrobot && python3 quickrobot.py' C-m`  
-**Stop:** Query PID via `ps aux`, then `kill <PID>`, wait 1s, verify dead.
+**API Server — tmux Session (`qr_api`)**
+Socket: `-S /tmp/qr.sock`. Session: `qr_api`. `remain-on-exit on` — survives process crashes.
+
+Create session: `tmux -S /tmp/qr.sock new-session -d -s qr_api`  
+Check status: `tmux -S /tmp/qr.sock has-session -t qr_api 2>&1` (exit 0 = exists)  
+Start: `tmux -S /tmp/qr.sock send-keys -t qr_api 'cd /CORE/projects/quickrobot && python3 quickrobot.py' C-m`  
+Stop: Query PID via `ps aux`, then `kill <PID>`, wait 1s, verify dead.
 
 **Reading output:** Use `-S -` to scrape full scrollback buffer, not just visible screen:
 ```bash
@@ -276,6 +279,22 @@ If any conflict: FATAL messages logged, engine auto-start **aborted** (does NOT 
 
 **Note:** This is startup-only behavior. Explicit `/instances/<id>/start` and `/instances/<id>/restart_system` endpoints use the existing DB PID check logic (unchanged).
 
+### 5g. Logging Discipline
+All system engines write to dedicated log files in `logs/`:
+| Engine | Log File | Handler |
+|--------|----------|---------|
+| API (werkzeug) | stdout (tmux captures) | Flask werkzeug logger |
+| WebUI | `logs/webui.log` | File + print() to stderr |
+| MCP | `logs/mcp.log` | File (via subprocess.Popen redirect) + print() to stderr |
+| Scheduler | `logs/scheduler.log` | File (FileHandler) + print() to stderr |
+
+**Rule:** Agents MUST NOT create new `/tmp/...` log files for debugging. All debug output must go through the existing log infrastructure:
+- Python: use `logger.info()` / `logger.warning()` / `logger.error()` on the appropriate logger
+- Shell: use `echo "..."` to stderr (captured by tmux) or append to the engine's log file
+- Existing `/tmp/` debug logs were removed in v0.08 (`/tmp/mcp_debug.log`, `/tmp/preflight_result.txt`, `/tmp/qr_diag.log`)
+
+Log rotation: `rotate_log_if_needed()` truncates files >10MB on engine startup. Verify with `ls -la logs/`.
+
 ---
 
 ## 6. Connection Method Priority
@@ -325,7 +344,7 @@ System-managed instances (IDs 1-4) skip L3 entirely.
 - sqlite CLI is acceptable only for schema inspection (`PRAGMA table_info`), one-shot seed file generation, or when explicitly debugging a DB-level issue.
 
 ### Seed File
-- **Location:** `data/_seed/seed_v007.sql` (relative to project root)
+- **Location:** `data/_seed/seed_v008.sql` (relative to project root)
 - **Format:** `INSERT OR REPLACE` statements — fully idempotent
 - **Verification:** `.quickrobot.env` keys `QUICKROBOT_SEED_CHECKSUM` + `QUICKROBOT_SEED_FILESIZE` are validated on fresh DB creation (automatic, no `--init` flag needed).
 - After any schema change: seed file must be regenerated and checksum updated in `.quickrobot.env`
@@ -531,3 +550,19 @@ B) Simply reset the DB state directly (since WebUI runs on the same host), OR
 C) Just be visual indicators until the user approves adding the endpoint
 
 **Current approach for v0.07:** Add UI buttons as placeholders (visual only or direct DB manipulation) until the user explicitly authorizes new API endpoints.
+
+---
+
+### Development Gotchas & Learnings
+
+A) **Mixed tab/space indentation is invisible but fatal to Python** — Before any multi-line edit on >50-line files, run `cat -A file.py | grep $` to verify pure-space indentation. Tabs look identical to spaces in most editors but cause `IndentationError` at runtime.
+
+B) **Read the ENTIRE function before editing** — For functions >100 lines with structural changes (adding/removing blocks, changing indentation), read the full body first. Incremental edits on large functions accumulate 1-4 space drift that compounds silently until Python errors surface.
+
+C) **`except Exception: pass` hides bugs for months** — Replace ALL blanket `except Exception: pass` with `except Exception as e: logger.debug("... %s", e)` and audit each one. Some may be intentionally silent (document them), but most shouldn't be. The scheduler had a 2-year-old closed-connection bug hidden by this pattern.
+
+D) **SQLite WAL + DEFERRED isolation: reads see transaction snapshots** — When using `with pool()` for multiple operations that include both reads and writes, reads may see stale data from the transaction's snapshot (taken at first query). Use a SEPARATE `pool()` call for reads that need fresh data. This broke the scheduler's interval gate because all iterations saw the same stale `last_state_change` values.
+
+E) **Python heredoc triple-quoted strings preserve THEIR indentation** — In `python3 << 'PYEOF'`, the content of triple-quoted strings keeps the literal indentation from the script itself, not the target file. Use explicit `' ' * N` for known indentation levels in generated code.
+
+F) **Before multi-line edits on >200-line files: verify current indentation** — Run `python3 -c "lines=open('file.py').readlines(); [print(f'{i+1}: {len(l)-len(l.lstrip(\" \"))} | {repr(l[:40])}') for i,l in enumerate(lines[START:END])]"` to see exact indentation of each line before editing.

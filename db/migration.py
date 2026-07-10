@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""quickrobot (v0.07) — Migration runner with idempotent tracking.
+"""quickrobot (v0.08) — Migration runner with idempotent tracking.
 
-Base schema (007_base.sql) is the definitive schema definition — always
+Base schema (008_base.sql) is the definitive schema definition — always
 applied on startup, idempotent via CREATE TABLE IF NOT EXISTS.
 
 Incremental migration files are tracked in applied_migrations table and
@@ -26,12 +26,12 @@ import os
 
 
 # Explicit schema and migration file names — no wildcard discovery
-BASE_SCHEMA_FILE = "007_base.sql"
+BASE_SCHEMA_FILE = "008_base.sql"
 
 # Incremental migration files (applied only once, tracked in DB)
 # Add entries here when schema changes require migration.
 INCREMENTAL_MIGRATIONS = [
-    # All previous migrations (008–013) consolidated into 007_base.sql
+    # All previous migrations (007–013) consolidated into 008_base.sql
     # Add new entries here when future schema changes require migration.
 ]
 

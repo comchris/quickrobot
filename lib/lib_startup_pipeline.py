@@ -51,9 +51,11 @@ def parse_args():
                         help="API server port (overrides .quickrobot.env QUICKROBOT_API_PORT)")
     parser.add_argument("--host", default=None,
                         help="Bind address (overrides .quickrobot.env QUICKROBOT_API_HOST)")
-    mode_help = "Operation mode (default: prod). dev = auto-import playbooks, alert on checksum mismatch (playbook changes). dev-update = sync disk checksums to DB, then continue running. exit = start + spawn engines + exit main (test zombie cleanup)."
+    mode_help = ("Operation mode (default: prod). dev = integrity check only, warn on mismatch. "
+                 "dev-import = scan disk for new playbooks, register + sync checksums. "
+                 "dev-update = sync checksums only. exit = spawn engines + exit main.")
     parser.add_argument("--mode", default="prod",
-                         choices=["dev", "dev-update", "exit"],
+                         choices=["dev", "dev-import", "dev-update", "exit"],
                          help=mode_help)
     return parser.parse_args()
 
@@ -120,13 +122,16 @@ def phase0_mode_flags(args):
     """
     if args.mode == "prod":
         _CONFIG["pb_mode"] = "prod"
-        print("[qr] normal mode: auto-playbook import disabled, strict integrity")
+        print("[qr] normal mode: strict integrity, no auto-registration")
+    elif args.mode == "dev-import":
+        _CONFIG["pb_mode"] = "dev-import"
+        print("[qr] dev-import mode: scan disk, register new playbooks, sync checksums")
     elif args.mode == "dev-update":
         _CONFIG["pb_mode"] = "dev-update"
-        print("[qr] dev-update mode: auto-import enabled, sync checksums on mismatch")
+        print("[qr] dev-update mode: sync existing playbook checksums to DB")
     elif args.mode == "dev":
         _CONFIG["pb_mode"] = "dev"
-        print("[qr] dev mode: auto-import enabled, alert integrity changes")
+        print("[qr] dev mode: integrity check, warn on mismatch")
     elif args.mode == "exit":
         _CONFIG["pb_mode"] = "prod"
         _CONFIG["exit_mode"] = True
@@ -147,38 +152,40 @@ def phase1_config(args):
     # Database path is hardcoded — no CLI override
     _CONFIG["db_path"] = os.path.join(_project_root, "data/quickrobot.db")
 
-    # Use CLI port if explicitly provided, else fall back to .env file value
-    _cli_port = getattr(args, "port", None)
-    if not _cli_port:
-        try:
-            from lib.lib_system_engine import load_env_config as _load_env
-            _env_cfg = _load_env(os.getcwd())
-            _cli_port = _env_cfg.get("QUICKROBOT_API_PORT")
-        except FileNotFoundError:
-            from lib.qr_engine_ids import get_port_default
-            _cli_port = get_port_default(QR_ENGINE_API_NAME)
-    _CONFIG["_last_port"] = int(_cli_port) if _cli_port else (get_port_default(QR_ENGINE_API_NAME) if '_cli_port' in dir() else QR_ENGINE_PORT_DEFAULTS["quickrobot-api"])
-    _CONFIG["api_port"] = _CONFIG["_last_port"]
-
-    # Use CLI host if explicitly provided, else fall back to .env file value
-    _cli_host = getattr(args, "host", None)
-    if not _cli_host:
-        try:
-            from lib.lib_system_engine import load_env_config as _load_env
-            _env_cfg = _load_env(os.getcwd())
-            _cli_host = _env_cfg.get("QUICKROBOT_API_HOST") or QR_DEFAULT_LOCALHOST
-        except FileNotFoundError:
-            _cli_host = QR_DEFAULT_LOCALHOST
-    _CONFIG["host"] = _cli_host
-
-    # Resolve playbook root dir from .env (QUICKROBOT_API_PLAYBOOKDIR)
-    _pb_dir = getattr(args, "playbook_dir", None) or "playbooks/"
+    # Load .env config — REQUIRED for port and host resolution (no silent fallback to SSOT defaults)
     try:
         from lib.lib_system_engine import load_env_config as _load_env
         _env_cfg = _load_env(os.getcwd())
-        _pb_dir = _env_cfg.get("QUICKROBOT_API_PLAYBOOKDIR") or _pb_dir
-    except FileNotFoundError:
-        pass
+    except FileNotFoundError as _env_exc:
+        print(f"[qr] FATAL: { _env_exc }")
+        print("[qr] .quickrobot.env is required for startup. "
+              "Create one with QUICKROBOT_API_HOST and QUICKROBOT_API_PORT, or provide --port/--host CLI args.")
+        sys.exit(1)
+
+    # Use CLI port if explicitly provided, else .env value (required)
+    _cli_port = getattr(args, "port", None)
+    if not _cli_port:
+        _cli_port = _env_cfg.get("QUICKROBOT_API_PORT")
+    if not _cli_port:
+        print("[qr] FATAL: QUICKROBOT_API_PORT is required in .quickrobot.env or via --port CLI arg")
+        sys.exit(1)
+    _CONFIG["_last_port"] = int(_cli_port)
+    _CONFIG["api_port"] = _CONFIG["_last_port"]
+
+    # Use CLI host if explicitly provided, else .env value (required)
+    _cli_host = getattr(args, "host", None)
+    if not _cli_host:
+        _cli_host = _env_cfg.get("QUICKROBOT_API_HOST")
+    if not _cli_host:
+        print("[qr] FATAL: QUICKROBOT_API_HOST is required in .quickrobot.env or via --host CLI arg")
+        sys.exit(1)
+    _CONFIG["host"] = _cli_host
+
+    # Resolve playbook root dir from .env (optional — falls back to "playbooks/" if missing)
+    _pb_dir = getattr(args, "playbook_dir", None) or "playbooks/"
+    _pb_override = _env_cfg.get("QUICKROBOT_API_PLAYBOOKDIR")
+    if _pb_override:
+        _pb_dir = _pb_override
     _CONFIG["playbook_root_dir"] = os.path.normpath(os.path.join(_project_root, _pb_dir))
 
     # Pass bind host and API port to subprocesses via env var
@@ -347,20 +354,37 @@ def _auto_provision_system_instances():
         from db.adapters.nodes import list_nodes as _ln, get_node as _gn, add_node as _an
         existing = _gn(db_path, 1)
         if existing is None:
-            # Resolve real hostname instead of hardcoding "localhost"
+            # New localhost node — pin name="localhost", use real system hostname
             from lib.lib_local_inventory import gather_local_hostname
             actual_host = gather_local_hostname()
-            node_id = _an(db_path, name=actual_host, hostname=actual_host,
+            node_id = _an(db_path, name="localhost", hostname=actual_host,
                           transport="ansible")["id"]
+            print(f"[qr] localhost node created: name=localhost, hostname={actual_host}", flush=True)
         else:
             node_id = 1
-            # Update stale "localhost" name/hostname with real hostname
+            # Always pin name to "localhost"; refresh hostname from system every start
             from lib.lib_local_inventory import gather_local_hostname as _glh
+            from db.adapters.nodes import update_node as _un
             actual_host = _glh()
-            if not existing.get("name") or not existing.get("hostname") or existing.get("name") == "localhost" or existing.get("hostname") == "localhost":
-                from db.adapters.nodes import update_node as _un
-                _un(db_path, 1, name=actual_host, hostname=actual_host)
-                print(f"[qr] localhost node renamed to '{actual_host}'", flush=True)
+            cur_name = existing.get("name") or ""
+            cur_hostname = existing.get("hostname") or ""
+            needs_update = False
+            if cur_name != "localhost":
+                needs_update = True
+            if cur_hostname != actual_host:
+                needs_update = True
+            if needs_update:
+                updates = {}
+                if cur_name != "localhost":
+                    updates["name"] = "localhost"
+                    print(f"[qr] localhost node name pinned: '{cur_name}' -> 'localhost'", flush=True)
+                if cur_hostname != actual_host:
+                    updates["hostname"] = actual_host
+                    old_display = f"'{cur_hostname}'" if cur_hostname else "empty"
+                    print(f"[qr] localhost hostname refreshed: {old_display} -> '{actual_host}'", flush=True)
+                _un(db_path, 1, **updates)
+            else:
+                print(f"[qr] localhost node OK: name=localhost, hostname={actual_host}", flush=True)
 
         # Auto-discover localhost hardware on startup
         try:
@@ -380,6 +404,7 @@ def _auto_provision_system_instances():
             print(f"[qr] localhost inventory gather failed: {exc}", flush=True)
     except Exception:
         node_id = 1
+        actual_host = "localhost"
 
     engine_names = _QR_SYSTEM_NAMES
 
@@ -410,7 +435,7 @@ def _auto_provision_system_instances():
         existing_insts = _li(db_path, engine_type_id=et_id)
         sys_managed = [i for i in existing_insts if i.get("system_managed", 0)]
 
-        # Update transport + restore running state on existing system-managed instances
+        # Update transport + node_hostname + restore running state on existing system-managed instances
         from db.adapters.instances import update_instance as _ui
         changed = False
         for inst in sys_managed:
@@ -418,18 +443,28 @@ def _auto_provision_system_instances():
                 _ui(db_path, inst["id"], transport="ssh")
                 changed = True
                 print(f"Updated system-managed instance {inst['name']} transport to 'ssh'")
-            # Restore running state on startup — respect autostart config for MCP
+            # Always sync node_hostname for system instances — ensures DB is never stale
+            _ui(db_path, inst["id"], node_hostname=actual_host)
+            changed = True
+            # Restore running state on startup — respect autostart config per engine
             if inst.get("state") not in ("running", "starting"):
-                # For MCP: read from .env (default true), DB override if explicitly set via API
+                auto_start_val = True  # default for API/Scheduler (no .env flag)
+                # WebUI: read from .env
+                if eng_name == "quickrobot-webui":
+                    qr_env = _CONFIG.get("qr_env_config", {})
+                    auto_start_val = str(qr_env.get("QUICKROBOT_WEBUI_AUTOSTART", "true")).lower() in ("true", "1")
+                # MCP: read from .env (default true), DB override if explicitly set via API
                 if eng_name == "quickrobot-mcp":
                     qr_env = _CONFIG.get("qr_env_config", {})
                     auto_start_val = str(qr_env.get("QUICKROBOT_MCP_AUTOSTART", "true")).lower() in ("true", "1")
                     db_as = _gec(db_path, et_id, "mcp_autostart") or {}
                     if db_as:
                         auto_start_val = str(db_as.get("value", "false")).lower() in ("true", "1")
-                    if not auto_start_val:
-                        # Don't force MCP to running state — let user start manually
-                        continue
+                # API (eng_name == "quickrobot-api"): always restore (no .env flag)
+                # Scheduler (eng_name == "quickrobot-scheduler"): always restore (no .env flag)
+                if not auto_start_val:
+                    # Don't force engine to running state — let user start manually
+                    continue
                 _ui(db_path, inst["id"], state="running")
                 changed = True
                 print(f"Restored system-managed instance {inst['name']} state to 'running'")
@@ -456,15 +491,16 @@ def _auto_provision_system_instances():
                         conn.execute("DELETE FROM instances WHERE id = ?", (target_id,))
                         cursor = conn.execute(
                             """INSERT INTO instances (id, name, engine_type_id, node_id,
-                               config_override, system_managed, start_on_boot, start_after_deploy, created_at)
-                               VALUES (?, ?, ?, ?, ?, 1, 'false', 0, ?)""",
-                            (target_id, inst_name, et_id, node_id, "{}",
+                               node_hostname, config_override, system_managed, start_on_boot, start_after_deploy, created_at)
+                               VALUES (?, ?, ?, ?, ?, "{}", 1, 'false', 0, ?)""",
+                            (target_id, inst_name, et_id, node_id, actual_host,
                              __import__('datetime').datetime.now(__import__('datetime').timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')),
                         )
                     inst = {"id": target_id, "name": inst_name}
                 else:
                     inst = create_instance(db_path, name=inst_name, engine_type_id=et_id,
-                                   node_id=node_id, system_managed=1, start_on_boot="false")
+                                   node_id=node_id, system_managed=1, start_on_boot="false",
+                                   node_hostname=actual_host)
                 print(f"Auto-provisioned system-managed instance: {inst_name} (ID {inst['id']})")
             except Exception as exc:
                 print(f"Warning: Failed to create system-managed instance {inst_name}: {exc}")
@@ -1020,18 +1056,14 @@ def phase5_init():
     from lib.lib_startup import import_seed_file as _import_seed_file
     _import_seed_file(db_path)
 
-    # 3b) Purge stale ansible_actions (NULL instance_id, older than 24h)
+    # 3b) Purge stale log entries (orphaned, older than 24h)
     try:
         with _pool(db_path) as conn:
-            exists = conn.execute(
-                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='ansible_actions'"
-            ).fetchone()[0]
-            if exists:
-                count = conn.execute(
-                    "DELETE FROM ansible_actions WHERE instance_id IS NULL AND created_at < datetime('now', '-24 hours')"
-                ).rowcount
-                if count:
-                    print(f"[qr] Purged {count} stale ansible_action(s) older than 24h (NULL instance_id)")
+            count = conn.execute(
+                "DELETE FROM log_entries WHERE instance_id IS NULL AND node_id IS NULL AND created_at < datetime('now', '-24 hours')"
+            ).rowcount
+            if count:
+                print(f"[qr] Purged {count} stale log entry/entries older than 24h (no instance/node)")
     except Exception:
         pass  # Non-critical cleanup — table may not exist on fresh DB
 
@@ -1047,46 +1079,6 @@ def phase5_init():
         print("[qr] Engine registry loaded")
     except Exception as exc:
         print(f"[qr] WARNING: engine registry load failed: {exc}")
-
-    # Fix: seed iperf3 engine_configs if missing (old seed used wrong engine_type_id)
-    try:
-        from db.adapters.configs import update_engine_config as _uec
-        from db.sqlite import pool as _pool
-        with _pool(db_path) as conn:
-            iperf3_et = conn.execute(
-                "SELECT id FROM engine_types WHERE name='iperf3' LIMIT 1"
-            ).fetchone()
-            if iperf3_et:
-                iperf3_id = iperf3_et["id"]
-                # Check if any configs exist for iperf3
-                has_configs = conn.execute(
-                    "SELECT COUNT(*) FROM engine_configs WHERE engine_type_id=?", (iperf3_id,)
-                ).fetchone()[0]
-                if has_configs == 0:
-                    _uec(db_path, iperf3_id, "base_port", "9900", "Base port for iperf3 instance allocation")
-                    _uec(db_path, iperf3_id, "restart_policy", "no", "Systemd restart policy")
-                    _uec(db_path, iperf3_id, "start_on_boot", "false", "Enable on boot")
-                    _uec(db_path, iperf3_id, "polling_interval_local_sec", "10", "Local polling interval (sec)")
-                    _uec(db_path, iperf3_id, "polling_interval_remote_sec", "600", "Remote polling interval (sec)")
-                    print("[qr] Seeded iperf3 engine_configs")
-    except Exception as exc:
-        print(f"[qr] WARNING: iperf3 config seeding failed: {exc}")
-
-    # Seed start_on_boot for universal and subprocess engines (if not already present)
-    try:
-        with _pool(db_path) as conn:
-            for et_name, sob_desc in [("universal", "Enable systemd unit on boot (true/false)"),
-                                      ("subprocess", "Enable on boot via subprocess recovery (true/false)")]:
-                row = conn.execute("SELECT id FROM engine_types WHERE name=? LIMIT 1", (et_name,)).fetchone()
-                if row:
-                    has_key = conn.execute(
-                        "SELECT COUNT(*) FROM engine_configs WHERE engine_type_id=? AND key='start_on_boot'", (row["id"],)
-                    ).fetchone()[0]
-                    if has_key == 0:
-                        _uec(db_path, row["id"], "start_on_boot", "false", sob_desc)
-                        print(f"[qr] Seeded {et_name} start_on_boot")
-    except Exception as exc:
-        print(f"[qr] WARNING: universal/subprocess config seeding failed: {exc}")
 
     # Seed presets now that engine_types are registered (FK constraint)
     try:
@@ -1237,6 +1229,14 @@ def phase5_init():
     except Exception:
         pass  # non-critical — ping thread is optional
 
+    # Start system + subprocess engine health loop (HC-SYSTEM)
+    # Checks all system-managed and subprocess instance PIDs every 30s
+    try:
+        from lib.lib_system_engine import start_system_health_thread
+        start_system_health_thread()
+    except Exception as _exc:
+        print(f"[qr] WARNING: system health loop failed: {_exc}")
+
     return db_path, qr_env, webui_autostart, mcp_autostart
 
     # Exit mode: print subprocess PIDs and return before Flask loop
@@ -1298,27 +1298,28 @@ def phase7_verify_playbooks():
     """Verify playbook checksums. Mode-dependent: prod=exit on mismatch,
     dev=warn, dev-update=sync+exit.
 
-    For dev-update: scans disk for new playbooks not in DB and registers them
-    before syncing checksums. Uses _CONFIG["playbook_root_dir"] from .env.
+    For dev-import: scans disk for new playbooks not in DB, registers them, then syncs checksums.
+    For dev-update: syncs checksums from disk to DB only (no registration).
+    Uses _CONFIG["playbook_root_dir"] from .env.
     """
     from db.adapters.playbooks import verify_playbook_integrity as _verify_pbi, \
         register_all_core_playbooks as _register_pb
     pb_mode = _CONFIG.get("pb_mode", "prod")
 
-    # dev-update only: register new playbooks from disk before checksum sync
-    if pb_mode == "dev-update":
+    # dev-import: register new playbooks from disk before checksum sync
+    if pb_mode == "dev-import":
         root_dir = _CONFIG.get("playbook_root_dir")
         try:
             count = _register_pb(_CONFIG["db_path"], root_dir)
             if count:
-                print(f"[qr] Registered {count} new playbook(s) from disk (dev-update)")
+                print(f"[qr] Registered {count} new playbook(s) from disk (dev-import)")
         except Exception as exc:
             print(f"[qr] WARNING: playbook registration failed: {exc}")
 
     # project_root is the grandparent of playbooks/ dir
     _project_root = os.path.dirname(_CONFIG.get("playbook_root_dir", "playbooks/"))
     _verify_pbi(_CONFIG["db_path"], _project_root, mode=pb_mode,
-                exit_on_update=(pb_mode == "dev-update"))
+                exit_on_update=(pb_mode in ("dev-import", "dev-update")))
 
 
 def phase5a_zombie_cleanup():
@@ -1332,18 +1333,18 @@ def phase5a_zombie_cleanup():
     try:
         with pool(_CONFIG["db_path"]) as conn:
             rows = conn.execute(
-                "SELECT id FROM qr_actions WHERE status='running' "
+                "SELECT id FROM log_entries WHERE status='running' AND parent_id IS NULL "
                 "AND created_at < datetime('now', '-2 hours')"
             ).fetchall()
             if rows:
                 for row in rows:
                     conn.execute(
-                        "UPDATE qr_actions SET status='error', "
-                        "details=json_set(details, '$.reason', 'stale_action_timeout'), "
+                        "UPDATE log_entries SET status='error', "
+                        "error_message='stale_action_timeout', "
                         "finished_at=? WHERE id=?",
                         (utcnow_str(), row["id"])
                     )
-                print(f"[qr] Cleaned {len(rows)} zombie qr_action(s)")
+                print(f"[qr] Cleaned {len(rows)} zombie log entry/entries")
     except Exception as exc:
         print(f"[qr] WARNING: zombie cleanup failed: {exc}")
 

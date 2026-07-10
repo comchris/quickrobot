@@ -49,7 +49,12 @@ class MergeError(Exception):
 
 
 def _clean_model_val(val):
-    """Clean a model path value — strip whitespace, skip placeholders."""
+    """Clean a model path value — strip whitespace, skip placeholders.
+    
+    Values like "none", "yes", "no", "true", "false" are treated as path placeholders
+    and will be removed. GPU device names like "none" (for no-GPU mode) are handled
+    at the override split layer so they land in env, not model.
+    """
     if val is None:
         return None
     s = str(val).strip()
@@ -395,7 +400,7 @@ def _build_chain(conn, engine_type_id, preset_id, inst_config_override,
 
             preset_metadata = {}
             if preset_gpu:
-                preset_env["LLAMA_ARG_DEVICE"] = preset_gpu
+                preset_env["qr_cluster_gpu_override"] = preset_gpu
                 preset_metadata["gpu_device"] = preset_gpu
 
             chain.append(ConfigLevel(3, "preset_template",
@@ -416,15 +421,24 @@ def _build_chain(conn, engine_type_id, preset_id, inst_config_override,
         has_flat_override = isinstance(override_raw, dict) and len(override_raw) > 0
 
         if has_structured_override:
-            ov_env = override_raw.get("env") or {}
+            ov_env = dict(override_raw.get("env") or {})
             ov_cli = list(override_raw.get("cli_opts") or [])
             ov_model = override_raw.get("model") or {}
+            # GPU override aliases at top-level of config_override — merge into env
+            for alias in ("gpu_override", "device", "qr_cluster_gpu_override"):
+                if alias in override_raw and override_raw[alias] is not None:
+                    ov_env["qr_cluster_gpu_override"] = override_raw[alias]
         elif supports_models and has_flat_override:
             # Legacy flat override for model engines: split into env (LLAMA_ARG_* keys) and model (other keys)
+            # NOTE: qr_cluster_gpu_override goes into env — it's a GPU device name, not a file path,
+            # so it must NOT end up in the model section where _resolve_model_paths() mangles it.
             ov_env = {}
             ov_model = {}
             for k, v in override_raw.items():
-                if k.startswith("LLAMA_ARG_"):
+                # Normalize gpu_override/device aliases to canonical name for env
+                if k == "gpu_override" or k == "device":
+                    k = "qr_cluster_gpu_override"
+                if k.startswith("LLAMA_ARG_") or k == "qr_cluster_gpu_override":
                     ov_env[k] = v
                 else:
                     wrapped = _wrap_flat_as_model({k: v})
@@ -485,11 +499,17 @@ def _resolve_metadata(conn, engine_type_id, preset_id, inst_config_override):
             if isinstance(preset_raw, dict) and "restart_policy" in preset_raw:
                 restart_policy = preset_raw["restart_policy"]
 
-    # Instance override restart_policy
+    # Instance override restart_policy — check top-level first, then nested env for backward compat
+    # Override ALWAYS wins over engine_configs default (explicit > implicit)
     if inst_config_override:
         override_raw = _parse_config_override(inst_config_override)
-        if isinstance(override_raw, dict) and "restart_policy" in override_raw:
-            restart_policy = override_raw["restart_policy"]
+        if isinstance(override_raw, dict):
+            if "restart_policy" in override_raw:
+                restart_policy = override_raw["restart_policy"]
+            elif "env" in override_raw and isinstance(override_raw.get("env"), dict):
+                rp_env = override_raw["env"].get("restart_policy")
+                if rp_env:
+                    restart_policy = rp_env
 
     # Start_on_boot resolution: config_override > instance column (handled by caller) > engine_configs default
     sob_default = False
@@ -558,10 +578,10 @@ def build_merged_config(db_path, instance_id, node_id=None):
         supports_models = bool(cap_data.get("supports_models", True))
         is_model_engine = supports_models and get_id_by_name(engine_name) != QR_ENGINE_LLAMA_RPC
 
-    # Build chain and merge
-    merged, source_map = _build_config_layers(db_path, instance_id, preset_id,
-                                               inst.get("config_override"),
-                                               supports_models, engine_name)
+    # Build chain and merge (chain object ignored — build_merged_config() only needs merged+map)
+    merged, source_map, _chain = _build_config_layers(db_path, instance_id, preset_id,
+                                                       inst.get("config_override"),
+                                                       supports_models, engine_name)
 
     # Post-merge: Model base path resolution
     merged = _resolve_model_paths(merged, _node_id, db_path, engine_type_id=engine_type_id)
@@ -571,12 +591,18 @@ def build_merged_config(db_path, instance_id, node_id=None):
         restart_policy, sob_default = _resolve_metadata(conn, engine_type_id, preset_id,
                                                          inst.get("config_override"))
 
-    # start_on_boot: config_override > instance column > engine_configs default
+    # start_on_boot: config_override (top-level or env-nested) > instance column > engine_configs default
     start_on_boot = sob_default
     if inst.get("config_override"):
         override_raw = _parse_config_override(inst["config_override"])
-        if isinstance(override_raw, dict) and "start_on_boot" in override_raw:
-            sob_raw = override_raw["start_on_boot"]
+        sob_raw = None
+        if isinstance(override_raw, dict):
+            # Check top-level first, then nested env for backward compat
+            if "start_on_boot" in override_raw:
+                sob_raw = override_raw["start_on_boot"]
+            elif "env" in override_raw and isinstance(override_raw.get("env"), dict):
+                sob_raw = override_raw["env"].get("start_on_boot")
+        if sob_raw is not None:
             if isinstance(sob_raw, bool):
                 start_on_boot = sob_raw
             elif isinstance(sob_raw, str):
@@ -711,6 +737,10 @@ def build_config_layers(db_path, instance_id, node_id=None):
     New function (CONFIG-1 Phase 2) that returns both the merged config
     and a detailed per-layer breakdown for introspection and API exposure.
 
+    Uses _build_config_layers() to build the LayeredMergeChain once, then
+    extracts ConfigLevel objects from the chain — avoids the old pattern of
+    re-querying the DB to rebuild identical layer objects.
+
     Args:
         db_path: Path to SQLite database.
         instance_id: Integer primary key of the instance.
@@ -756,24 +786,30 @@ def build_config_layers(db_path, instance_id, node_id=None):
         engine_name = et_row["name"] if et_row else ""
         supports_models = bool(cap_data.get("supports_models", True))
 
-    # Build chain
-    merged, _source_map = _build_config_layers(db_path, instance_id, preset_id,
-                                                inst.get("config_override"),
-                                                supports_models, engine_name)
+    # Build chain ONCE — returns merged+map+chain in one DB round-trip per layer source
+    merged, _source_map, chain = _build_config_layers(db_path, instance_id, preset_id,
+                                                       inst.get("config_override"),
+                                                       supports_models, engine_name)
 
     # Post-merge: Model base path resolution
     merged = _resolve_model_paths(merged, _node_id, db_path, engine_type_id=engine_type_id)
 
-    # Metadata
+    # Metadata (single additional query)
     with pool(db_path) as conn:
         restart_policy, sob_default = _resolve_metadata(conn, engine_type_id, preset_id,
-                                                         inst.get("config_override"))
+                                                           inst.get("config_override"))
 
     start_on_boot = sob_default
     if inst.get("config_override"):
         override_raw = _parse_config_override(inst["config_override"])
-        if isinstance(override_raw, dict) and "start_on_boot" in override_raw:
-            sob_raw = override_raw["start_on_boot"]
+        sob_raw = None
+        if isinstance(override_raw, dict):
+            # Check top-level first, then nested env for backward compat
+            if "start_on_boot" in override_raw:
+                sob_raw = override_raw["start_on_boot"]
+            elif "env" in override_raw and isinstance(override_raw.get("env"), dict):
+                sob_raw = override_raw["env"].get("start_on_boot")
+        if sob_raw is not None:
             if isinstance(sob_raw, bool):
                 start_on_boot = sob_raw
             elif isinstance(sob_raw, str):
@@ -781,123 +817,18 @@ def build_config_layers(db_path, instance_id, node_id=None):
             else:
                 start_on_boot = bool(int(sob_raw))
 
+    # Extract layers from chain instead of re-querying DB
+    # Group ConfigLevel objects by source name for introspection
     layers_dict = {}
-
-    # Rebuild layer objects for introspection
-    with pool(db_path) as conn:
-        # L1: engine_defaults
-        ec_rows = conn.execute(
-            "SELECT key, value FROM engine_configs WHERE engine_type_id = ?",
-            (engine_type_id,),
-        ).fetchall()
-        if ec_rows:
-            layer1_env = {r[0]: r[1] for r in ec_rows}
-            layers_dict["engine_default"] = ConfigLevel(1, "engine_configs", env_vars=layer1_env)
-
-        # L2+L3: model + preset
-        if preset_id is not None:
-            preset_row = conn.execute(
-                "SELECT config_template, gpu_device, model_id FROM engine_presets WHERE id = ?",
-                (preset_id,),
-            ).fetchone()
-
-            model_cl = None
-            preset_cl = None
-
-            if preset_row and preset_row["model_id"]:
-                model_row = conn.execute(
-                    "SELECT model_params, model_path, mmproj_path, draft_model_path "
-                    "FROM engine_models WHERE id = ?",
-                    (preset_row["model_id"],),
-                ).fetchone()
-                if model_row and model_row[0]:
-                    model_params = json.loads(model_row[0])
-                    if isinstance(model_params, dict):
-                        wrapped = _wrap_flat_as_model(model_params)
-                        # Separate LLAMA_ARG_* keys (env) from model keys
-                        m_env = {}
-                        m_model = {}
-                        for k, v in wrapped.items():
-                            if k.startswith("LLAMA_ARG_"):
-                                m_env[k] = v
-                            else:
-                                m_model[k] = v
-
-                        # Add path keys
-                        draft_val = _clean_model_val(model_row[3])
-                        path_keys = {
-                            1: ("LLAMA_ARG_MODEL", "model"),
-                            2: ("LLAMA_ARG_MMPROJ", "mmproj_path"),
-                            3: ("LLAMA_ARG_SPEC_DRAFT_MODEL", "draft_model_path"),
-                        }
-                        for idx, (env_key, model_key) in path_keys.items():
-                            val = draft_val if idx == 3 else _clean_model_val(model_row[idx])
-                            if val:
-                                m_env[env_key] = val
-                                m_model[model_key] = val
-
-                        if m_env or m_model:
-                            model_cl = ConfigLevel(2, "model_definition",
-                                                   env_vars=m_env, model_params=m_model)
-                            layers_dict["model_definition"] = model_cl
-
-            if preset_row and preset_row[0]:
-                preset_raw = json.loads(preset_row[0])
-                is_structured = any(k in preset_raw for k in ("env", "cli_opts", "model"))
-                if is_structured:
-                    p_env = preset_raw.get("env") or {}
-                    p_cli = list(preset_raw.get("cli_opts") or [])
-                    p_model = preset_raw.get("model") or {}
-                else:
-                    if supports_models:
-                        p_model = _wrap_flat_as_model(preset_raw)
-                        p_env = {}
-                        p_cli = []
-                    else:
-                        p_env = preset_raw or {}
-                        p_model = {}
-                        p_cli = []
-
-                cleaned = _clean_model_dict(p_model)
-                meta = {}
-                if preset_row["gpu_device"]:
-                    p_env["LLAMA_ARG_DEVICE"] = preset_row["gpu_device"]
-                    meta["gpu_device"] = preset_row["gpu_device"]
-
-                preset_cl = ConfigLevel(3, "preset_template",
-                                        env_vars=p_env, cli_opts=p_cli,
-                                        model_params=cleaned, metadata=meta)
-                layers_dict["preset_template"] = preset_cl
-
-        # L5: instance_override
-        if inst.get("config_override"):
-            override_raw = _parse_config_override(inst["config_override"])
-            if isinstance(override_raw, dict) and len(override_raw) > 0:
-                has_structured = any(k in override_raw for k in ("env", "cli_opts", "model"))
-                if has_structured:
-                    ov_env = override_raw.get("env") or {}
-                    ov_cli = list(override_raw.get("cli_opts") or [])
-                    ov_model = override_raw.get("model") or {}
-                elif supports_models:
-                    ov_env = {}
-                    ov_model = {}
-                    for k, v in override_raw.items():
-                        if k.startswith("LLAMA_ARG_"):
-                            ov_env[k] = v
-                        else:
-                            wrapped = _wrap_flat_as_model({k: v})
-                            ov_model.update(wrapped)
-                    ov_cli = []
-                else:
-                    ov_env = override_raw
-                    ov_model = {}
-                    ov_cli = []
-
-                cleaned_ov = _clean_model_dict(ov_model)
-                layers_dict["instance_override"] = ConfigLevel(5, "instance_override",
-                                                                env_vars=ov_env,
-                                                                cli_opts=ov_cli,
-                                                                model_params=cleaned_ov)
+    for layer in chain._layers:
+        if layer.source == "engine_configs":
+            layers_dict["engine_default"] = layer
+        elif layer.source == "model_definition":
+            layers_dict["model_definition"] = layer
+        elif layer.source == "preset_template":
+            layers_dict["preset_template"] = layer
+        elif layer.source == "instance_override":
+            layers_dict["instance_override"] = layer
 
     result = {
         "env": merged["env"],
@@ -928,7 +859,9 @@ def _build_config_layers(db_path, instance_id, preset_id, inst_config_override,
         engine_name: Engine name for capabilities check.
 
     Returns:
-        Tuple of (merged_dict, source_map).
+        Tuple of (merged_dict, source_map, chain).
+        chain is the LayeredMergeChain with ConfigLevel objects — used by
+        build_config_layers() to avoid re-querying the DB for layer introspection.
     """
     from db.sqlite import pool
 
@@ -949,7 +882,7 @@ def _build_config_layers(db_path, instance_id, preset_id, inst_config_override,
                              inst_config_override, supports_models, engine_name)
 
     merged, source_map = chain.get_merged()
-    return merged, source_map
+    return merged, source_map, chain
 
 
 # ---------------------------------------------------------------------------
@@ -981,7 +914,9 @@ def _wrap_flat_as_model(flat_dict):
         "model_path": "LLAMA_ARG_MODEL",
         "mmproj": "LLAMA_ARG_MMPROJ",
         "draft": "LLAMA_ARG_SPEC_DRAFT_MODEL",
-        "device": "LLAMA_ARG_DEVICE",
+        "device": "qr_cluster_gpu_override",
+        "gpu_override": "qr_cluster_gpu_override",
+        "qr_cluster_gpu_override": "qr_cluster_gpu_override",
         "split_mode": "LLAMA_ARG_SPLIT_MODE",
     }
 

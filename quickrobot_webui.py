@@ -51,6 +51,25 @@ from lib.qr_engine_ids import (
     get_id_by_name, is_llamacpp_engine,
 )
 
+# Source .quickrobot.env into os.environ (same pattern as quickrobot.py entry point)
+# so this process inherits PYTHONPYCACHEPREFIX and other env settings from the shell.
+_env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".quickrobot.env")
+if os.path.isfile(_env_file):
+    with open(_env_file, "r") as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if not _line or _line.startswith("#"):
+                continue
+            if "=" not in _line:
+                continue
+            _k, _, _v = _line.partition("=")
+            _k = _k.strip()
+            _v = _v.strip()
+            if len(_v) >= 2 and ((_v[0] == '"' and _v[-1] == '"') or (_v[0] == "'" and _v[-1] == "'")):
+                _v = _v[1:-1]
+            os.environ[_k] = _v
+del _f, _line, _k, _v, _env_file
+
 # Root guard — same as main process, refuse to run as root
 if os.getuid() == 0:
     print("this robot won't run as root", file=sys.stderr)
@@ -103,6 +122,8 @@ def utility_processor():
          node_status_badge=node_status_badge,
          system_badge=system_badge,
          gpu_device_badge=gpu_device_badge,
+         action_class_map=action_class_map,
+         action_help_text=action_help_text,
          version=VERSION,
          tz_name=tz_name,
          qr_is_dev=is_dev,
@@ -372,10 +393,9 @@ BASE_LAYOUT = """\
     <li><a href="/webui/" {dashboard}>Dashboard</a></li>
     <li><a href="/webui/hosts" {hosts}>Hosts</a></li>
     {engines_nav}
-    <li><a href="/webui/instances" {instances}>Instances</a></li>
-    <li><a href="/webui/ansible-logs" {logs}>Ansible Logs</a></li>
-    <li><a href="{{ tasks_href }}" {tasks}>Running Tasks</a></li>
-  </ul>
+     <li><a href="/webui/instances" {instances}>Instances</a></li>
+     <li><a href="/webui/logs" {logs}>Logs</a></li>
+   </ul>
 </nav>
 <main>
 {content}
@@ -528,12 +548,9 @@ def render_nav(active, engine_types=None):
     Returns:
         tuple of (nav_dict, engines_nav_data) where engines_nav_data is a
         list of section dicts {header, items} for use in Jinja2 templates.
-    """
-    pages = ["dashboard", "hosts", "instances", "models", "logs", "tasks", "engines"]
+     """
+    pages = ["dashboard", "hosts", "instances", "models", "logs", "engines"]
     nav = {p: ' class="active"' if p == active else "" for p in pages}
-    # Preserve query params on Tasks nav link so filters persist across navigation
-    _qs = request.query_string.decode() if request.query_string else ""
-    nav["tasks_href"] = "/webui/qr-tasks" + ("?" + _qs if _qs else "")
 
     # Build engine sections: 3 groups (LLAMA.cpp, Misc, System)
     llama_section = {"header": "LLAMA.cpp", "items": []}
@@ -588,14 +605,11 @@ def render_nav(active, engine_types=None):
     if "llama_rpc" in [e.get("name") for e in engine_types or []]:
         llama_section["items"].append('<li><a href="/webui/rpc">RPC</a></li>')
 
-    # Static system nav items (Tasks before Playbooks)
-    _tasks_qs = request.query_string.decode() if request.query_string else ""
-    _tasks_href = "/webui/qr-tasks" + ("?" + _tasks_qs if _tasks_qs else "")
-    system_section["items"].append(f'<li><a href="{_tasks_href}">Tasks</a></li>')
+    # Static system nav items
     if "quickrobot-api" in [e.get("name") for e in engine_types or []] or \
-       "quickrobot-webui" in [e.get("name") for e in engine_types or []] or \
-       "quickrobot-mcp" in [e.get("name") for e in engine_types or []]:
-        system_section["items"].append('<li><a href="/webui/playbooks">Playbooks</a></li>')
+        "quickrobot-webui" in [e.get("name") for e in engine_types or []] or \
+        "quickrobot-mcp" in [e.get("name") for e in engine_types or []]:
+         system_section["items"].append('<li><a href="/webui/playbooks">Playbooks</a></li>')
 
     engines_nav_data = []
     for s in [llama_section, misc_section, system_section]:
@@ -647,6 +661,37 @@ def status_badge(state):
         return Markup(f'<span class="badge {cls}">{label}</span>')
     # Unknown state — fall back to generic badge
     return Markup(f'<span class="badge badge-other">{state}</span>')
+
+
+# Action button rendering helpers for Jinja2 pre-rendering
+
+_ACTION_CLASS_MAP = {
+    "stop": "danger", "undeploy": "danger", "delete": "danger",
+    "restart": "primary", "reconfigure": "primary",
+    "start": "success", "deploy": "success", "rebuild": "success",
+    "restart-system": "primary",
+}
+
+
+def action_class_map(action_name):
+    """Return CSS class for an action button name."""
+    return _ACTION_CLASS_MAP.get(action_name, "primary")
+
+
+_ACTION_HELP_TEXT = {
+    "deploy": "Deploy instance — full staged chain (preflight, deps, source, compile, config, start)",
+    "undeploy": "Undeploy instance — stop service, remove systemd unit and files",
+    "start": "Start the service using its existing configuration",
+    "stop": "Stop the running service gracefully",
+    "restart": "Stop and start with current config (no redeploy)",
+    "reconfigure": "Update env file only — fast config change without rebuilding",
+    "rebuild": "Rebuild from source — skip deps, recompile only",
+}
+
+
+def action_help_text(action_name):
+    """Return hover tooltip text for an action button name."""
+    return _ACTION_HELP_TEXT.get(action_name, "")
 
 
 def gpu_device_badge(device):
@@ -1173,9 +1218,8 @@ def webui_instances_new():
     # Active nodes — all engines see these as baseline
     active_nodes = [n for n in nodes_data.get("items", [])
                     if n.get("status") == "active" and n.get("is_active", 1)]
-    # User-instance nodes (excludes node 1 which hosts system-managed instances)
-    user_nodes = [n for n in active_nodes
-                  if n.get("available_for_instances", True)]
+    # All active nodes — node 1 (localhost) available for all engines except subprocess
+    user_nodes = active_nodes
     # Subprocess node — only localhost (id=1), must be is_active
     subprocess_nodes = [n for n in active_nodes if n.get("id") == 1]
 
@@ -1237,8 +1281,8 @@ def webui_node_detail(node_id):
     inst_data = api_get("instances", {"node_id": node_id})
     node_instances = inst_data.get("items", []) if "error" not in inst_data else []
 
-    # Fetch recent ansible_actions for this node
-    actions_data = api_get("ansible_actions", {"node_id": node_id, "limit": 20})
+    # Fetch recent log entries for this node (unified)
+    actions_data = api_get("log_entries", {"node_id": node_id, "limit": 20, "parent_id": -1})
     node_actions = actions_data.get("items", []) if "error" not in actions_data else []
 
     nav, engines_nav = render_nav("hosts", get_engine_types())
@@ -2052,8 +2096,8 @@ def webui_engine_presets(engine_type):
         print(f"[qr] DEBUG presets after get: len={len(presets)} first_name={presets[0].get('name','?') if presets else 'empty'}", file=sys.stderr)
         preset_count = len(presets)
 
-        # Engine display name for header
-        engine_display_name = {"llama_server": "llama.cpp", "llama_rpc": "LLAMA.RPC"}.get(engine_type, engine_type)
+        # Engine display name for header — single source from registry
+        engine_display_name = get_display_name(engine_type)
 
         # Count presets per model and build model filter options
         model_counts = {}
@@ -2166,37 +2210,44 @@ def webui_engine_preset_edit(engine_type, preset_id):
 
 
 
-@app.route("/webui/ansible-logs")
-def webui_ansible_logs():
-    """Ansible actions log viewer with sort and limit controls."""
-    action_type = request.args.get("action_type") or None
+@app.route("/webui/logs")
+def webui_logs():
+    """Unified log viewer — job headers with expandable task sub-rows.
+
+    Replaces /webui/ansible-logs and /webui/qr-tasks.
+    Uses unified log_entries API with parent_id=-1 for job headers only.
+    """
+    action_type = request.args.get("job_type") or None  # Unified field name
     status = request.args.get("status") or None
+    instance_id = request.args.get("instance_id", type=int) or None
     limit_val = int(request.args.get("limit", "100")) or 100
 
-    api_params = {"limit": limit_val}
+    api_params = {"limit": limit_val}  # Show all log entries (job headers + tasks)
     if action_type:
-        api_params["action_type"] = action_type
+        api_params["job_type"] = action_type
     if status:
         api_params["status"] = status
+    if instance_id:
+        api_params["instance_id"] = instance_id
 
-    data = api_get("ansible_actions", api_params)
+    data = api_get("log_entries", api_params)
     if "error" in data:
         content = f'<p style="color:#f44336;">API unavailable: {data["error"]}</p>'
         return make_html("Logs", "logs", content, engine_types=get_engine_types())
 
     items = data.get("items", [])
 
-    # Collect unique action types for filter dropdown
-    action_types_sorted = sorted(set(e.get("action_type", "") for e in items if e.get("action_type")))
+    # Collect unique job types for filter dropdown
+    action_types_sorted = sorted(set(e.get("job_type", "") for e in items if e.get("job_type")))
 
     # Pre-format entries for template (extract detail strings, format duration)
-    ansible_entries = []
+    log_entries = []
     for entry in items:
         try:
             e = dict(entry)
             ts = e.get("created_at") or e.get("started_at") or "?"
             e["ts"] = ts
-            action_type_val = e.get("action_type", "?")
+            job_type_val = e.get("job_type", "?")
             status_val = e.get("status", "?")
             duration = e.get("duration_ms", 0)
             if isinstance(duration, (int, float)) and duration >= 0:
@@ -2209,69 +2260,51 @@ def webui_ansible_logs():
             else:
                 e["dur_str"] = "N/A"
 
-            # Build details string
+            # Build details string from error_message or details_json
             detail_str = ""
-            stdout_val = e.get("stdout", "")
-            stderr_val = e.get("stderr", "")
-            results = e.get("results_json")
+            error_msg = e.get("error_message", "")
+            parsed_details = e.get("_parsed_details", {}) or {}
 
             if status_val == "failed":
-                # Priority: stderr > stdout (error prefix) > details JSON error > exit code
-                if stderr_val:
-                    detail_str = stderr_val[:80]
-                elif stdout_val.startswith("[error]"):
-                    # log_ansible_action prepends [error] message when no Ansible output
-                    detail_str = stdout_val.strip()[:200]
-                else:
-                    detail_str = "Exit code: " + str(e.get("exit_code", "?"))
-                    # Try extracting error from details JSON (timeout, exec exceptions)
-                    try:
-                        ts_raw = e.get("task_summary", [])
-                        if isinstance(ts_raw, str):
-                            task_summary = json.loads(ts_raw)
-                        else:
-                            task_summary = ts_raw or []
-                        if isinstance(task_summary, list):
-                            for ts_item in task_summary:
-                                err = ts_item.get("error", "")
-                                if err and "FAIL:" not in err:
-                                    detail_str = "ERROR: " + err[:120]
-                                    break
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-            elif action_type_val == "validate_node" and stdout_val:
-                try:
-                    msg_data = json.loads(stdout_val)
-                    if isinstance(msg_data, dict):
-                        parts = []
-                        if msg_data.get("cpu_cores"): parts.append(f"CPU: {msg_data['cpu_cores']}c")
-                        if msg_data.get("ram_mb"): parts.append(f"RAM: {msg_data['ram_mb']//1024}GB")
-                        if msg_data.get("os"): parts.append(f"OS: {msg_data['os']}")
-                        detail_str = ", ".join(parts) if parts else stdout_val[:80]
-                except (json.JSONDecodeError, TypeError):
-                    detail_str = stdout_val[:80]
-            elif action_type_val == "deploy" and stdout_val:
-                detail_str = stdout_val[:80]
-            elif results and isinstance(results, dict):
-                for play in results.get("plays", []):
-                    for task in play.get("tasks", []):
-                        name = task.get("task", {}).get("name", "")
-                        if task.get("failed"): detail_str += "FAIL:" + name + " "
-                        elif task.get("changed"): detail_str += "CHG:" + name + " "
-                    break
+                if error_msg:
+                    detail_str = error_msg[:200]
+                elif isinstance(parsed_details, dict):
+                    reason = parsed_details.get("reason", "")
+                    if reason:
+                        detail_str = reason[:200]
+                    else:
+                        detail_str = "Exit code: " + str(parsed_details.get("exit_code", "?"))
+            elif job_type_val == "validate_node" and isinstance(parsed_details, dict):
+                msg_data = parsed_details.get("params", {})
+                if isinstance(msg_data, dict):
+                    parts = []
+                    if msg_data.get("cpu_cores"): parts.append(f"CPU: {msg_data['cpu_cores']}c")
+                    if msg_data.get("ram_mb"): parts.append(f"RAM: {msg_data['ram_mb']//1024}GB")
+                    if msg_data.get("os"): parts.append(f"OS: {msg_data['os']}")
+                    detail_str = ", ".join(parts) if parts else "Node validation"
+            elif isinstance(parsed_details, dict) and parsed_details:
+                # Check for failed plays in results
+                parsed_results = e.get("_parsed_results") or {}
+                if isinstance(parsed_results, dict):
+                    for play in parsed_results.get("plays", []):
+                        for task in play.get("tasks", []):
+                            name = task.get("task", {}).get("name", "")
+                            if task.get("failed"): detail_str += "FAIL:" + name + " "
+                            elif task.get("changed"): detail_str += "CHG:" + name + " "
+                        break
             e["detail_str"] = detail_str or "N/A"
-            ansible_entries.append(e)
+            log_entries.append(e)
         except Exception:
             # Malformed entry — keep safe defaults, don't crash the page
             e = dict(entry)
             e.setdefault("ts", "?")
             e.setdefault("dur_str", "N/A")
             e.setdefault("detail_str", "N/A")
-            ansible_entries.append(e)
+            log_entries.append(e)
 
     nav, engines_nav = render_nav("logs", get_engine_types())
     content = render_template('ansible_logs.html',
-        ansible_entries=ansible_entries,
+        ansible_entries=log_entries,
         action_types=action_types_sorted,
         filter_action=action_type,
         filter_status=status,
@@ -2282,44 +2315,37 @@ def webui_ansible_logs():
 
 @app.route("/webui/qr-tasks")
 def webui_qr_tasks():
-     """Running tasks viewer with auto-refresh for in-flight operations.
+    """Unified running tasks viewer — now serves from log_entries.
 
-     Tab 1 (Job Log): RUNNER-1 job/task pipeline via /api/v1/jobs + /tasks
-     Tab 2 (Task Log): Legacy qr_actions framework-level operation log
-     """
-     status_filter = request.args.get("status") or None
-     limit_val = int(request.args.get("limit", "50")) or 50
+    Unified view: job headers with expandable task sub-rows.
+    """
+    status_filter = request.args.get("status") or None
+    limit_val = int(request.args.get("limit", "50")) or 50
 
-     # Fetch legacy qr_actions for Operation Log tab
-     api_params = {"limit": limit_val}
-     if status_filter:
-         api_params["status"] = status_filter
+    # Fetch unified log entries (job headers only)
+    api_params = {"limit": limit_val, "parent_id": -1}  # job headers only
+    if status_filter:
+      api_params["status"] = status_filter
 
-     data = api_get("qr_actions", api_params)
-     if "error" in data:
-         content = f'<p style="color:#f44336;">API unavailable: {data["error"]}</p>'
-         return make_html("Running Tasks", "tasks", content, engine_types=get_engine_types())
+    data = api_get("log_entries", api_params)
+    if "error" in data:
+      content = f'<p style="color:#f44336;">API unavailable: {data["error"]}</p>'
+      return make_html("Running Tasks", "tasks", content, engine_types=get_engine_types())
 
-     items = data.get("items", [])
-     running_count = sum(1 for i in items if i.get("status") == "running")
-     failed_count = sum(1 for i in items if i.get("status") in ("failed", "stuck"))
+    items = data.get("items", [])
+    running_count = sum(1 for i in items if i.get("status") == "running")
+    failed_count = sum(1 for i in items if i.get("status") in ("failed", "stuck"))
 
-     # Fetch RUNNER-1 jobs for Staged Deploys tab
-     jobs_data = api_get("jobs")
-     jobs_running = 0
-     if jobs_data.get("status") == "ok":
-         jobs_running = sum(1 for j in jobs_data.get("items", []) if j.get("status") == "running")
-
-     nav, engines_nav = render_nav("tasks", get_engine_types())
-     content = render_template('qr_tasks.html',
-         qr_entries=items,
-         filter_status=status_filter,
-         filter_limit=limit_val,
-         running_count=running_count,
-         failed_count=failed_count,
-         jobs_running=jobs_running,
-     )
-     return render_template('base.html', title="Running Tasks", engines_nav=engines_nav, **nav, content=Markup(content))
+    nav, engines_nav = render_nav("logs", get_engine_types())
+    content = render_template('qr_tasks.html',
+     qr_entries=items,
+     filter_status=status_filter,
+     filter_limit=limit_val,
+     running_count=running_count,
+     failed_count=failed_count,
+     jobs_running=running_count,  # Same metric — unified view
+    )
+    return render_template('base.html', title="Logs", engines_nav=engines_nav, **nav, content=Markup(content))
 
 
 @app.route("/webui/benchmarks")
@@ -2510,6 +2536,11 @@ def webui_instance_detail_v2(inst_id):
     if isinstance(merged_config, str):
         try: import json as _j; merged_config = _j.loads(merged_config)
         except Exception: merged_config = {}
+    # Prefer merged_config value which reflects the full override chain
+    if merged_config and isinstance(merged_config, dict):
+        sob_mc = merged_config.get("start_on_boot")
+        if sob_mc is not None:
+            start_on_boot = sob_mc
 
     # Unified port resolver — determines the actual port in use after the full merge chain.
     # llama_server/rpc: port_assigned is authoritative (from port allocator); LLAMA_ARG_PORT is fallback.

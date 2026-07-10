@@ -76,7 +76,7 @@ def _parse_playbook_timeout(playbook_path, default=QUICKROBOT_PLAYBOOK_TIMEOUT):
     return default
 
 
-def run_playbook(playbook_path, inventory_path=None, limit=None, extra_vars=None, timeout=3600):
+def run_playbook(playbook_path, inventory_path=None, limit=None, extra_vars=None, timeout=None):
     """Execute an Ansible playbook and return structured output.
 
     Uses dynamic inventory (DB-backed) by default — no stale files possible.
@@ -144,9 +144,16 @@ def run_playbook(playbook_path, inventory_path=None, limit=None, extra_vars=None
     if limit:
         cmd.extend(["--limit", str(limit)])
         # For localhost (ansible_connection=local), run as root since the ansible user
-        # may not have sudoers configured on the local machine
-        if limit == "localhost":
+        # may not have sudoers configured on the local machine. Check via node_id from
+        # extra_vars (set by _build_extra_vars) for robustness — falls back to string
+        # match "localhost" for legacy callers that don't pass node_id.
+        _target_node = (extra_vars or {}).get("node_id")
+        _is_localhost = _target_node == 1 if _target_node is not None else (limit == "localhost")
+        if _is_localhost:
+            # Use sudo -E to preserve environment variables (ANSIBLE_STDOUT_CALLBACK etc.)
+            # Without -E, sudo resets the env and ansible loses its JSON output config.
             cmd.insert(0, "sudo")
+            cmd.insert(1, "-E")
 
     try:
         result = subprocess.run(
@@ -535,7 +542,7 @@ def validate_node(db_path, node_id):
                      "ipv4_address = ?, ipv6_address = ?, "
                      "cpu_cores = ?, ram_mb = ?, os = ?, "
                      "fs_free_gb = ?, "
-                     "updated_at = strftime('%Y-%m-%dT%H:%M:%S','now') "
+                     "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') "
                      "WHERE id = ?",
                      (_json.dumps(ips),                   _json.dumps({
                           "cpu_cores": cpu_cores,
@@ -1326,21 +1333,24 @@ def log_ansible_action(db_path, action_type, node_id, instance_id, playbook,
                 details_dict["reason"] = _error_reason
             details_str = json.dumps(details_dict)
             conn.execute(
-                 """INSERT INTO ansible_actions
-                    (action_type, node_id, instance_id, actor, status, details,
-                     created_at, started_at, finished_at, duration_ms,
-                     playbook_name, task_summary,
-                     playbook_registry_id, playbook_version, host)
-                    VALUES (?, ?, ?, 'system', ?, ?,
-                            ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (action_type, node_id, instance_id,
-                     status_str, details_str,
+                 """INSERT INTO log_entries
+                    (parent_id, job_type, engine_type_name, instance_id, node_id, status, actor,
+                     error_message, created_at, started_at, finished_at, duration_ms,
+                     task_stage, stage_playbook, retry_count, max_retries,
+                     details_json, results_json, playbook_registry_id, playbook_version)
+                    VALUES (NULL, ?, NULL, ?, ?, ?, 'system',
+                            ?, ?, ?, ?, ?,
+                            ?, ?, 0, 1,
+                            ?, ?, ?, ?)""",
+                    (action_type, instance_id, node_id,
+                     status_str, _error_reason or None,
                      created_at, started_at, finished_at,
                      duration_ms if duration_ms and duration_ms > 0 else 0,
-                     playbook,
+                     action_type, playbook,
+                     details_str,
                      json.dumps(results_data) if results_data else "",
-                     pb_registry_id, pb_version, _host),
-                )
+                     pb_registry_id, pb_version),
+            )
         return True
 
     except Exception as _e:

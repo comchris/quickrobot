@@ -49,10 +49,12 @@ def log_qr_action(db_path, action_type, node_id=None, instance_id=None,
     try:
         with pool(db_path) as conn:
             conn.execute(
-                """INSERT INTO qr_actions
-                   (action_type, node_id, instance_id, actor, details, created_at, override)
-                   VALUES (?, ?, ?, ?, ?, ?, 0)""",
-                 (action_type, node_id, instance_id, actor, details_json, created_at),
+                """INSERT INTO log_entries
+                   (parent_id, job_type, engine_type_name, node_id, instance_id, actor,
+                    details_json, created_at, task_stage, stage_playbook, retry_count, max_retries,
+                    status)
+                   VALUES (NULL, ?, NULL, ?, ?, ?, ?, ?, NULL, NULL, 0, 1, 'running')""",
+                  (action_type, node_id, instance_id, actor, details_json, created_at),
             )
         return True
     except Exception:
@@ -88,10 +90,12 @@ def log_qr_override(db_path, action_type, node_id=None, instance_id=None,
     try:
         with pool(db_path) as conn:
             conn.execute(
-                """INSERT INTO qr_actions
-                   (action_type, node_id, instance_id, actor, details, created_at, override)
-                   VALUES (?, ?, ?, ?, ?, ?, 1)""",
-                 (action_type, node_id, instance_id, actor, details_json, created_at),
+                """INSERT INTO log_entries
+                   (parent_id, job_type, engine_type_name, node_id, instance_id, actor,
+                    details_json, created_at, task_stage, stage_playbook, retry_count, max_retries,
+                    status)
+                   VALUES (NULL, ?, NULL, ?, ?, ?, ?, ?, NULL, NULL, 0, 1, 'running')""",
+                  (action_type, node_id, instance_id, actor, details_json, created_at),
             )
         return True
     except Exception:
@@ -124,19 +128,15 @@ def log_qr_task(db_path, action_type, node_id=None, instance_id=None,
     try:
         with pool(db_path) as conn:
             cursor = conn.execute(
-                """INSERT INTO qr_actions
-                   (action_type, node_id, instance_id, actor, details,
-                    created_at, started_at, status, override)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, 'running', 0)""",
+                """INSERT INTO log_entries
+                   (parent_id, job_type, engine_type_name, node_id, instance_id, actor,
+                    details_json, created_at, started_at, task_stage, stage_playbook,
+                    retry_count, max_retries, status, playbook_registry_id)
+                   VALUES (NULL, ?, NULL, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, 1, 'running', ?)""",
                 (action_type, node_id, instance_id, actor,
-                 json.dumps(details), now, now),
+                 json.dumps(details), now, now, playbook_registry_id or None),
             )
             task_id = cursor.lastrowid
-            if playbook_registry_id is not None:
-                conn.execute(
-                    "UPDATE qr_actions SET playbook_registry_id = ? WHERE id = ?",
-                    (playbook_registry_id, task_id),
-                )
             conn.commit()
         return task_id
     except Exception:
@@ -164,9 +164,9 @@ def update_qr_task(db_path, task_id, status, duration_ms=0, finished_at=None):
     try:
         with pool(db_path) as conn:
             conn.execute(
-                """UPDATE qr_actions
+                """UPDATE log_entries
                    SET status = ?, finished_at = ?, duration_ms = ?
-                   WHERE id = ?""",
+                   WHERE id = ? AND parent_id IS NULL""",
                 (status, finished_at, duration_ms, task_id),
             )
             conn.commit()

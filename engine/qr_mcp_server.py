@@ -50,8 +50,10 @@ from pathlib import Path
 
 
 from lib.qr_engine_ids import (
-    QR_DEFAULT_LOCALHOST, QR_FORBIDDEN_HOSTS, QR_ENGINE_LLAMA_SERVER,
+    QR_DEFAULT_LOCALHOST, QR_ENGINE_LLAMA_SERVER, QR_FORBIDDEN_HOSTS,
+    QR_ENGINE_LLAMA_SERVER_NAME,
     QR_MCP_DEFAULT_READS, QR_MCP_DEFAULT_WRITES, QR_MCP_DEFAULT_PROXY,
+    QR_MCP_CONNECT_RETRIES, QR_MCP_CONNECT_DELAY,
 )
 
 from mcp.server.fastmcp import FastMCP
@@ -104,7 +106,10 @@ if not _mcp_host:
 if not _mcp_port_raw:
     raise RuntimeError("MCP server needs QUICKROBOT_MCP_PORT in .quickrobot.env")
 mcp_host_env = _mcp_host
-mcp_port_env = int(_mcp_port_raw)
+try:
+    mcp_port_env = int(_mcp_port_raw)
+except (ValueError, TypeError):
+    raise RuntimeError(f"MCP port must be an integer, got: {repr(_mcp_port_raw)}")
 mcp = FastMCP(
     "QuickrobotAPI",
     host=mcp_host_env,
@@ -113,24 +118,44 @@ mcp = FastMCP(
 )
 
 
-def _api_call(method, path, body=None):
-    """Make an HTTP call to the quickrobot API."""
+def _api_call(method, path, body=None, timeout=None):
+    """Make an HTTP call to the quickrobot API.
+
+    Args:
+        method: HTTP method (GET, POST, PUT, DELETE, PATCH)
+        path: API path (relative to /api/v1)
+        body: JSON body for POST/PUT/PATCH
+        timeout: Request timeout in seconds. Defaults per method:
+                 GET=30s | POST=60s | PUT=60s | DELETE=30s | PATCH=30s
+                 Pass a lower value for fire-and-forget operations.
+    """
     import requests as _requests
     # Normalize: strip leading /api/v1/ so both styles work identically
     path = path.removeprefix("/api/v1").removeprefix("/api/v1/")
     url = f"{API_BASE}{path}"
     headers = {"Content-Type": "application/json"} if body else {}
+
+    # Default timeouts per method (can be overridden via timeout param)
+    _default_timeouts = {
+        "GET": 30,
+        "POST": 60,
+        "PUT": 60,
+        "DELETE": 30,
+        "PATCH": 30,
+    }
+    req_timeout = timeout if timeout is not None else _default_timeouts.get(method.upper(), 30)
+
     try:
         if method == "GET":
-            r = _requests.get(url, headers=headers, timeout=30)
+            r = _requests.get(url, headers=headers, timeout=req_timeout)
         elif method == "POST":
-            r = _requests.post(url, json=body, headers=headers, timeout=60)
+            r = _requests.post(url, json=body, headers=headers, timeout=req_timeout)
         elif method == "PUT":
-            r = _requests.put(url, json=body, headers=headers, timeout=60)
+            r = _requests.put(url, json=body, headers=headers, timeout=req_timeout)
         elif method == "DELETE":
-            r = _requests.delete(url, headers=headers, timeout=30)
+            r = _requests.delete(url, headers=headers, timeout=req_timeout)
         elif method == "PATCH":
-            r = _requests.patch(url, json=body, headers=headers, timeout=30)
+            r = _requests.patch(url, json=body, headers=headers, timeout=req_timeout)
         else:
             return json.dumps({"error": f"Unknown method: {method}"})
         if r.status_code >= 400:
@@ -138,6 +163,13 @@ def _api_call(method, path, body=None):
         return r.text
     except Exception as exc:
         return json.dumps({"error": str(exc)})
+
+
+def _normalize_engine_type(engine_type):
+    """Normalize engine_type param: empty string or whitespace → None (no filter)."""
+    if not engine_type or not str(engine_type).strip():
+        return None
+    return str(engine_type).strip()
 
 
 # ============================================================================
@@ -183,46 +215,58 @@ if ALLOW_READS:
         return _api_call("GET", "/nodes")
 
     @mcp.tool()
-    def list_presets(engine_type: str = "llama_server") -> str:
+    def list_presets(engine_type: str = QR_ENGINE_LLAMA_SERVER_NAME) -> str:
         """List presets with full config_template JSON (env vars, CLI options).
 
         Use list_presets_summary() for selection — 77% less data.
 
         Args:
-            engine_type: Engine type filter (default: llama_server)
+            engine_type: Engine type filter (default: llama_server). Empty string returns all.
         """
-        return _api_call("GET", f"/engine/{engine_type}/presets")
+        _et = _normalize_engine_type(engine_type)
+        if _et is None:
+            return _api_call("GET", "/engine/presets")
+        return _api_call("GET", f"/engine/{_et}/presets")
 
     @mcp.tool()
-    def get_preset(preset_id: int, engine_type: str = "llama_server") -> str:
+    def get_preset(preset_id: int, engine_type: str = QR_ENGINE_LLAMA_SERVER_NAME) -> str:
         """Get full details of a specific preset including config_template JSON.
 
         Args:
             preset_id: Preset ID to look up
-            engine_type: Engine type filter (default: llama_server)
+            engine_type: Engine type filter (default: llama_server). Empty string returns all.
         """
-        return _api_call("GET", f"/engine/{engine_type}/presets/{preset_id}")
+        _et = _normalize_engine_type(engine_type)
+        if _et is None:
+            return _api_call("GET", f"/engine/presets/{preset_id}")
+        return _api_call("GET", f"/engine/{_et}/presets/{preset_id}")
 
     @mcp.tool()
-    def list_models(engine_type: str = "llama_server") -> str:
+    def list_models(engine_type: str = QR_ENGINE_LLAMA_SERVER_NAME) -> str:
         """List models with SHA256 hashes, verification timestamps, and model_params JSON.
 
         Use list_models_summary() for selection — 79% less data.
 
         Args:
-            engine_type: Engine type filter (default: llama_server)
+            engine_type: Engine type filter (default: llama_server). Empty string returns all.
         """
-        return _api_call("GET", f"/engine/{engine_type}/models")
+        _et = _normalize_engine_type(engine_type)
+        if _et is None:
+            return _api_call("GET", "/engine/models")
+        return _api_call("GET", f"/engine/{_et}/models")
 
     @mcp.tool()
-    def get_model(model_id: int, engine_type: str = "llama_server") -> str:
+    def get_model(model_id: int, engine_type: str = QR_ENGINE_LLAMA_SERVER_NAME) -> str:
         """Get full details of a specific model including all fields.
 
         Args:
             model_id: Model ID to look up
-            engine_type: Engine type filter (default: llama_server)
+            engine_type: Engine type filter (default: llama_server). Empty string returns all.
         """
-        return _api_call("GET", f"/engine/{engine_type}/models/{model_id}")
+        _et = _normalize_engine_type(engine_type)
+        if _et is None:
+            return _api_call("GET", f"/engine/models/{model_id}")
+        return _api_call("GET", f"/engine/{_et}/models/{model_id}")
 
     @mcp.tool()
     def list_instances_summary(instance_ids: int | list[int] = None) -> str:
@@ -252,6 +296,8 @@ if ALLOW_READS:
                     "engine_type_name": inst.get("engine_type_name"),
                     "node_hostname": inst.get("node_hostname"),
                     "port_assigned": inst.get("port_assigned"),
+                    "preset_name": inst.get("preset_name"),
+                    "model_name": inst.get("model_name"),
                     "system_managed": inst.get("system_managed", False),
                     "has_custom_config": inst.get("has_custom_config", False),
                     "host_inactive": inst.get("_host_inactive", False),
@@ -285,15 +331,19 @@ if ALLOW_READS:
             return raw
 
     @mcp.tool()
-    def list_presets_summary(engine_type: str = "llama_server") -> str:
+    def list_presets_summary(engine_type: str = QR_ENGINE_LLAMA_SERVER_NAME) -> str:
         """Compact preset list (id, name, category, model_name, gpu_device).
 
-        Prefer for selection — 77% less data than list_presets().
+        Prefer for selection — 77% less data.
 
         Args:
-            engine_type: Engine type filter (default: llama_server)
+            engine_type: Engine type filter (default: llama_server). Empty string returns all.
         """
-        raw = _api_call("GET", f"/engine/{engine_type}/presets")
+        _et = _normalize_engine_type(engine_type)
+        if _et is None:
+            raw = _api_call("GET", "/engine/presets")
+        else:
+            raw = _api_call("GET", f"/engine/{_et}/presets")
         try:
             data = json.loads(raw)
             items = data.get("items", []) if isinstance(data, dict) else []
@@ -311,15 +361,19 @@ if ALLOW_READS:
             return raw
 
     @mcp.tool()
-    def list_models_summary(engine_type: str = "llama_server") -> str:
+    def list_models_summary(engine_type: str = QR_ENGINE_LLAMA_SERVER_NAME) -> str:
         """Compact model list (id, name, path, quantization, size, preset_count, discovered).
 
-        Prefer for selection — 79% less data than list_models().
+        Prefer for selection — 79% less data.
 
         Args:
-            engine_type: Engine type filter (default: llama_server)
+            engine_type: Engine type filter (default: llama_server). Empty string returns all.
         """
-        raw = _api_call("GET", f"/engine/{engine_type}/models")
+        _et = _normalize_engine_type(engine_type)
+        if _et is None:
+            raw = _api_call("GET", "/engine/models")
+        else:
+            raw = _api_call("GET", f"/engine/{_et}/models")
         try:
             data = json.loads(raw)
             items = data.get("items", []) if isinstance(data, dict) else []
@@ -358,7 +412,7 @@ if ALLOW_READS:
         body = {"instance_id": instance_id, "prompt_id": prompt_id}
         if timeout_seconds:
             body["timeout_seconds"] = timeout_seconds
-        return _api_call("POST", "/benchmarks/run", body)
+        return _api_call("POST", "/benchmarks/run", body, timeout=15)
 
     @mcp.tool()
     def list_benchmark_results(instance_ids: int | list[int] = None, limit: int = 50) -> str:
@@ -412,7 +466,8 @@ if ALLOW_WRITES:
         engine_type_id: int = QR_ENGINE_LLAMA_SERVER,
         node_id: int = None,
         preset_id: int = None,
-        config_override: dict = None
+        config_override: dict = None,
+        skip_build: bool = None
     ) -> str:
         """Create a new instance and auto-deploy it.
 
@@ -434,6 +489,9 @@ if ALLOW_WRITES:
             node_id: Target node ID (required for remote engines)
             preset_id: Preset ID to use for initial config
             config_override: Additional config overrides as JSON object
+            skip_build: If true, skip git clone + cmake compile (use existing binary).
+                        If false, full deploy including source+compile.
+                        If None (default), uses engine_configs.skip_build setting.
         """
         body = {"name": name, "engine_type_id": engine_type_id}
         if node_id is not None:
@@ -442,10 +500,16 @@ if ALLOW_WRITES:
             body["preset_id"] = preset_id
         if config_override:
             body["config_override"] = config_override
-        return _api_call("POST", "/instances", body)
+        if skip_build is not None:
+            body["skip_build"] = skip_build
+        return _api_call("POST", "/instances", body, timeout=3)
 
     @mcp.tool()
-    def deploy_instance(instance_id: int, start_after_deploy: bool = False) -> str:
+    def deploy_instance(
+        instance_id: int,
+        start_after_deploy: bool = False,
+        skip_build: bool = None
+    ) -> str:
         """Deploy/redeploy an instance on its target node via the staged playbook chain.
 
         The engine type is determined from the instance record in the DB — no need to specify it.
@@ -459,11 +523,16 @@ if ALLOW_WRITES:
             instance_id: ID of the instance to deploy (non-system-managed only)
             start_after_deploy: If true, auto-start the service after deploy completes (default: false).
                                 Most agents should leave this false and call start_instance() explicitly.
+            skip_build: If true, skip git clone + cmake compile (use existing binary).
+                        If false, full deploy including source+compile.
+                        If None (default), uses engine_configs.skip_build setting.
         """
         body = {}
         if start_after_deploy:
             body["start_after_deploy"] = True
-        return _api_call("POST", f"/instances/{instance_id}/deploy", body or None)
+        if skip_build is not None:
+            body["skip_build"] = skip_build
+        return _api_call("POST", f"/instances/{instance_id}/deploy", body or None, timeout=3)
 
     @mcp.tool()
     def start_instance(instance_id: int) -> str:
@@ -472,10 +541,13 @@ if ALLOW_WRITES:
         Starts the systemd service and initiates model loading (for llama_server).
         For llama_rpc, transitions directly to 'running' state.
 
+        Uses 30s timeout to wait for actual result (success/fail message).
+        If the operation takes longer, poll via list_instances_summary().
+
         Args:
             instance_id: ID of the instance to start
         """
-        return _api_call("POST", f"/instances/{instance_id}/start")
+        return _api_call("POST", f"/instances/{instance_id}/start", timeout=30)
 
     @mcp.tool()
     def stop_instance(instance_id: int) -> str:
@@ -484,10 +556,13 @@ if ALLOW_WRITES:
         Stops the systemd service gracefully. The instance remains in 'stopped' state
         and can be restarted later without re-deploying.
 
+        Uses 30s timeout to wait for actual result (success/fail message).
+        If the operation takes longer, poll via list_instances_summary().
+
         Args:
             instance_id: ID of the instance to stop
         """
-        return _api_call("POST", f"/instances/{instance_id}/stop")
+        return _api_call("POST", f"/instances/{instance_id}/stop", timeout=30)
 
     @mcp.tool()
     def restart_instance(instance_id: int) -> str:
@@ -496,10 +571,13 @@ if ALLOW_WRITES:
         Use when config hasn't changed. If preset or config_override changed, use
         deploy_instance() instead to regenerate env/service files.
 
+        Uses 30s timeout to wait for actual result (success/fail message).
+        If the operation takes longer, poll via list_instances_summary().
+
         Args:
             instance_id: ID of the instance to restart
         """
-        return _api_call("POST", f"/instances/{instance_id}/restart")
+        return _api_call("POST", f"/instances/{instance_id}/restart", timeout=30)
 
     @mcp.tool()
     def change_preset(instance_id: int, preset_id: int, skip_build: bool = True) -> str:
@@ -523,7 +601,7 @@ if ALLOW_WRITES:
         body = {"preset_id": preset_id}
         if not skip_build:
             body["skip_build"] = False
-        return _api_call("PUT", f"/instances/{instance_id}", body)
+        return _api_call("PUT", f"/instances/{instance_id}", body, timeout=3)
 
     @mcp.tool()
     def delete_instance(instance_id: int, force: bool = False) -> str:
@@ -536,8 +614,8 @@ if ALLOW_WRITES:
         """
         path = f"/instances/{instance_id}"
         if force:
-            return _api_call("POST", f"{path}/force-delete")
-        return _api_call("DELETE", path)
+            return _api_call("POST", f"{path}/force-delete", timeout=3)
+        return _api_call("DELETE", path, timeout=3)
 
     @mcp.tool()
     def create_node(
@@ -574,11 +652,17 @@ if ALLOW_WRITES:
             body["ipv4_address"] = ipv4_address
         if model_base_path is not None:
             body["model_base_path"] = model_base_path
-        return _api_call("POST", "/nodes", body)
+        return _api_call("POST", "/nodes", body, timeout=3)
 
     @mcp.tool()
     def delete_node(node_id: int, stop_running: bool = False) -> str:
-        """Delete a node entry. Optionally undeploy attached running instances first.
+        """Delete a node entry. Optional clean undeploy of attached running instances.
+
+        Default behavior (stop_running=False): deletes the node record, leaves
+        instance records in DB as orphans — no cleanup on remote nodes.
+
+        With stop_running=True: triggers remote undeploy chain for all running
+        instances first (fire-and-forget), then deletes the node record.
 
         Args:
             node_id: ID of the node to delete
@@ -587,8 +671,8 @@ if ALLOW_WRITES:
         """
         path = f"/nodes/{node_id}"
         if stop_running:
-            return _api_call("DELETE", f"{path}?stop_running=true")
-        return _api_call("DELETE", path)
+            return _api_call("DELETE", f"{path}?stop_running=true", timeout=3)
+        return _api_call("DELETE", path, timeout=3)
 
     @mcp.tool()
     def discover_node(node_id: int) -> str:
@@ -597,10 +681,13 @@ if ALLOW_WRITES:
         Refreshes CPU, RAM, OS, GPU, and capabilities info from the remote node.
         Useful after hardware changes or network reconfiguration.
 
+        Uses 30s timeout — SSH connection + hardware discovery takes time.
+        Reports SSH failures (wrong IP/port/keys) as error responses.
+
         Args:
             node_id: ID of the node to discover
         """
-        return _api_call("POST", f"/nodes/{node_id}/discover")
+        return _api_call("POST", f"/nodes/{node_id}/discover", timeout=30)
 
     @mcp.tool()
     def toggle_node_active(node_id: int, is_active: bool) -> str:
@@ -614,7 +701,68 @@ if ALLOW_WRITES:
             node_id: ID of the node to toggle
             is_active: true = active (default operations), false = inactive (locked)
         """
-        return _api_call("PUT", f"/nodes/{node_id}/host-status", {"is_active": 1 if is_active else 0})
+        return _api_call("PUT", f"/nodes/{node_id}/host-status", {"is_active": 1 if is_active else 0}, timeout=5)
+
+
+    @mcp.tool()
+    def bind_rpc(instance_id: int, rpc_ids: list[int], split_mode: str = "layer") -> str:
+        """Bind RPC instances to a llama-server instance.
+
+        Pure DB update — bindings take effect on next deploy/restart from the
+        herd page buttons (not automatically on this call).
+
+        Uses 10s timeout — fast DB update + RPC health check.
+
+        Args:
+            instance_id: llama-server instance ID to bind to
+            rpc_ids: List of RPC instance IDs to bind (must be llama_rpc engine type)
+            split_mode: Split mode for tensor distribution: "layer", "tensor", or "row"
+        """
+        body = {"rpc_ids": rpc_ids}
+        if split_mode:
+            body["split_mode"] = split_mode
+        return _api_call("POST", f"/instances/{instance_id}/bind-rpc", body, timeout=10)
+
+    @mcp.tool()
+    def unbind_rpc(instance_id: int, rpc_id: int) -> str:
+        """Remove a single RPC binding from a llama-server instance.
+
+        Pure DB update — bindings take effect on next deploy/restart from the
+        herd page buttons (not automatically on this call).
+
+        Uses 10s timeout — fast DB update.
+
+        Args:
+            instance_id: llama-server instance ID to unbind from
+            rpc_id: RPC instance ID to remove from binding
+        """
+        return _api_call("DELETE", f"/instances/{instance_id}/bind-rpc/{rpc_id}", timeout=10)
+
+    @mcp.tool()
+    def scan_models(engine_type: str = QR_ENGINE_LLAMA_SERVER_NAME, node_id: int = None) -> str:
+        """Scan nodes for GGUF model files.
+
+        Scans all active nodes (or a specific node) for GGUF model files.
+        Results are upserted into the engine_models table.
+
+        Uses 3s timeout — triggers playbook execution in background.
+        Poll results via list_models() to see discovered models.
+
+        Args:
+            engine_type: Engine type filter (default: llama_server). Empty string returns all engines.
+            node_id: Optional single-node target. If None, scans all active nodes.
+        """
+        _et = _normalize_engine_type(engine_type)
+        if _et is None:
+            # Engine-agnostic scan — requires node_id
+            if node_id is None:
+                return json.dumps({"error": "node_id required when engine_type is empty (agnostic mode)"})
+            return _api_call("POST", "/models/scan", {"node": node_id}, timeout=3)
+        # Engine-specific scan via playbook
+        params = f"?engine_type={_et}"
+        if node_id is not None:
+            params += f"&node_id={node_id}"
+        return _api_call("POST", f"/engine/{_et}/models/scan{params}", timeout=3)
 
 
 # ============================================================================
@@ -749,8 +897,8 @@ if __name__ == "__main__":
     # === Startup API connectivity validation with retries ===
     import time as _time_mod
     import requests as _requests_lib
-    _api_connect_retries = 8  # Startup retries (~24s total for Flask init time)
-    _api_connect_delay = 3  # seconds between retries
+    _api_connect_retries = int(os.getenv("QUICKROBOT_MCP_CONNECT_RETRIES", str(QR_MCP_CONNECT_RETRIES)))
+    _api_connect_delay = int(os.getenv("QUICKROBOT_MCP_CONNECT_DELAY", str(QR_MCP_CONNECT_DELAY)))
     _api_url = f"{_api_base}/app/status"
     
     print(f"[mcp] Checking API connectivity at {_api_url}...", flush=True)

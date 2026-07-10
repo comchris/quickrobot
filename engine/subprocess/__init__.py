@@ -30,10 +30,11 @@ from engine.base import BaseEngine
 
 CAPABILITIES = {
     "name": "subprocess",
-    "display_name": "Subprocess",
+    "display_name": "local subprocess",
     "supports_models": False,
     "supports_presets": False,
     "max_instances": 99,
+    "supported_jobs": ["deploy", "undeploy", "restart"],
 }
 
 

@@ -4,8 +4,9 @@
 # @timeout: 60
 # deploy_config_env.yml — Write engine-specific env file from template
 # Runs as SSH user (no become). Directory creation is defensive idempotent.
-- hosts: "{{ inventory_host | default('localhost') }}"
-  # No become — SSH user owns /etc/quickrobot/{unit_name} from service playbook
+- hosts: "{{ inventory_host }}"
+  become: yes
+  become_user: "{{ remote_node_user  }}"
   gather_facts: no
 
   vars:
@@ -28,11 +29,11 @@
 
     - name: Build CLI args string (CONFIG-1)
       set_fact:
-        cli_args_joined: "{{ merged_cli_opts | default('') }}"
+        cli_args_joined: "{{ merged_cli_opts }}"
 
     - name: Select env template from engine type
       set_fact:
-        env_template: "{{ _qr_template_map[engine_type].env if engine_type in _qr_template_map else _qr_template_map['llama_server'].env }}"
+        env_template: "{{ _qr_template_map[engine_type].env }}"
 
     - name: Write environment file from template
       template:
@@ -48,5 +49,5 @@
       ansible.builtin.include_tasks: "verify_file_permissions.yml"
       vars:
         qr_verify_paths:
-          - { path: "/etc/quickrobot", expected_type: directory, expected_mode: '0755', expected_owner: "{{ remote_node_user | default(ansible_user) }}", expected_group: "{{ remote_node_user | default(ansible_user) }}" }
-          - { path: "{{ env_file }}", expected_type: file, expected_mode: '0644', expected_owner: "{{ remote_node_user | default(ansible_user) }}", expected_group: "{{ remote_node_user | default(ansible_user) }}" }
+          - { path: "/etc/quickrobot", expected_type: directory, expected_mode: '0755', expected_owner: "{{ remote_node_user  }}", expected_group: "{{ remote_node_user  }}" }
+          - { path: "{{ env_file }}", expected_type: file, expected_mode: '0644', expected_owner: "{{ remote_node_user  }}", expected_group: "{{ remote_node_user  }}" }

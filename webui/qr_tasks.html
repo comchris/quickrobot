@@ -84,7 +84,7 @@
 </div>
 
 <table id="jobs-table">
-<thead><tr><th class="sortable" data-col="0">Job ID</th><th class="sortable" data-col="1" data-sort="started">Started</th><th class="sortable" data-col="2">Type</th><th class="sortable" data-col="3">Instance</th><th class="sortable" data-col="4">Host</th><th class="sortable" data-col="5">Engine</th><th class="sortable" data-col="6">Status</th><th class="sortable" data-col="7" data-sort="duration">Duration</th><th></th></tr></thead>
+<thead><tr><th class="sortable" data-col="0">Job ID</th><th class="sortable" data-col="1" data-sort="started">Started</th><th class="sortable" data-col="2">Type</th><th class="sortable" data-col="3">Instance</th><th class="sortable" data-col="4">Host</th><th class="sortable" data-col="5">Engine</th><th class="sortable" data-col="6" style="min-width:100px;">Status</th><th class="sortable" data-col="7" data-sort="duration">Duration</th><th></th></tr></thead>
 <tbody id="jobs-tbody">
 <tr><td colspan="8" style="text-align:center;color:#888;">Loading jobs...</td></tr>
 </tbody>
@@ -143,7 +143,7 @@
 </div>
 
 <table>
-<thead><tr><th class="sortable" data-col="0">ID</th><th class="sortable" data-col="1">Started</th><th class="sortable" data-col="2">Action</th><th class="sortable" data-col="3">Host</th><th class="sortable" data-col="4">Instance</th><th class="sortable" data-col="5">Status</th><th>Duration</th><th>Details</th></tr></thead>
+<thead><tr><th class="sortable" data-col="0">ID</th><th class="sortable" data-col="1">Started</th><th class="sortable" data-col="2">Action</th><th class="sortable" data-col="3">Host</th><th class="sortable" data-col="4">Instance</th><th class="sortable" data-col="5" style="min-width:100px;">Status</th><th>Duration</th><th>Details</th></tr></thead>
 <tbody>
 {% for entry in qr_entries %}
 <tr class="{% if entry.status == 'running' %}task-running{% elif entry.status == 'stuck' %}task-stuck{% elif entry.status == 'failed' %}task-failed{% endif %}">
@@ -151,9 +151,9 @@
   <td class="ts-cell" data-sort="{{ entry.started_at or entry.created_at or '' }}" data-ts-utc="{{ entry.started_at or entry.created_at or '' }}">{{ entry.started_at or entry.created_at }}</td>
   <td>{{ entry.action_type }}</td>
   <td>{% if entry.node_id %}<a class="row-link" href="/webui/hosts">{{ entry.node_name }}</a>{% else %}{{ entry.node_name }}{% endif %}</td>
-  <td>{% if entry.instance_id %}<a class="row-link" href="/webui/instances/{{ entry.instance_id }}">{{ entry.instance_name }}</a>{% else %}{{ entry.instance_name }}{% endif %}</td>
+   <td data-sort="{{ entry.instance_id or '0' }}">{% if entry.instance_id %}<a class="row-link" href="/webui/instances/{{ entry.instance_id }}">{{ entry.instance_name }}</a>{% else %}{{ entry.instance_name }}{% endif %}</td>
   <td>{{ entry.status }}{% if entry.status == 'stuck' %} <span style="color:#e65100;font-weight:600;">⚠</span>{% endif %}{% if entry.playbook_file %} <span style="color:#666;font-size:0.8em;">[{{ entry.playbook_file }}]</span>{% endif %}</td>
-  <td>{{ entry.duration_ms }}</td>
+  <td data-sort="{{ entry.duration_ms or '0' }}">{{ entry.duration_ms }}</td>
   <td style="color:#666;font-size:0.85em;">{% if entry.details %}{{ (entry.details | string)[:120] }}{% else %}N/A{% endif %}</td>
 </tr>
 {% else %}
@@ -303,7 +303,7 @@ function renderJobRow(job, statusClass, dur, started) {
     '<td>' + instLink + '</td>' +
     '<td>' + hostLink + '</td>' +
     '<td>' + (job.engine_type_name || '-') + '</td>' +
-    '<td>' + statusHtml + '</td>' +
+    '<td style="white-space:nowrap;">' + statusHtml + '</td>' +
     '<td data-sort="' + parseDurationToSeconds(dur) + '">' + dur + '</td>' +
     '<td><span class="expand-arrow" style="font-size:0.8em;color:#888;margin-right:6px;cursor:pointer;" onclick="event.stopPropagation();toggleJobDetail(' + job.id + ')">' + expandIcon + ' tasks</span>' +
     (job.status !== 'running' ? '<button class="btn-task-action" data-job-id="' + job.id + '" data-action="delete-job" style="font-size:0.75em;padding:1px 6px;margin-left:4px;background:#f44336;color:#fff;border:none;border-radius:2px;cursor:pointer;" title="Delete this job and all its tasks">Del Job</button>' : '') +
@@ -318,7 +318,7 @@ function renderJobRow(job, statusClass, dur, started) {
     '<thead><tr style="border-bottom:1px solid #ddd;"><th style="text-align:left;padding:2px 6px;width:30px;">Task</th>' +
     '<th style="text-align:left;padding:2px 6px;">Stage</th>' +
     '<th style="text-align:left;padding:2px 6px;">Playbook</th>' +
-    '<th style="text-align:left;padding:2px 6px;width:80px;">Status</th>' +
+    '<th style="text-align:left;padding:2px 6px;min-width:160px;white-space:nowrap;">Status</th>' +
     '<th style="text-align:left;padding:2px 6px;width:100px;">Started</th>' +
     '<th style="text-align:left;padding:2px 6px;width:80px;">Duration</th>' +
     '<th style="text-align:left;padding:2px 6px;width:90px;">Actions</th></tr></thead>' +
@@ -392,10 +392,10 @@ function loadJobTasks(jobId) {
         var dur = calcDuration(task.started_at, task.finished_at);
         var playbook = task.playbook || '-';
 
-        // Action buttons: cancel (for running tasks) and delete (for completed/failed)
+        // Action buttons: cancel (for running/queued tasks) and delete (for completed/failed)
         var actionBtns = '';
-        if (task.status === 'running') {
-          actionBtns = '<button class="btn-task-action" data-task-id="' + task.id + '" data-action="cancel" style="font-size:0.75em;padding:1px 6px;margin-left:4px;background:#ff9800;color:#fff;border:none;border-radius:2px;cursor:pointer;" title="Cancel this task">Cancel</button>';
+        if (task.status === 'running' || task.status === 'queued') {
+          actionBtns = '<button class="btn-task-action" data-task-id="' + task.id + '" data-action="cancel" style="font-size:0.75em;padding:1px 6px;margin-left:4px;background:#ff9800;color:#fff;border:none;border-radius:2px;cursor:pointer;" title="Cancel this task">' + (task.status === 'running' ? 'Cancel' : 'Remove') + '</button>';
         } else if (task.status === 'completed' || task.status === 'failed') {
           actionBtns = '<button class="btn-task-action" data-task-id="' + task.id + '" data-action="delete" style="font-size:0.75em;padding:1px 6px;margin-left:4px;background:#f44336;color:#fff;border:none;border-radius:2px;cursor:pointer;" title="Delete this task">Delete</button>';
         }
@@ -404,7 +404,7 @@ function loadJobTasks(jobId) {
           '<td style="padding:2px 6px;width:30px;font-weight:600;color:#666;">' + task.id + '</td>' +
           '<td style="padding:2px 6px;"><span class="task-stage-bar ' + stageClass + '"></span><strong>' + (task.stage || '-') + '</strong></td>' +
           '<td style="padding:2px 6px;color:#888;font-size:0.85em;">' + playbook + '</td>' +
-          '<td style="padding:2px 6px;color:' + taskColor(task.status) + '">' + (task.status || '-') + (task.status === 'failed' ? ' (' + (task.error_message||'') + ')' : '') + '</td>' +
+          '<td style="padding:2px 6px;color:' + taskColor(task.status) + ';white-space:nowrap;">' + (task.status || '-') + (task.status === 'failed' ? ' (' + (task.error_message||'') + ')' : '') + '</td>' +
           '<td style="padding:2px 6px;font-size:0.85em;color:#888;">' + started + '</td>' +
           '<td style="padding:2px 6px;font-size:0.85em;color:#888;">' + dur + '</td>' +
           '<td style="padding:2px 6px;width:90px;text-align:right;">' + actionBtns + '</td>' +
@@ -723,6 +723,14 @@ function sortOpslogTable(col, dir) {
         var cellB = b.cells[col] ? (b.cells[col].getAttribute('data-sort') || b.cells[col].textContent.trim()) : '';
         if (col === 0) {
           return dir === 'asc' ? (parseInt(cellA, 10) || 0) - (parseInt(cellB, 10) || 0) : (parseInt(cellB, 10) || 0) - (parseInt(cellA, 10) || 0);
+        }
+        if (col === 4) {
+          return dir === 'asc' ? (parseInt(cellA, 10) || 0) - (parseInt(cellB, 10) || 0) : (parseInt(cellB, 10) || 0) - (parseInt(cellA, 10) || 0);
+        }
+        if (col === 6) {
+          var durA = parseDurationToSeconds(cellA);
+          var durB = parseDurationToSeconds(cellB);
+          return dir === 'asc' ? durA - durB : durB - durA;
         }
         return dir === 'asc' ? cellA.localeCompare(cellB) : cellB.localeCompare(cellA);
       });

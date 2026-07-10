@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""quickrobot — Instance logs adapters.
+"""quickrobot — Unified log adapters.
 
 Functions: log_instance_action, get_instance_logs_paginated,
-           cleanup_old_instance_logs, get_action_history.
+           cleanup_old_logs, get_action_history.
 All functions accept db_path as first positional argument.
 """
 
@@ -31,7 +31,7 @@ def _row_to_dict(row):
 
 def log_instance_action(db_path, instance_id, action, status, detail=None,
                         duration_ms=None):
-    """Append a log entry to the instance_logs table.
+    """Append a log entry to the unified log table.
 
     Args:
         db_path: Path to the SQLite database.
@@ -48,10 +48,14 @@ def log_instance_action(db_path, instance_id, action, status, detail=None,
     detail_json = json.dumps(detail or {})
     with pool(db_path) as conn:
         cursor = conn.execute(
-            """INSERT INTO instance_logs
-               (instance_id, action, status, detail, duration_ms)
-               VALUES (?, ?, ?, ?, ?)""",
-            (instance_id, action, status, detail_json, duration_ms),
+            """INSERT INTO log_entries
+               (parent_id, job_type, engine_type_name, instance_id, status, actor,
+                created_at, started_at, finished_at, task_stage, stage_playbook,
+                retry_count, max_retries, details_json, duration_ms)
+               VALUES (NULL, ?, NULL, ?, ?, 'system',
+                       strftime('%Y-%m-%dT%H:%M:%S','now'), NULL, NULL, NULL, NULL,
+                       0, 1, ?, ?)""",
+            (action, instance_id, status, detail_json, duration_ms or 0),
         )
         return cursor.lastrowid
 
@@ -71,13 +75,17 @@ def get_instance_logs_paginated(db_path, instance_id, limit=50, offset=0):
     from db.sqlite import pool
     with pool(db_path) as conn:
         total = conn.execute(
-            "SELECT COUNT(*) as cnt FROM instance_logs WHERE instance_id = ?",
+            "SELECT COUNT(*) as cnt FROM log_entries WHERE instance_id = ? AND parent_id IS NULL",
             (instance_id,),
         ).fetchone()["cnt"]
 
         cursor = conn.execute(
-            """SELECT * FROM instance_logs
-               WHERE instance_id = ?
+            """SELECT id, parent_id, job_type, engine_type_name, instance_id, node_id, status, actor,
+                    error_message, created_at, started_at, finished_at, duration_ms,
+                    task_stage, stage_playbook, retry_count, max_retries,
+                    details_json, results_json, playbook_registry_id, playbook_version
+               FROM log_entries
+               WHERE instance_id = ? AND parent_id IS NULL
                ORDER BY created_at DESC
                LIMIT ? OFFSET ?""",
             (instance_id, limit, offset),
@@ -85,9 +93,10 @@ def get_instance_logs_paginated(db_path, instance_id, limit=50, offset=0):
         items = []
         for row in cursor.fetchall():
             d = _row_to_dict(row)
-            if d.get("detail"):
+            if d.get("details_json"):
                 try:
-                    d["detail"] = json.loads(d["detail"])
+                    d["detail"] = json.loads(d["details_json"])
+                    del d["details_json"]
                 except (json.JSONDecodeError, TypeError):
                     pass
             items.append(d)
@@ -100,7 +109,7 @@ def get_instance_logs_paginated(db_path, instance_id, limit=50, offset=0):
         }
 
 
-def cleanup_old_instance_logs(db_path, days=30):
+def cleanup_old_logs(db_path, days=30):
     """Remove logs older than the specified number of days.
 
     Args:
@@ -113,7 +122,7 @@ def cleanup_old_instance_logs(db_path, days=30):
     from db.sqlite import pool
     with pool(db_path) as conn:
         cursor = conn.execute(
-            "DELETE FROM instance_logs WHERE created_at < datetime('now', ?)",
+            "DELETE FROM log_entries WHERE created_at < datetime('now', ?)",
             (f"-{days} days",),
         )
         return cursor.rowcount
@@ -135,8 +144,12 @@ def get_action_history(db_path, instance_id, action_type=None, limit=25):
     if action_type:
         with pool(db_path) as conn:
             cursor = conn.execute(
-                """SELECT * FROM instance_logs
-                   WHERE instance_id = ? AND action = ?
+                """SELECT id, parent_id, job_type, engine_type_name, instance_id, node_id, status, actor,
+                        error_message, created_at, started_at, finished_at, duration_ms,
+                        task_stage, stage_playbook, retry_count, max_retries,
+                        details_json, results_json, playbook_registry_id, playbook_version
+                   FROM log_entries
+                   WHERE instance_id = ? AND job_type = ? AND parent_id IS NULL
                    ORDER BY created_at DESC
                    LIMIT ?""",
                 (instance_id, action_type, limit),
@@ -144,8 +157,12 @@ def get_action_history(db_path, instance_id, action_type=None, limit=25):
     else:
         with pool(db_path) as conn:
             cursor = conn.execute(
-                """SELECT * FROM instance_logs
-                   WHERE instance_id = ?
+                """SELECT id, parent_id, job_type, engine_type_name, instance_id, node_id, status, actor,
+                        error_message, created_at, started_at, finished_at, duration_ms,
+                        task_stage, stage_playbook, retry_count, max_retries,
+                        details_json, results_json, playbook_registry_id, playbook_version
+                   FROM log_entries
+                   WHERE instance_id = ? AND parent_id IS NULL
                    ORDER BY created_at DESC
                    LIMIT ?""",
                 (instance_id, limit),
@@ -154,44 +171,34 @@ def get_action_history(db_path, instance_id, action_type=None, limit=25):
     results = []
     for row in cursor.fetchall():
         d = _row_to_dict(row)
-        if d.get("detail"):
+        if d.get("details_json"):
             try:
-                d["detail"] = json.loads(d["detail"])
+                d["detail"] = json.loads(d["details_json"])
+                del d["details_json"]
             except (json.JSONDecodeError, TypeError):
                 pass
         results.append(d)
     return results
 
 
-def cleanup_null_log_entries(db_path):
+def cleanup_orphaned_logs(db_path):
     """Remove orphaned log entries with NULL FK references.
 
-    After migration 010 changed FK constraints from ON DELETE CASCADE to
-    ON DELETE SET NULL, deleted nodes/instances leave behind log rows
-    with NULL node_id or instance_id. This function removes those
-    orphaned entries on demand.
+    After dropping old tables, removes log_entries rows where
+    instance_id or node_id references a non-existent row.
 
     Args:
         db_path: Path to the SQLite database.
 
     Returns:
-        dict with {instance_logs_deleted, ansible_actions_deleted}.
+        int — number of rows deleted.
     """
     from db.sqlite import pool
-    deleted = {"instance_logs_deleted": 0, "ansible_actions_deleted": 0}
-
     with pool(db_path) as conn:
-        # instance_logs: rows where FK was SET NULL after instance deletion
         cursor = conn.execute(
-            "DELETE FROM instance_logs WHERE instance_id IS NULL"
+            "DELETE FROM log_entries WHERE instance_id IS NOT NULL AND instance_id NOT IN (SELECT id FROM instances)"
         )
-        deleted["instance_logs_deleted"] = cursor.rowcount
-
-        # ansible_actions: rows where node_id or instance_id is NULL
-        # (parent node or instance was deleted, logs preserved with FK SET NULL)
-        cursor = conn.execute(
-            "DELETE FROM ansible_actions WHERE node_id IS NULL OR instance_id IS NULL"
+        cursor2 = conn.execute(
+            "DELETE FROM log_entries WHERE node_id IS NOT NULL AND node_id NOT IN (SELECT id FROM nodes)"
         )
-        deleted["ansible_actions_deleted"] = cursor.rowcount
-
-    return deleted
+        return cursor.rowcount + cursor2.rowcount

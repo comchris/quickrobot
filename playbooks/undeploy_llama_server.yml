@@ -1,12 +1,15 @@
 # @name: Undeploy Llama Server
 # @playbook_id: undeploy_llama_server
-# @version: 2
+# @version: 3
 # undeploy_llama_server.yml — Undeploy llama.cpp server instance from target node
+# Requires: inventory_host, instance_id, engine_type (must be provided, no fallback)
 - hosts: "{{ inventory_host }}"
   become: yes
   vars:
-    # engine_type comes from extra_vars passed by routes_instances.py
-    unit_name: "qr-{{ instance_id }}-{{ engine_type | default('llama_server') }}"
-    pkill_pattern: "llama-server"
+    unit_name: "qr-{{ instance_id }}-{{ engine_type }}"
+    # pkill_pattern from extra_vars or default; override via --extra-vars for custom builds
+    _pkill_pattern: "{{ pkill_pattern | default('llama-server') }}"
   tasks:
+    - set_fact:
+        pkill_pattern: "{{ _pkill_pattern }}"
     - import_tasks: "{{ playbook_dir }}/common/undeploy_base.yml"

@@ -11,12 +11,11 @@
   #herd-env-overrides-grid { display:grid; grid-template-columns: 1fr 1fr; gap: 4px 16px; margin-bottom:8px; }
   .env-override-row { display:flex; align-items:center; padding: 2px 0; min-width:0; }
   input.herd-env-cb { display: inline !important; width: auto !important; height: auto !important; margin: 0 !important; padding: 0 !important; }
-.herd-env-val { display: none; }
- .env-override-row.active .herd-env-val { display: inline-block !important; }
+/* ENV textboxes always visible — no toggle */
  /* CLI flags grid — same 2-column layout as ENV overrides */
  #herd-flags-grid { display:grid; grid-template-columns: 1fr 1fr; gap: 4px 16px; margin-bottom:8px; }
  .herd-flag-row { display:flex; align-items:center; padding: 2px 0; min-width:0; }
- input.herd-flag-cb { display: inline !important; width: auto !important; height: auto !important; margin: 0 !important; padding: 0 !important; }
+ input.herd-flag-cb { display: inline !important; width: auto !important; height: auto !important; margin-right: 6px; padding: 0 !important; }
 </style>
 
 <div class="herd-layout">
@@ -29,7 +28,7 @@
       </div>
       <div style="display:flex;gap:6px;align-items:center;margin-top:4px;">
         <button id="herd-refresh-btn" class="btn btn-primary" style="padding:3px 8px;font-size:0.8em;" title="Refresh herd data">Refresh page</button>
-        <button id="herd-health-all-btn" class="btn" style="padding:2px 8px;font-size:0.85em;background:#90caf9;border:1px solid #64b5f6;color:#1565c0;" title="Run health check on all visible servers">Health Check All</button>
+        <button id="herd-health-all-btn" class="btn" style="padding:2px 8px;font-size:0.85em;background:#90caf9;border:1px solid #64b5f6;color:#1565c0;" title="Run health check on all servers and bound RPCs">Health Check All</button>
       </div>
     </div>
     <table class="herd-server-table" id="herd-server-table">
@@ -93,62 +92,62 @@
       </div>
     </div>
 
-     <!-- Tensor split & device settings -->
-      <details class="detail-card" open style="margin-bottom:12px;">
-        <summary style="cursor:pointer;color:#aaa;font-size:0.95em;padding:4px 0;">Tensor Split & Device Settings</summary>
-        <div style="margin-top:8px;">
-       <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
-         <div>
-           <label style="font-size:0.8em;color:#666;display:block;margin-bottom:2px;">Split Mode</label>
-           <select id="herd-split-mode-select" style="width:100px;padding:4px;border:1px solid #ccc;border-radius:3px;">
-             <option value="layer">Layer</option>
-             <option value="row">Row</option>
-             <option value="tensor">Tensor</option>
-           </select>
-         </div>
-          <div style="min-width:340px;display:flex;align-items:flex-end;gap:6px;">
-            <div>
-              <label style="font-size:0.8em;color:#666;display:block;margin-bottom:2px;">Split Value</label>
-              <input type="text" id="herd-split-value-input" placeholder="0-100" style="width:70px;padding:3px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;" title="GPU slot contribution (0-100), or empty for None">
-            </div>
-            <div style="display:flex;gap:4px;padding-bottom:2px;">
-              <button onclick="setSplitPreset('0')" style="font-size:0.75em;padding:3px 8px;border:1px solid #bbb;border-radius:3px;background:#fff;cursor:pointer;">0</button>
-              <button onclick="setSplitPreset('100')" style="font-size:0.75em;padding:3px 8px;border:1px solid #bbb;border-radius:3px;background:#fff;cursor:pointer;">100</button>
-              <button onclick="setSplitNone()" style="font-size:0.75em;padding:3px 10px;border:1px solid #bbb;border-radius:3px;background:#fff;cursor:pointer;font-weight:bold;color:#d32f2f;" title="Clear split value — CPU-only mode">None</button>
-            </div>
-          </div>
-          <div style="flex:1;min-width:200px;">
-             <label style="font-size:0.8em;color:#666;display:block;margin-bottom:2px;">LLAMA_ARG_TENSOR_SPLIT</label>
-             <span id="herd-tensor-split" style="display:inline-block;background:#f5f5f5;padding:3px 6px;border-radius:3px;font-size:0.85em;white-space:nowrap;font-family:Cascadia Code,Consolas,Monaco,monospace;">-</span>
-           </div>
-          <div style="min-width:80px;flex:0 0 auto;">
-            <label style="font-size:0.8em;color:#666;display:block;margin-bottom:2px;">Device Flags</label>
-            <span id="herd-dev-flag" style="display:inline-block;background:#fff3e0;padding:3px 6px;border-radius:3px;font-size:0.85em;white-space:nowrap;color:#e65100;font-family:Cascadia Code,Consolas,Monaco,monospace;word-break:break-all;">-</span>
-          </div>
+      <!-- Device settings & tensor split -->
+       <details class="detail-card" open style="margin-bottom:12px;">
+         <summary style="cursor:pointer;color:#aaa;font-size:0.95em;padding:4px 0;">Device Settings & Tensor Split</summary>
+         <div style="margin-top:8px;">
+        <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
           <div style="display:flex;gap:6px;align-items:flex-end;">
              <div style="flex:1;display:flex;gap:4px;">
-               <div style="flex:1;">
-                 <label style="font-size:0.8em;color:#666;display:block;margin-bottom:2px;">GPU Override</label>
-                 <select id="herd-gpu-override-sel" style="width:130px;padding:4px;border:1px solid #ccc;border-radius:3px;" onchange="toggleGpuOverrideCustom()">
-                   <option value="">None</option>
-                   <option value="Vulkan0">Vulkan0</option>
-                   <option value="Vulkan1">Vulkan1</option>
-                   <option value="CUDA0">CUDA0</option>
-                   <option value="CUDA1">CUDA1</option>
-                   <option value="__custom__">Custom...</option>
-                 </select>
-               </div>
-               <div style="flex:1;display:none;" id="herd-gpu-custom-wrap">
-                 <label style="font-size:0.8em;color:#666;display:block;margin-bottom:2px;">Custom Device</label>
-                 <input type="text" id="herd-gpu-override-input" placeholder="e.g. CUDA2" style="width:130px;padding:4px;border:1px solid #ccc;border-radius:3px;" title="Freeform GPU device name">
+                <div style="flex:1;">
+                   <label style="font-size:0.8em;color:#666;display:block;margin-bottom:2px;">GPU Override</label>
+                     <select id="herd-gpu-override-sel" style="width:130px;padding:4px;border:1px solid #ccc;border-radius:3px;" onchange="onGpuOverrideCustom(); window._herdLastChangeEvent = event; herdAutoSave();">
+                      <option value="">-----</option>
+                      <option value="none">none</option>
+                      <option value="Vulkan0">Vulkan0</option>
+                      <option value="Vulkan1">Vulkan1</option>
+                      <option value="CUDA0">CUDA0</option>
+                      <option value="CUDA1">CUDA1</option>
+                      <option value="__custom__">Custom...</option>
+                    </select>
+                </div>
+                <div style="flex:1;display:none;" id="herd-gpu-custom-wrap">
+                  <label style="font-size:0.8em;color:#666;display:block;margin-bottom:2px;">Custom Device</label>
+                  <input type="text" id="herd-gpu-override-input" placeholder="e.g. CUDA2" style="width:130px;padding:4px;border:1px solid #ccc;border-radius:3px;" title="Freeform GPU device name" onchange="onHerdGpuCustomChange(this)">
+                </div>
                </div>
              </div>
-             <button class="btn btn-primary" id="herd-gpu-override-save-btn" onclick="herdSaveGpuOverride()" style="width:auto;font-size:0.85em;padding:4px 8px;">Save</button>
+             <span id="herd-gpu-override-status" style="font-size:0.8em;color:#888;display:block;margin-top:2px;"></span>
+           <div style="min-width:80px;flex:0 0 auto;">
+             <label style="font-size:0.8em;color:#666;display:block;margin-bottom:2px;">Device Flags</label>
+             <span id="herd-dev-flag" style="display:inline-block;background:#fff3e0;padding:3px 6px;border-radius:3px;font-size:0.85em;white-space:nowrap;color:#e65100;font-family:Cascadia Code,Consolas,Monaco,monospace;word-break:break-all;">-</span>
            </div>
-           <span id="herd-gpu-override-status" style="font-size:0.8em;color:#888;display:block;margin-top:2px;"></span>
+          <div>
+            <label style="font-size:0.8em;color:#666;display:block;margin-bottom:2px;">Split Mode</label>
+            <select id="herd-split-mode-select" style="width:100px;padding:4px;border:1px solid #ccc;border-radius:3px;">
+              <option value="layer">Layer</option>
+              <option value="row">Row</option>
+              <option value="tensor">Tensor</option>
+            </select>
+          </div>
+           <div style="min-width:340px;display:flex;align-items:flex-end;gap:6px;">
+             <div>
+               <label style="font-size:0.8em;color:#666;display:block;margin-bottom:2px;">Split Value</label>
+               <input type="text" id="herd-split-value-input" placeholder="0-100" style="width:70px;padding:3px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;" title="GPU slot contribution (0-100), or empty for None">
+             </div>
+             <div style="display:flex;gap:4px;padding-bottom:2px;">
+               <button onclick="setSplitPreset('0')" style="font-size:0.75em;padding:3px 8px;border:1px solid #bbb;border-radius:3px;background:#fff;cursor:pointer;">0</button>
+               <button onclick="setSplitPreset('100')" style="font-size:0.75em;padding:3px 8px;border:1px solid #bbb;border-radius:3px;background:#fff;cursor:pointer;">100</button>
+               <button onclick="setSplitNone()" style="font-size:0.75em;padding:3px 10px;border:1px solid #bbb;border-radius:3px;background:#fff;cursor:pointer;font-weight:bold;color:#d32f2f;" title="Clear split value — CPU-only mode">None</button>
+             </div>
+           </div>
+           <div style="flex:1;min-width:200px;">
+              <label style="font-size:0.8em;color:#666;display:block;margin-bottom:2px;">LLAMA_ARG_TENSOR_SPLIT</label>
+              <span id="herd-tensor-split" style="display:inline-block;background:#f5f5f5;padding:3px 6px;border-radius:3px;font-size:0.85em;white-space:nowrap;font-family:Cascadia Code,Consolas,Monaco,monospace;">-</span>
+            </div>
+        </div>
        </div>
-      </div>
-      </details>
+       </details>
 
       <!-- Expert Split Configuration -->
       <details class="detail-card" open style="margin-bottom:12px;">
@@ -199,30 +198,21 @@
        <summary style="cursor:pointer;color:#aaa;font-size:0.95em;padding:4px 0;">CLI Flags <span id="herd-flags-count" style="color:#888;font-weight:normal;font-size:0.85em;">(0 active)</span></summary>
        <div style="margin-top:8px;">
         <p style="color:#888;font-size:0.8em;margin-bottom:8px;">Toggle CLI flags for llama-server. Check a flag to enable it, uncheck to disable.</p>
-        <div id="herd-flags-grid">
-          <!-- Flags injected as .herd-flag-row by JS -->
+         <div id="herd-flags-grid">
+           <!-- Flags injected as .herd-flag-row by JS -->
+         </div>
         </div>
-        <div style="display:flex;gap:8px;align-items:center;border-top:1px solid #eee;padding-top:8px;margin-top:4px;">
-          <button class="btn btn-primary" onclick="herdSaveCliFlags()" id="herd-flags-save-btn" style="width:auto;font-size:0.85em;">Save Flags</button>
-          <span id="herd-flags-status" style="color:#888;font-size:0.85em;"></span>
-        </div>
-       </div>
-     </details>
+      </details>
 
      <!-- ENV Overrides (per-instance environment variable overrides) -->
     <details class="detail-card" open style="margin-bottom:12px;">
       <summary style="cursor:pointer;color:#aaa;font-size:0.95em;padding:4px 0;">ENV Overrides <span id="herd-ov-count" style="color:#888;font-weight:normal;font-size:0.85em;">(0 active)</span></summary>
       <div style="margin-top:8px;">
       <p style="color:#888;font-size:0.8em;margin-bottom:8px;">Environment variable overrides that take effect on next deploy/restart. Unchecked = uses preset/engine default.</p>
-      <div id="herd-env-overrides-grid">
-        <!-- ENV override rows injected by JS -->
-      </div>
-      <div style="display:flex;gap:8px;align-items:center;border-top:1px solid #eee;padding-top:8px;margin-top:4px;">
-        <button class="btn btn-primary" onclick="herdSaveEnvOverrides()" id="herd-env-save-btn" style="width:auto;font-size:0.85em;">Save ENV Overrides</button>
-        <span id="herd-env-status" style="color:#888;font-size:0.85em;"></span>
-      </div>
-      </div>
-    </details>
+       <div id="herd-env-overrides-grid">
+         <!-- ENV override rows injected by JS -->
+       </div>
+     </details>
 
     <!-- Deploy action (buttons inline, restart merged into same row) -->
     <div class="detail-card">
@@ -259,17 +249,17 @@ var HERD_CLI_FLAGS = [
   {id: 'no-mmap',          label: '--no-mmap',           type: 'toggle'},
   {id: 'mlock',            label: '--mlock',             type: 'toggle'},
   {id: 'direct-io',        label: '--direct-io',         type: 'toggle'},
-  {id: 'cpu-moe',          label: '--cpu-moe',           type: 'toggle'},
+  {id: 'cpu-moe',          label: '--cpu-moe',           type: 'toggle', highlight: true},
   {id: 'no-warmup',        label: '--no-warmup',         type: 'toggle'},
   {id: 'no-mmproj',        label: '--no-mmproj',         type: 'toggle'},
-  {id: 'flash-attn',       label: '--flash-attn',        type: 'toggle-onoff'},
+  {id: 'flash-attn',       label: '--flash-attn',        type: 'toggle-onoff', highlight: true},
   {id: 'spec-type',        label: '--spec-type',         type: 'toggle-select', options: ['none','draft-simple','draft-eagle3','draft-mtp','ngram-simple','ngram-map-k','ngram-map-k4v','ngram-mod','ngram-cache']},
   {id: 'spec-draft-n-max', label: '--spec-draft-n-max',  type: 'toggle-select'},
   {id: 'spec-draft-n-min', label: '--spec-draft-n-min',  type: 'toggle-select'},
    {id: 'spec-draft-ngl',   label: '--spec-draft-ngl',    type: 'toggle-select'},
-   {id: 'cache-type-k',     label: '--cache-type-k',      type: 'toggle-select', options: ['f32','f16','bf16','q8_0','q4_0','q4_1','iq4_nl','q5_0','q5_1']},
-   {id: 'cache-type-v',     label: '--cache-type-v',      type: 'toggle-select', options: ['f32','f16','bf16','q8_0','q4_0','q4_1','iq4_nl','q5_0','q5_1']},
-   {id: 'verbose',          label: '-v',                  type: 'toggle'},
+   {id: 'cache-type-k',     label: '--cache-type-k',      type: 'toggle-select', options: ['f32','f16','bf16','q8_0','q4_0','q4_1','iq4_nl','q5_0','q5_1'], highlight: true},
+   {id: 'cache-type-v',     label: '--cache-type-v',      type: 'toggle-select', options: ['f32','f16','bf16','q8_0','q4_0','q4_1','iq4_nl','q5_0','q5_1'], highlight: true},
+   {id: 'verbose',          label: '-v',                  type: 'toggle', highlight: true, hint: 'verbose'},
   {id: 'device-draft',     label: '--device-draft',      type: 'toggle-select', options: ['Vulkan0','CUDA0','CUDA1','CUDA2','CUDA3','CUDA4','CUDA5','CUDA6','CUDA7']},
   {id: 'tools',            label: '--tools',              type: 'toggle-multi', options: ['all','read_file','file_glob_search','grep_search','exec_shell_command','write_file','edit_file','apply_diff','get_datetime']},
   {id: 'custom-cli',       label: '--CUSTOM-cli',         type: 'toggle-fulltext'},
@@ -284,10 +274,12 @@ function buildFlagsGrid() {
   if (!grid) return;
   var html = '';
   HERD_CLI_FLAGS.forEach(function(f) {
+    var labelStyle = f.highlight ? 'font-weight:bold;' : '';
     if (f.type === 'toggle') {
-      html += '<div class="herd-flag-row"><input type="checkbox" class="herd-flag-cb" data-flag="' + f.label + '"> <span style="font-size:0.85em;color:#333;">' + f.label + '</span></div>';
+      var hintHtml = f.hint ? ' <span style="color:#999;font-size:0.8em;">(' + f.hint + ')</span>' : '';
+      html += '<div class="herd-flag-row"><input type="checkbox" class="herd-flag-cb" data-flag="' + f.label + '" onchange="onHerdFlagChange(this)"> <span style="font-size:0.85em;color:#333;' + labelStyle + '">' + f.label + '</span>' + hintHtml + '</div>';
     } else if (f.type === 'toggle-onoff') {
-      html += '<div class="herd-flag-row"><input type="checkbox" class="herd-flag-cb herd-flash-attn-cb" data-flag="' + f.label + '"> <span style="font-size:0.85em;color:#333;">' + f.label + '</span> <select class="herd-flash-attn-val" data-parent="' + f.label + '" style="width:80px;padding:2px;border:1px solid #ccc;border-radius:2px;font-size:0.85em;"><option value="">--</option><option value="on">on</option><option value="off">off</option><option value="auto">auto</option></select></div>';
+      html += '<div class="herd-flag-row"><input type="checkbox" class="herd-flag-cb herd-flash-attn-cb" data-flag="' + f.label + '" onchange="onHerdFlagChange(this)"> <span style="font-size:0.85em;color:#333;' + labelStyle + '">' + f.label + '</span> <select class="herd-flash-attn-val" data-parent="' + f.label + '" style="width:80px;padding:2px;border:1px solid #ccc;border-radius:2px;font-size:0.85em;" onchange="onHerdFlagChange(this)"><option value="">--</option><option value="on">on</option><option value="off">off</option><option value="auto">auto</option></select></div>';
     } else if (f.type === 'toggle-select') {
       var opts = '<option value="">--</option>';
       var optsArr = f.options || [];
@@ -296,24 +288,26 @@ function buildFlagsGrid() {
       else if (f.id === 'spec-draft-n-min') optsArr = _genRange(10);
       else if (f.id === 'spec-draft-ngl') optsArr = _genRange(100);
       for (var oi = 0; oi < optsArr.length; oi++) { opts += '<option value="' + optsArr[oi] + '">' + optsArr[oi] + '</option>'; }
-      html += '<div class="herd-flag-row"><input type="checkbox" class="herd-flag-cb herd-spec-cb" data-flag="' + f.label + '"> <span style="font-size:0.85em;color:#333;">' + f.label + '</span> <select class="herd-spec-val" data-parent="' + f.label + '" style="width:120px;padding:2px;border:1px solid #ccc;border-radius:2px;font-size:0.85em;">' + opts + '</select></div>';
+      html += '<div class="herd-flag-row"><input type="checkbox" class="herd-flag-cb herd-spec-cb" data-flag="' + f.label + '" onchange="onHerdFlagChange(this)"> <span style="font-size:0.85em;color:#333;' + labelStyle + '">' + f.label + '</span> <select class="herd-spec-val" data-parent="' + f.label + '" style="width:120px;padding:2px;border:1px solid #ccc;border-radius:2px;font-size:0.85em;" onchange="onHerdFlagChange(this)">' + opts + '</select></div>';
 } else if (f.type === 'toggle-multi') {
         var subOpts = f.options || [];
         var subCheckboxes = '';
         for (var si = 0; si < subOpts.length; si++) {
-           subCheckboxes += '<label style="display:inline-flex;align-items:center;gap:2px;margin:0 6px 4px 0;font-size:0.8em;"><input type="checkbox" class="herd-flag-cb herd-tools-cb" data-tool="' + subOpts[si] + '" disabled style="opacity:0.4;"> ' + subOpts[si] + '</label> ';
+           subCheckboxes += '<label style="display:inline-flex;align-items:center;gap:2px;margin:0 6px 4px 0;font-size:0.8em;"><input type="checkbox" class="herd-flag-cb herd-tools-cb" data-tool="' + subOpts[si] + '" disabled style="opacity:0.4;" onchange="onHerdFlagChange(this)"> ' + subOpts[si] + '</label> ';
         }
-        html += '<div class="herd-flag-row"><input type="checkbox" class="herd-flag-cb herd-tools-cb-main" data-flag="' + f.label + '" onchange="toggleToolsCb(this)"> <span style="font-size:0.85em;color:#333;font-weight:bold;">' + f.label + '</span> <span class="herd-tools-sub" style="display:inline-block;width:100%;margin-left:4px;">' + subCheckboxes + '</span></div>';
+        html += '<div class="herd-flag-row"><input type="checkbox" class="herd-flag-cb herd-tools-cb-main" data-flag="' + f.label + '" onchange="onHerdFlagChange(this); toggleToolsCb(this)"> <span style="font-size:0.85em;color:#333;font-weight:bold;">' + f.label + '</span> <span class="herd-tools-sub" style="display:inline-block;width:100%;margin-left:4px;">' + subCheckboxes + '</span></div>';
       } else if (f.type === 'toggle-fulltext') {
-        html += '<div class="herd-flag-row"><input type="checkbox" class="herd-flag-cb herd-fulltext-cb" data-flag="' + f.label + '" onchange="toggleFulltextCb(this, \'' + f.label + '\')"> <span style="font-size:0.85em;color:#333;font-weight:bold;">' + f.label + '</span> <div style="flex:1;"><textarea class="herd-fulltext-val" data-parent="' + f.label + '" placeholder="Paste CLI args here — one arg per line, or multi-arg string. Quotes preserved as-is." rows="5" style="width:100%;font-family:monospace;font-size:0.8em;padding:6px;border:1px solid #ccc;border-radius:4px;resize:both;display:none;min-height:80px;"></textarea></div></div>';
-         }
-       });
+        html += '<div class="herd-flag-row"><input type="checkbox" class="herd-flag-cb herd-fulltext-cb" data-flag="' + f.label + '" onchange="onHerdFlagChange(this); toggleFulltextCb(this, \'' + f.label + '\')"> <span style="font-size:0.85em;color:#333;font-weight:bold;">' + f.label + '</span> <div style="flex:1;"><textarea class="herd-fulltext-val" data-parent="' + f.label + '" placeholder="Paste CLI args here — one arg per line, or multi-arg string. Quotes preserved as-is." rows="5" style="width:100%;font-family:monospace;font-size:0.8em;padding:6px;border:1px solid #ccc;border-radius:4px;resize:both;display:none;min-height:80px;" oninput="onHerdFlagChange(this)"></textarea></div></div>';
+          }
+        });
       grid.innerHTML = html;
     }
 
  // Populate CLI flag checkboxes from server cli_flags data
-  function populateCliFlags(serverData) {
-    var currentFlags = serverData.cli_flags || [];
+   function populateCliFlags(serverData) {
+     // Read from user overrides (config_override.cli_flags), not merged cli_args
+     // which includes preset defaults that would incorrectly show as "user-set".
+     var currentFlags = serverData.cli_flags || [];
     // Uncheck all first
     document.querySelectorAll('.herd-flag-cb').forEach(function(cb) {
       cb.checked = false;
@@ -338,7 +332,7 @@ function buildFlagsGrid() {
               consumed.push(i + 1);
             } else if (cbs[j].classList.contains('herd-spec-cb')) {
               var sel = document.querySelector('.herd-spec-val[data-parent="' + flag + '"]');
-              if (sel) { sel.value = nextVal; sel.style.display = 'inline'; }
+              if (sel && nextVal) { sel.value = nextVal; sel.style.display = 'inline'; }
               consumed.push(i + 1);
             } else if (cbs[j].classList.contains('herd-fulltext-cb')) {
               // toggle-fulltext: value is the text itself, also consumed
@@ -380,21 +374,8 @@ function buildFlagsGrid() {
         if (subCb) subCb.checked = true;
       });
     }
-    // Handle "bare" values not matched to any checkbox — accumulate into toggle-fulltext textarea
-    var bareValues = [];
-    for (var i = 0; i < currentFlags.length; i++) {
-      if (consumed.indexOf(i) >= 0) continue;
-      bareValues.push(currentFlags[i]);
-    }
-    if (bareValues.length > 0) {
-      var fulltextCbs = document.querySelectorAll('.herd-fulltext-cb');
-      for (var j = 0; j < fulltextCbs.length; j++) {
-        fulltextCbs[j].checked = true;
-        var txt = document.querySelector('.herd-fulltext-val[data-parent="' + fulltextCbs[j].getAttribute('data-flag') + '"]');
-        if (txt) { txt.value = bareValues.join('\n'); txt.style.display = 'inline'; }
-        break; // only one fulltext input in current setup
-      }
-    }
+    // CUSTOM-cli stays empty by default — preset bare values (-dev, --host, etc.)
+    // are NOT accumulated here. CUSTOM-cli is for user-added debug overrides only.
     // Update active count display
     var flagsCountEl = document.getElementById('herd-flags-count');
     if (flagsCountEl) {
@@ -403,77 +384,85 @@ function buildFlagsGrid() {
     }
   }
 
- // ENV override definitions for herd page
-var HERD_ENV_OVERRIDES = [
-  { id: 'LLAMA_ARG_N_GPU_LAYERS', label: 'N_GPU_LAYERS', placeholder: '100' },
-  { id: 'LLAMA_ARG_BATCH', label: 'BATCH', placeholder: '2048' },
-  { id: 'LLAMA_ARG_UBATCH', label: 'UBATCH', placeholder: '512' },
-  { id: 'LLAMA_ARG_CACHE_RAM', label: 'CACHE_RAM(MB)', placeholder: '2048' },
-  { id: 'LLAMA_ARG_CTX_SIZE', label: 'CTX_SIZE', placeholder: '262144' },
-  { id: 'LLAMA_ARG_N_PARALLEL', label: 'N_PARALLEL', placeholder: '1' },
-  { id: 'LLAMA_ARG_FLASH_ATTN', label: 'FLASH_ATTN', placeholder: '1' },
-  { id: 'LLAMA_ARG_KV_UNIFIED', label: 'KV_UNIFIED', placeholder: '1' },
-  { id: 'LLAMA_ARG_FIT', label: 'FIT', placeholder: 'off' },
-];
+  // ENV override definitions for herd page — labels match exact LLAMA_ARG_ names used in config merge
+// CSS styling via 'style' key: 'bold' or 'italic' (default: normal)
+ var HERD_ENV_OVERRIDES = [
+   { id: 'LLAMA_ARG_N_GPU_LAYERS', label: 'LLAMA_ARG_N_GPU_LAYERS', style: 'bold' },
+   { id: 'LLAMA_ARG_BATCH', label: 'LLAMA_ARG_BATCH', placeholder: '' },
+   { id: 'LLAMA_ARG_UBATCH', label: 'LLAMA_ARG_UBATCH', placeholder: '' },
+   { id: 'LLAMA_ARG_CACHE_RAM', label: 'LLAMA_ARG_CACHE_RAM(MB)', style: 'bold' },
+   { id: 'LLAMA_ARG_CTX_SIZE', label: 'LLAMA_ARG_CTX_SIZE', style: 'bold' },
+   { id: 'LLAMA_ARG_N_PARALLEL', label: 'LLAMA_ARG_N_PARALLEL', style: 'bold' },
+   { id: 'LLAMA_ARG_FLASH_ATTN', label: 'LLAMA_ARG_FLASH_ATTN', style: 'italic' },
+   { id: 'LLAMA_ARG_KV_UNIFIED', label: 'LLAMA_ARG_KV_UNIFIED', placeholder: '' },
+   { id: 'LLAMA_ARG_FIT', label: 'LLAMA_ARG_FIT', style: 'italic' },
+ ];
 
 // Track current ENV overrides in memory
 var herdEnvOverrides = {};
 
-// Build ENV overrides grid — same structure as buildFlagsGrid
+// Build ENV overrides grid — checkboxes toggle active state, textboxes always visible
 function buildEnvOverridesGrid() {
-  console.log('[herd] buildEnvOverridesGrid called');
   var grid = document.getElementById('herd-env-overrides-grid');
-  if (!grid) { console.log('[herd] grid element not found'); return; }
-  console.log('[herd] grid element found, HERD_ENV_OVERRIDES has ' + HERD_ENV_OVERRIDES.length + ' entries');
+  if (!grid) {  return; }
   var html = '';
    HERD_ENV_OVERRIDES.forEach(function(env) {
+     var labelStyle = env.style === 'bold' ? 'font-weight:bold;' : (env.style === 'italic' ? 'font-style:italic;' : '');
      html += '<div class="env-override-row">' +
-        '<label style="display:inline-flex;align-items:center;gap:3px;font-size:0.8em;font-weight:normal;cursor:pointer;margin:2px 4px;">' +
-          '<input type="checkbox" class="herd-env-cb" data-env="' + env.id + '" onchange="toggleEnvField(this, \'' + env.id + '\')">' +
-          '<span style="color:#888;">' + env.label + '</span>' +
+         '<label style="display:inline-flex;align-items:center;gap:3px;font-size:0.8em;font-weight:normal;cursor:pointer;margin:2px 4px;">' +
+           '<input type="checkbox" class="herd-env-cb" data-env="' + env.id + '" onchange="onHerdEnvChange(this, \'' + env.id + '\')">' +
+           '<span style="font-family:Cascadia Code,Consolas,Monaco,monospace;font-size:0.8em;color:#333;' + labelStyle + '">' + env.label + '</span>' +
         '</label> ' +
-        '<input type="text" class="herd-env-val" data-env="' + env.id + '" placeholder="' + env.placeholder + '" style="width:120px;padding:3px 6px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">' +
-      '</div>';
-   });
-  console.log('[herd] Generated HTML length: ' + html.length + ' chars');
-  grid.innerHTML = html;
-  console.log('[herd] Grid innerHTML set, child count: ' + (grid.children ? grid.children.length : 'N/A'));
+          '<input type="text" class="herd-env-val" data-env="' + env.id + '" style="width:120px;padding:3px 6px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;" oninput="onHerdEnvValChange(this, \'' + env.id + '\')">' +
+       '</div>';
+    });
+   grid.innerHTML = html;
 }
 
-// Toggle ENV field visibility when checkbox is checked/unchecked
-function toggleEnvField(cb, envId) {
-  var row = cb.closest('.env-override-row');
-  if (row) row.classList.toggle('active', cb.checked);
+// ENV checkbox toggle — marks dirty and triggers save
+function onHerdEnvChange(cb, envId) {
+  window._herdLastChangeEvent = { target: cb };
+  herdAutoSave();
 }
 
-// Toggle fulltext flag: show/hide text input + auto-save on uncheck
+// ENV text input change — marks dirty and triggers save
+function onHerdEnvValChange(input, envId) {
+  window._herdLastChangeEvent = { target: input };
+  herdAutoSave();
+}
+
+// Toggle fulltext flag: show/hide text input (auto-save handled by change event listener)
 function toggleFulltextCb(cb, flagLabel) {
   var txt = document.querySelector('.herd-fulltext-val[data-parent="' + flagLabel + '"]');
   if (!txt) txt = document.querySelector('.herd-text-val[data-parent="' + flagLabel + '"]'); // backward compat
   if (txt) txt.style.display = cb.checked ? 'inline' : 'none';
-  // On uncheck: auto-save to remove the bare value from DB
-  if (!cb.checked) {
-    herdSaveCliFlagsSilent();
-  }
 }
 
-// Toggle tools multi-selector: enable/disable sub-checkboxes on main toggle
+// Toggle tools multi-selector: enable/disable sub-checkboxes on main toggle (auto-save handled by change event listener)
 function toggleToolsCb(cb) {
   var flagLabel = cb.getAttribute('data-flag');
   var container = cb.closest('.herd-flag-row').querySelector('.herd-tools-sub');
   if (!container) return;
   var subCbs = container.querySelectorAll('.herd-tools-cb:not(.herd-tools-cb-main)');
   subCbs.forEach(function(sc) { sc.disabled = !cb.checked; });
-  // On uncheck: auto-save to clear tools from DB
-  if (!cb.checked) {
-    herdSaveCliFlagsSilent();
-  }
+}
+
+// Unified flag change handler — called explicitly from every CLI flag element's onchange.
+// Sets window._herdLastChangeEvent so herdAutoSave() can classify which sections are dirty.
+function onHerdFlagChange(el) {
+  window._herdLastChangeEvent = { target: el };
+  herdAutoSave();
+}
+
+// GPU custom input change — marks GPU dirty and triggers save
+function onHerdGpuCustomChange(input) {
+  window._herdLastChangeEvent = { target: input };
+  herdAutoSave();
 }
 
 
 // Populate ENV overrides from actual_overrides data
 function populateEnvOverrides(actualOv) {
-  console.log('[herd] populateEnvOverrides called with:', JSON.stringify(actualOv));
   herdEnvOverrides = actualOv || {};
   var activeCount = Object.keys(herdEnvOverrides).length;
   var countEl = document.getElementById('herd-ov-count');
@@ -481,42 +470,29 @@ function populateEnvOverrides(actualOv) {
 
   HERD_ENV_OVERRIDES.forEach(function(env) {
     var cb = document.querySelector('.herd-env-cb[data-env="' + env.id + '"]');
-    var qres = document.querySelector('.env-override-row .herd-env-val[data-env="' + env.id + '"]');
-    var row = qres ? qres.closest('.env-override-row') : null;
-    console.log('[herd] processing', env.id, 'cb=', !!cb);
+    var valInput = document.querySelector('input.herd-env-val[data-env="' + env.id + '"]');
     if (cb) {
       var hasOverride = herdEnvOverrides.hasOwnProperty(env.id);
       cb.checked = hasOverride;
-      if (row) row.classList.toggle('active', hasOverride);
-      var valInput = document.querySelector('input.herd-env-val[data-env="' + env.id + '"]');
       if (valInput) {
         valInput.value = hasOverride ? String(herdEnvOverrides[env.id]) : '';
       }
     }
   });
-  console.log('[herd] populateEnvOverrides complete');
+  
 }
 
-// Collect current ENV overrides from UI and save
+// Collect current ENV overrides from UI and save (manual button path)
 function herdSaveEnvOverrides() {
+  if (!herdCurrentLlamaId) { return; }
   var btn = document.getElementById('herd-env-save-btn');
   var status = document.getElementById('herd-env-status');
   btn.disabled = true;
   btn.textContent = 'Saving...';
   status.textContent = '';
 
-  // Collect checked ENV overrides
-  var overrides = {};
-  HERD_ENV_OVERRIDES.forEach(function(env) {
-    var cb = document.querySelector('.herd-env-cb[data-env="' + env.id + '"]');
-    if (cb && cb.checked) {
-      var valInput = document.querySelector('input.herd-env-val[data-env="' + env.id + '"]');
-      var val = valInput ? valInput.value.trim() : '';
-      if (val) overrides[env.id] = val;
-    }
-  });
-
-  herdEnvOverrides = overrides;
+  // Use unified collection — only checked boxes with non-empty values
+  var overrides = collectEnvOverrides();
 
   qrApi('/instances/' + herdCurrentLlamaId + '/herd-config', {
     method: 'PUT',
@@ -539,6 +515,136 @@ function herdSaveEnvOverrides() {
       status.textContent = 'Request failed';
       btn.disabled = false;
     });
+}
+
+// ---- Unified Auto-Save (debounced, single save) ----
+
+// Debounce timer + dirty flags accumulator.
+// All change events mark which sections are dirty.
+// After 500ms of no changes, ONE save is sent with all dirty sections.
+var _herdSaveTimer = null;
+var _herdDirtyFlags = false;
+var _herdDirtyEnv = false;
+var _herdDirtyGpu = false;
+
+function herdAutoSave() {
+  if (!herdCurrentLlamaId) return;
+
+  // Mark dirty flags based on what changed
+  var e = window._herdLastChangeEvent;
+  if (e) {
+    if (e.target.classList.contains('herd-flag-cb') || 
+        e.target.classList.contains('herd-fulltext-cb') ||
+        e.target.classList.contains('herd-spec-cb') ||
+        e.target.classList.contains('herd-spec-val') ||
+        e.target.classList.contains('herd-flash-attn-cb') ||
+        e.target.classList.contains('herd-flash-attn-val') ||
+        e.target.classList.contains('herd-tools-cb-main')) {
+      _herdDirtyFlags = true;
+    }
+    if (e.target.classList.contains('herd-env-cb') || 
+        e.target.classList.contains('herd-env-val')) {
+      _herdDirtyEnv = true;
+    }
+  }
+  // GPU override change also marks dirty
+  var gpuSel = document.getElementById('herd-gpu-override-sel');
+  if (gpuSel && e && e.target === gpuSel) {
+    _herdDirtyGpu = true;
+  }
+
+  // GPU-only: no debounce — immediate save so DOM stays in sync with DB.
+  // When combined with flags/env, debounce to batch all changes into ONE request.
+  if (_herdDirtyGpu && !_herdDirtyFlags && !_herdDirtyEnv) {
+    clearTimeout(_herdSaveTimer);
+    _doHerdSave();
+  } else {
+    clearTimeout(_herdSaveTimer);
+    _herdSaveTimer = setTimeout(function() {
+      _doHerdSave();
+    }, 500);
+  }
+}
+
+function _doHerdSave() {
+  var payload = {};
+  if (_herdDirtyFlags) { payload.cli_flags = collectCliFlags(); }
+  if (_herdDirtyEnv) { payload.env = collectEnvOverrides(); }
+  if (_herdDirtyGpu) {
+    var sel = document.getElementById('herd-gpu-override-sel');
+    var input = document.getElementById('herd-gpu-override-input');
+    var gpuVal = (sel.value === '__custom__') ? 
+      (input ? input.value.trim() : '') : sel.value;
+    payload.gpu_override = gpuVal;
+  }
+
+  if (Object.keys(payload).length === 0) return;
+
+  // Single save to config endpoint — all dirty sections at once
+  qrApi('/instances/' + herdCurrentLlamaId + '/config', {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload)
+  }).then(function(data) {
+      if (data.status === 'ok') {
+        // Update count badges — NO populateCliFlags/populateEnvOverrides.
+        // The UI checkbox state is preserved; checkboxes reflect what the user set.
+        var flagsCountEl = document.getElementById('herd-flags-count');
+        if (flagsCountEl) {
+          flagsCountEl.textContent = '(' + (payload.cli_flags ? payload.cli_flags.length : 0) + ' active)';
+        }
+        var ovCountEl = document.getElementById('herd-ov-count');
+        if (ovCountEl) {
+          ovCountEl.textContent = '(' + (payload.env ? Object.keys(payload.env).length : 0) + ' active)';
+        }
+        // Refresh device flags display after GPU change — panel was stale without this
+        if (_herdDirtyGpu) {
+          showHerdDetail(herdCurrentLlamaId);
+        }
+        // Brief status message on deploy-status span
+        var st = document.getElementById('herd-deploy-status');
+        if (st) {
+          st.textContent = 'Saved';
+          setTimeout(function() { st.textContent = ''; }, 2000);
+        }
+      } else {
+        var st = document.getElementById('herd-deploy-status');
+        if (st) {
+          st.textContent = 'Save failed: ' + (data.message || '');
+          setTimeout(function() { st.textContent = ''; }, 3000);
+        }
+      }
+    })
+    .catch(function(e) {
+      var st = document.getElementById('herd-deploy-status');
+      if (st) {
+        st.textContent = 'Save failed';
+        setTimeout(function() { st.textContent = ''; }, 3000);
+      }
+    });
+
+  // Reset dirty flags
+  _herdDirtyFlags = false;
+  _herdDirtyEnv = false;
+  _herdDirtyGpu = false;
+}
+
+// Collect ENV overrides from DOM — unified with CLI flags pattern.
+// Checked+non-empty → send value; previously-set but unchecked → send "" (clears override).
+function collectEnvOverrides() {
+  var result = {};
+  HERD_ENV_OVERRIDES.forEach(function(env) {
+    var cb = document.querySelector('.herd-env-cb[data-env="' + env.id + '"]');
+    var valInput = document.querySelector('input.herd-env-val[data-env="' + env.id + '"]');
+    if (cb) {
+      if (cb.checked && valInput && valInput.value.trim()) {
+        result[env.id] = valInput.value.trim();  // kept/modified → send value
+      } else if (herdEnvOverrides.hasOwnProperty(env.id)) {
+        result[env.id] = "";  // was set, now unchecked → send empty to clear
+      }
+    }
+  });
+  return result;
 }
 
 // Collect checked CLI flags from UI into array
@@ -581,14 +687,14 @@ function collectCliFlags() {
       // If flash-attn is checked, also add the on/off value
       if (cb.classList.contains('herd-flash-attn-cb')) {
         var sel = document.querySelector('.herd-flash-attn-val[data-parent="' + flagLabel + '"]');
-        if (sel && sel.style.display !== 'none' && sel.value) {
+        if (sel && sel.value) {
           flags.push(sel.value);
         }
       }
       // If toggle-select is checked, also add the selected value
       if (cb.classList.contains('herd-spec-cb')) {
         var sel = document.querySelector('.herd-spec-val[data-parent="' + flagLabel + '"]');
-        if (sel && sel.style.display !== 'none' && sel.value) {
+        if (sel && sel.value) {
           flags.push(sel.value);
         }
       }
@@ -601,15 +707,19 @@ function collectCliFlags() {
 function herdSaveCliFlags() {
   var btn = document.getElementById('herd-flags-save-btn');
   var status = document.getElementById('herd-flags-status');
+  if (!herdCurrentLlamaId) {
+    status.textContent = 'Select a server first';
+    return;
+  }
   btn.disabled = true;
   btn.textContent = 'Saving...';
   status.textContent = '';
 
   var flags = collectCliFlags();
-  qrApi('/instances/' + herdCurrentLlamaId + '/cli-flags', {
+  qrApi('/instances/' + herdCurrentLlamaId + '/config', {
     method: 'PUT',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({flags: flags})
+    body: JSON.stringify({cli_flags: flags})
   }).then(function(data) {
       if (data.status === 'ok') {
         status.textContent = 'Flags saved (' + data.data.flags.length + ')';
@@ -651,15 +761,16 @@ function herdSaveCliFlags() {
 
 // Save CLI flags silently (no button/status interference) — used for auto-save on fulltext uncheck
 function herdSaveCliFlagsSilent() {
+  if (!herdCurrentLlamaId) return;
   var flags = collectCliFlags();
-  qrApi('/instances/' + herdCurrentLlamaId + '/cli-flags', {
+  qrApi('/instances/' + herdCurrentLlamaId + '/config', {
     method: 'PUT',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({flags: flags})
+    body: JSON.stringify({cli_flags: flags})
  }).then(function(data) {
     if (data.status !== 'ok') console.log('[herd] silent save failed:', data.message || '');
   }).catch(function() {
-    console.log('[herd] silent save network error');
+    
   });
 }
 
@@ -671,7 +782,7 @@ var _expertSplitCache = null;
 // Load expert-split config and render per-RPC rows.
 // Optional 'bindings' param: when provided (from rpccluster/summary), avoids a redundant deploy-preview fetch.
 function loadExpertSplitConfig(llamaId, bindings) {
-  qrApi('/instances/' + llamaId + '/expert-split-config')
+  qrApi('/instances/' + llamaId + '/config')
     .then(function(data) {
       if (data.status !== 'ok') {
         console.warn('[herd] expert-split config load failed:', data.message);
@@ -805,7 +916,7 @@ function setAllExpertModes(mode) {
         es._rpc_modes[rpcId] = {mode: mode};
       }
     });
-    qrApi('/instances/' + herdCurrentLlamaId + '/expert-split-config', {
+    qrApi('/instances/' + herdCurrentLlamaId + '/config', {
       method: 'PUT', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({expert_split: es})
     }).then(function() { loadExpertSplitConfig(herdCurrentLlamaId, bindings); });
@@ -818,7 +929,7 @@ function setAllExpertModes(mode) {
       if (bindings.length === 0) return;
 
       // Load current expert_split config to preserve non-mode fields
-      return qrApi('/instances/' + herdCurrentLlamaId + '/expert-split-config')
+      return qrApi('/instances/' + herdCurrentLlamaId + '/config')
         .then(function(getData) {
           _expertSplitCache = getData.data.expert_split || {};
           if (!_expertSplitCache._rpc_modes) _expertSplitCache._rpc_modes = {};
@@ -833,7 +944,7 @@ function setAllExpertModes(mode) {
 function setRpcExpertSplit(llamaId, rpcId, val) {
   var expertsVal = parseInt(val, 10);
   if (isNaN(expertsVal)) return;
-  qrApi('/instances/' + rpcId + '/experts', {
+  qrApi('/instances/' + rpcId + '/config', {
     method: 'PUT',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({experts: expertsVal})
@@ -850,12 +961,12 @@ function setRpcExpertSplit(llamaId, rpcId, val) {
 function setRpcExpertMode(llamaId, rpcId, mode) {
   // Read current cache first (to preserve other RPC modes)
   if (!_expertSplitCache || !_expertSplitCache._rpc_modes) {
-    qrApi('/instances/' + llamaId + '/expert-split-config')
+    qrApi('/instances/' + llamaId + '/config')
       .then(function(getData) {
         _expertSplitCache = getData.data.expert_split || {};
         if (!_expertSplitCache._rpc_modes) _expertSplitCache._rpc_modes = {};
         _expertSplitCache._rpc_modes[String(rpcId)] = {mode: mode};
-        return qrApi('/instances/' + llamaId + '/expert-split-config', {
+        return qrApi('/instances/' + llamaId + '/config', {
           method: 'PUT',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({expert_split: _expertSplitCache})
@@ -866,7 +977,7 @@ function setRpcExpertMode(llamaId, rpcId, mode) {
       });
   } else {
     _expertSplitCache._rpc_modes[String(rpcId)] = {mode: mode};
-    qrApi('/instances/' + llamaId + '/expert-split-config', {
+    qrApi('/instances/' + llamaId + '/config', {
       method: 'PUT',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({expert_split: _expertSplitCache})
@@ -881,7 +992,7 @@ function setRpcExpertPattern(llamaId, rpcId, pattern) {
   // Preserve bindings before cache is replaced by GET
   var cachedBindings = _expertSplitCache ? _expertSplitCache._bindings : null;
   if (!_expertSplitCache || !_expertSplitCache._rpc_modes) {
-    qrApi('/instances/' + llamaId + '/expert-split-config')
+    qrApi('/instances/' + llamaId + '/config')
       .then(function(getData) {
         _expertSplitCache = getData.data.expert_split || {};
         if (!_expertSplitCache._rpc_modes) _expertSplitCache._rpc_modes = {};
@@ -889,7 +1000,7 @@ function setRpcExpertPattern(llamaId, rpcId, pattern) {
       })
       .then(function(es) {
         es._rpc_modes[String(rpcId)] = {mode: 'f', index_pattern: pattern};
-        return qrApi('/instances/' + llamaId + '/expert-split-config', {
+        return qrApi('/instances/' + llamaId + '/config', {
           method: 'PUT',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({expert_split: es})
@@ -901,7 +1012,7 @@ function setRpcExpertPattern(llamaId, rpcId, pattern) {
   } else {
     if (!_expertSplitCache._rpc_modes) _expertSplitCache._rpc_modes = {};
     _expertSplitCache._rpc_modes[String(rpcId)] = {mode: 'f', index_pattern: pattern};
-    qrApi('/instances/' + llamaId + '/expert-split-config', {
+    qrApi('/instances/' + llamaId + '/config', {
       method: 'PUT',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({expert_split: _expertSplitCache})
@@ -913,6 +1024,7 @@ function setRpcExpertPattern(llamaId, rpcId, pattern) {
 
 // Save template prefix/suffix/offset with visual feedback
 function saveExpertSplitTemplate() {
+  if (!herdCurrentLlamaId) { event.target.textContent = 'Select a server first'; return; }
   var btn = event.target;
   var origText = btn.textContent;
   btn.textContent = 'Saving...';
@@ -920,7 +1032,7 @@ function saveExpertSplitTemplate() {
   var prefix = document.getElementById('herd-es-prefix').value.trim() || 'blk.';
    var suffix = document.getElementById('herd-es-suffix').value.trim() || 'ffn_(up|gate|down|gate_up)_exps.*';
   var offset = parseInt(document.getElementById('herd-es-offset').value) || 0;
-  qrApi('/instances/' + herdCurrentLlamaId + '/expert-split-config', {
+  qrApi('/instances/' + herdCurrentLlamaId + '/config', {
     method: 'PUT',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({expert_split: {template_prefix: prefix, template_suffix: suffix, skip_n_first: offset}})
@@ -940,24 +1052,31 @@ function saveExpertSplitTemplate() {
   });
 }
 
-function toggleGpuOverrideCustom() {
+function onGpuOverrideCustom() {
   var sel = document.getElementById('herd-gpu-override-sel');
   var wrap = document.getElementById('herd-gpu-custom-wrap');
   if (sel && wrap) {
     wrap.style.display = (sel.value === '__custom__') ? 'block' : 'none';
   }
+  // Immediately update device flags display to stay in sync with user selection.
+  // The debounced _doHerdSave() will persist to DB and re-read via API, but the
+  // user sees their choice reflected instantly without waiting for round-trip.
+  var devFlagEl = document.getElementById('herd-dev-flag');
+  if (devFlagEl && sel) {
+    devFlagEl.textContent = sel.value ? '-dev ' + sel.value : '-';
+  }
 }
 
 function herdSaveGpuOverride() {
+  if (!herdCurrentLlamaId) { return; }
   var sel = document.getElementById('herd-gpu-override-sel');
   var input = document.getElementById('herd-gpu-override-input');
   var btn = document.getElementById('herd-gpu-override-save-btn');
   var status = document.getElementById('herd-gpu-override-status');
-  // If custom mode, use the text input value; otherwise use the selected option (or empty for "None")
-  var override = (sel.value === '__custom__') ? (input ? input.value.trim() : '') : (sel.value === '' ? '' : sel.value);
+  // If custom mode, use the text input value; otherwise use the selected option
+  var override = (sel.value === '__custom__') ? (input ? input.value.trim() : '') : sel.value;
 
-  // Use dedicated /gpu-override endpoint — pure DB write, no reconfigure trigger
-  qrApi('/instances/' + herdCurrentLlamaId + '/gpu-override', {
+  qrApi('/instances/' + herdCurrentLlamaId + '/config', {
     method: 'PUT',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({gpu_override: override})
@@ -966,7 +1085,6 @@ function herdSaveGpuOverride() {
         status.textContent = 'GPU override set to: ' + (override || '(cleared)');
         btn.textContent = 'Saved';
         setTimeout(function() { btn.textContent = 'Save'; }, 2000);
-        loadHerdServers();
         showHerdDetail(herdCurrentLlamaId);
       } else {
         status.textContent = 'Error: ' + (data.message || 'Unknown');
@@ -975,6 +1093,17 @@ function herdSaveGpuOverride() {
     .catch(function(e) {
       status.textContent = 'Request failed: ' + e;
     });
+}
+
+// GPU override auto-save — marks dirty flag and triggers debounce
+function herdAutoSaveGpu() {
+  if (!herdCurrentLlamaId) return;
+  var e = window._herdLastChangeEvent;
+  if (e && e.target && e.target.id === 'herd-gpu-override-sel') {
+    _herdDirtyGpu = true;
+    clearTimeout(_herdSaveTimer);
+    _herdSaveTimer = setTimeout(function() { _doHerdSave(); }, 500);
+  }
 }
 
 // Load all llama-servers into left panel
@@ -1141,59 +1270,62 @@ function showHerdDetail(llamaId) {
       document.getElementById('herd-tensor-split').textContent = server.tensor_split || '-';
 
 // Fetch -dev flag and CLI flags from deploy-preview
-       buildFlagsGrid();
-       buildEnvOverridesGrid();
-        qrApi('/instances/' + llamaId + '/deploy-preview')
-          .then(function(preview) {
-         if (preview.status === 'ok') {
-           var cli = preview.data.cli_args || '';
-           // Extract -dev flag from CLI args
-           var devMatch = cli.match(/-dev\s+(\S+)/);
-           // Also extract --device-draft entries
-           var draftMatches = cli.matchAll(/--device-draft\s+(\S+)/g);
-           var draftParts = [];
-           var dm;
-           while ((dm = draftMatches.next()) && !dm.done) {
-             draftParts.push('--device-draft ' + dm.value[1]);
-           }
-           var displayParts = [];
-           if (devMatch) displayParts.push('-dev ' + devMatch[1]);
-           draftParts.forEach(function(dp) { displayParts.push(dp); });
-           document.getElementById('herd-dev-flag').textContent = displayParts.length > 0 ? displayParts.join(' ') : '-';
-            // Populate GPU override dropdown (and custom input if non-standard value)
-            var gpuOverride = preview.data.gpu_override || '';
+        buildFlagsGrid();
+        buildEnvOverridesGrid();
+         qrApi('/instances/' + llamaId + '/deploy-preview')
+           .then(function(preview) {
+          if (preview.status === 'ok') {
+            var cli = preview.data.cli_args || '';
+            // Extract -dev flag from CLI args
+            var devMatch = cli.match(/-dev\s+(\S+)/);
+            // Also extract --device-draft entries
+            var draftMatches = cli.matchAll(/--device-draft\s+(\S+)/g);
+            var draftParts = [];
+            var dm;
+            while ((dm = draftMatches.next()) && !dm.done) {
+              draftParts.push('--device-draft ' + dm.value[1]);
+            }
+            var displayParts = [];
+            if (devMatch) displayParts.push('-dev ' + devMatch[1]);
+            draftParts.forEach(function(dp) { displayParts.push(dp); });
+            document.getElementById('herd-dev-flag').textContent = displayParts.length > 0 ? displayParts.join(' ') : '-';
+             // Populate GPU override from summary data (already fetched, reads qr_cluster_gpu_override correctly).
+             // Removed redundant /instances/<id> fetch which read wrong key (gpu_override vs qr_cluster_gpu_override).
+            var gpuOverride = server.gpu_override || '';
             var sel = document.getElementById('herd-gpu-override-sel');
             var input = document.getElementById('herd-gpu-override-input');
             if (sel) {
-              // Check if the value matches a predefined option
-              var options = sel.options;
-              var matched = false;
-              for (var oi = 0; oi < options.length; oi++) {
-                if (options[oi].value === gpuOverride) {
-                  sel.selectedIndex = oi;
-                  matched = true;
-                  break;
+               var options = sel.options;
+               var matched = false;
+                for (var oi = 0; oi < options.length; oi++) {
+                  if (options[oi].value === gpuOverride) {
+                    sel.selectedIndex = oi;
+                    matched = true;
+                    break;
+                  }
                 }
-              }
-              if (!matched && gpuOverride) {
-                // Non-standard value — set to custom and populate text input
-                sel.value = '__custom__';
-                if (input) input.value = gpuOverride;
-              } else if (!matched) {
-                sel.value = '';
-              }
-            }
-            toggleGpuOverrideCustom();
-           // Populate CLI flags checkboxes
-           populateCliFlags(preview.data);
-           // Populate ENV overrides from merged-config
-          qrApi('/instances/' + llamaId + '/merged-config')
-              .then(function(mc) {
-               if (mc.status === 'ok' && mc.data && mc.data.actual_overrides) {
-                 populateEnvOverrides(mc.data.actual_overrides);
-               }
-             })
-             .catch(function(e) { console.error('env-override load error:', e); });
+                if (!matched && gpuOverride) {
+                  sel.value = '__custom__';
+                  if (input) input.value = gpuOverride;
+                } else if (!matched) {
+                  sel.value = '';
+                }
+             }
+             onGpuOverrideCustom();
+            // Populate CLI flags checkboxes
+            populateCliFlags(preview.data);
+            // Populate ENV overrides from raw config_override (not merged-config),
+            // so preset defaults don't appear as "overridden".
+           qrApi('/instances/' + llamaId)
+               .then(function(inst) {
+                if (inst.status === 'ok' && inst.data) {
+                  var co = inst.data.config_override || {};
+                  if (typeof co === 'string') { try { co = JSON.parse(co); } catch(e) { co = {}; } }
+                  var envOverrides = (typeof co.env === 'object' && !Array.isArray(co.env)) ? co.env : {};
+                  populateEnvOverrides(envOverrides);
+                }
+              })
+              .catch(function(e) { console.error('env-override load error:', e); });
          } else {
           console.warn('deploy-preview status:', preview.status, preview.message);
           document.getElementById('herd-dev-flag').textContent = '-';
@@ -1209,7 +1341,7 @@ function showHerdDetail(llamaId) {
           bindings.forEach(function(b) {
             var stateColor = b.state === 'running' ? '#4caf50' : (b.state === 'deployed' ? '#2196f3' : '#888');
             var draftVal = parseInt(b.draft, 10) || 0;
-            html += '<tr>';
+             html += '<tr data-inst-id="' + b.id + '">';
             html += '<td>' + b.id + '</td>';
             html += '<td><strong>' + b.name + '</strong></td>';
             html += '<td>' + (b.hostname || '-') + '</td>';
@@ -1255,7 +1387,7 @@ function loadHerdPresets() {
       presets.forEach(function(p) {
         var opt = document.createElement('option');
         opt.value = p.id;
-        opt.textContent = p.name + (p.model_name ? ' [' + p.model_name + ']' : '');
+        opt.textContent = p.id + ' ' + p.name;
         sel.appendChild(opt);
       });
     })
@@ -1350,27 +1482,58 @@ function herdApplyPreset(newPresetId) {
 function populateRpcSelect(allServers) {
   var sel = document.getElementById('herd-rpc-select');
 
-  // Fetch running deployed RPC instances that are not already bound
+      // Fetch all llama_rpc instances (not just running — user may want to bind stopped/error RPCs
+      // and have the deploy chain auto-start them)
   qrApi('/instances')
     .then(function(data) {
+      // Filter: llama_rpc, online host, not self-reference, exclude only unconfigured
       var rpcInstances = (data.items || []).filter(function(i) {
         return i.engine_type_name === 'llama_rpc'
-            && (i.state === 'running' || i.state === 'deployed')
+            && i.node_ping_state === 'online'
+            && i.state !== 'unconfigured'
             && (!herdCurrentLlamaId || i.id !== herdCurrentLlamaId);
       });
 
-      // Remove already-bound RPCs from selection
+      // Identify all bound RPCs across ALL servers (not just current)
+      var allBoundIds = [];
+      if (allServers && allServers.length) {
+        allServers.forEach(function(s) {
+          if (s.rpc_bindings && s.rpc_bindings.length) {
+            s.rpc_bindings.forEach(function(b) {
+              if (allBoundIds.indexOf(b.id) === -1) allBoundIds.push(b.id);
+            });
+          }
+        });
+      }
+
+      // Current server's bound IDs (for grey-out label)
+      var curBoundIds = [];
       if (herdCurrentLlamaId) {
         var server = allServers.find(function(s) { return s.id === herdCurrentLlamaId; });
-        var boundIds = (server && server.rpc_bindings) ? server.rpc_bindings.map(function(b){return b.id;}) : [];
-        rpcInstances = rpcInstances.filter(function(r) { return boundIds.indexOf(r.id) === -1; });
+        if (server && server.rpc_bindings) {
+          curBoundIds = server.rpc_bindings.map(function(b){return b.id;});
+        }
       }
 
       sel.innerHTML = '<option value="">-- Select RPC instance --</option>';
       rpcInstances.forEach(function(rpc) {
         var opt = document.createElement('option');
         opt.value = rpc.id;
-        opt.textContent = rpc.name + ' (' + (rpc.node_hostname || '?') + ')';
+        var label = rpc.name + ' (' + (rpc.node_hostname || '?') + ')';
+        if (allBoundIds.indexOf(rpc.id) !== -1) {
+          // Already bound to another server — grey out with indicator
+          label += ' [bound]';
+          opt.disabled = true;
+          opt.style.color = '#999';
+          opt.title = 'This RPC is already bound to another server';
+        }
+        if (curBoundIds.indexOf(rpc.id) !== -1 && herdCurrentLlamaId) {
+          // Bound to current server — always show as disabled
+          label += ' [bound to this server]';
+          opt.disabled = true;
+          opt.style.color = '#999';
+        }
+        opt.textContent = label;
         sel.appendChild(opt);
       });
 
@@ -1391,7 +1554,7 @@ function populateRpcSelect(allServers) {
 function setSplitMode(llamaId) {
   var mode = document.getElementById('herd-split-mode-select').value;
   if (!mode) return;
-  qrApi('/instances/' + llamaId + '/split-mode', {
+  qrApi('/instances/' + llamaId + '/config', {
     method: 'PUT',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({split_mode: mode})
@@ -1411,7 +1574,7 @@ function setSplitPreset(val) {
   var llamaId = herdCurrentLlamaId;
   if (!llamaId) return;
   var payload = {split: val === '' ? null : parseInt(val, 10)};
-  qrApi('/instances/' + llamaId + '/split', {
+  qrApi('/instances/' + llamaId + '/config', {
     method: 'PUT',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(payload)
@@ -1430,7 +1593,7 @@ function setSplitNone() {
   window._splitPresetSaving = true; // prevent onblur re-save
   var llamaId = herdCurrentLlamaId;
   if (!llamaId) return;
-  qrApi('/instances/' + llamaId + '/split', {
+  qrApi('/instances/' + llamaId + '/config', {
     method: 'PUT',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({split: null})
@@ -1447,7 +1610,7 @@ function setSplitValue(llamaId) {
   var val = document.getElementById('herd-split-value-input').value.trim();
   // Empty string → null (CPU-only mode), otherwise parse as integer
   var payload = {split: val === '' ? null : parseInt(val, 10)};
-  qrApi('/instances/' + llamaId + '/split', {
+  qrApi('/instances/' + llamaId + '/config', {
     method: 'PUT',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(payload)
@@ -1463,7 +1626,7 @@ function setSplitValue(llamaId) {
 function setRpcSplit(llamaId, rpcId, val) {
   var splitVal = parseInt(val, 10);
   if (isNaN(splitVal)) return;
-  qrApi('/instances/' + rpcId + '/split', {
+  qrApi('/instances/' + rpcId + '/config', {
     method: 'PUT',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({split: splitVal})
@@ -1479,7 +1642,7 @@ function setRpcSplit(llamaId, rpcId, val) {
 function setRpcExperts(llamaId, rpcId, val) {
   var expertsVal = parseInt(val, 10);
   if (isNaN(expertsVal)) return;
-  qrApi('/instances/' + rpcId + '/experts', {
+  qrApi('/instances/' + rpcId + '/config', {
     method: 'PUT',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({experts: expertsVal})
@@ -1509,6 +1672,7 @@ function setRpcDraft(llamaId, rpcId, val) {
 
 // Add binding — APPENDs to existing bindings, uses RUNNER-1 job
 function herdAddBinding() {
+  if (!herdCurrentLlamaId) return;
   var sel = document.getElementById('herd-rpc-select');
   var rpcId = parseInt(sel.value, 10);
   if (!rpcId) return;
@@ -1699,40 +1863,59 @@ function showDeployPreview() {
 
   // Update cluster changes + restart (reconfigure = config_env + start in one job)
   // reconfigure chain: config_env → start (service_start does stop+start internally)
-  function herdDeploy() {
-   var btn = document.getElementById('herd-deploy-btn');
-   var status = document.getElementById('herd-deploy-status');
-   btn.disabled = true;
-   btn.textContent = 'Configuring...';
-   status.textContent = 'Applying config changes and restarting...';
+   function herdDeploy() {
+    if (!herdCurrentLlamaId) return;
 
-   qrApi('/instances/' + herdCurrentLlamaId + '/reconfigure', {
-     method: 'POST',
-     headers: {'Content-Type': 'application/json'}
-   }).then(function(data) {
-      if (data.status === 'ok') {
-         status.textContent = 'Config applied and restarted successfully.';
-         btn.textContent = 'Deploy Config & Restart';
-         btn.disabled = false;
-         setTimeout(function() {
-            loadHerdServers();
-            showHerdDetail(herdCurrentLlamaId);
-          }, 3000);
-      } else {
-        status.textContent = 'Config apply failed: ' + (data.message || '');
+    var btn = document.getElementById('herd-deploy-btn');
+    var status = document.getElementById('herd-deploy-status');
+    btn.disabled = true;
+    btn.textContent = 'Configuring...';
+    status.textContent = 'Applying config changes and restarting...';
+
+    // If there are pending dirty changes, trigger immediate save (bypass debounce)
+    // then wait for it to complete before reconfigure.
+    // Otherwise proceed directly — no pending changes to wait for.
+    var deployPromise = Promise.resolve();
+    if (_herdDirtyFlags || _herdDirtyEnv || _herdDirtyGpu) {
+      // Clear debounce timer and do immediate save
+      clearTimeout(_herdSaveTimer);
+      // _doHerdSave is synchronous in collecting data, async in saving
+      _doHerdSave();
+      // Wait a tick for the save to fire, then chain on it via setTimeout trick
+      deployPromise = new Promise(function(resolve) {
+        setTimeout(function() { resolve(); }, 100); // brief wait for debounced save
+      });
+    }
+    deployPromise.then(function() {
+      qrApi('/instances/' + herdCurrentLlamaId + '/reconfigure', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'}
+      }).then(function(data) {
+         if (data.status === 'ok') {
+            status.textContent = 'Config applied and restarted successfully.';
+            btn.textContent = 'Deploy Config & Restart';
+            btn.disabled = false;
+            setTimeout(function() {
+               loadHerdServers();
+               showHerdDetail(herdCurrentLlamaId);
+             }, 3000);
+         } else {
+           status.textContent = 'Config apply failed: ' + (data.message || '');
+           btn.textContent = 'Deploy Config & Restart';
+           btn.disabled = false;
+         }
+       })
+      .catch(function(e) {
+        status.textContent = 'Request failed (network error)';
         btn.textContent = 'Deploy Config & Restart';
         btn.disabled = false;
-      }
-    })
-   .catch(function(e) {
-     status.textContent = 'Request failed (network error)';
-     btn.textContent = 'Deploy Config & Restart';
-     btn.disabled = false;
-   });
-}
+      });
+    });
+  }
 
 // Restart llama-server after config changes
 function herdRestart() {
+  if (!herdCurrentLlamaId) return;
   var btn = document.getElementById('herd-restart-btn');
   var status = document.getElementById('herd-restart-status');
   btn.disabled = true;
@@ -1764,7 +1947,7 @@ function herdRestart() {
     });
 }
 
-// ---- Health check all — runs query-status on each visible server ----
+// ---- Health check all — async scheduler queue (single API call) ----
 
 function herdHealthCheckAll() {
   var btn = document.getElementById('herd-health-all-btn');
@@ -1772,47 +1955,41 @@ function herdHealthCheckAll() {
   btn.disabled = true;
   btn.textContent = 'Checking...';
 
-  // Collect all visible server IDs from the left panel table
-  var rows = document.querySelectorAll('.herd-server-row[data-inst-id]');
-  var ids = [];
-  rows.forEach(function(row) {
-    var id = parseInt(row.getAttribute('data-inst-id'), 10);
-    if (id) ids.push(id);
-  });
-
-  if (ids.length === 0) {
-    btn.textContent = 'Health Check All';
-    btn.disabled = false;
-    return;
-  }
-
-  // Run health check on each server in parallel
-  var completed = 0;
-  var errors = 0;
-  ids.forEach(function(id) {
-    qrApi('/instances/' + id + '/query-status', { method: 'POST' })
-      .then(function(data) {
-        completed++;
-        if (data.status !== 'ok') errors++;
-      })
-      .catch(function() { errors++; });
-  });
-
-  // Reset button after all requests complete
-  setTimeout(function() {
-    if (errors === 0 && completed === ids.length) {
-      btn.textContent = 'All OK (' + ids.length + ')';
-    } else {
-      btn.textContent = 'Done (' + (ids.length - errors) + '/' + ids.length + ' ok)';
+  // Single API call queues all eligible instances → scheduler processes asynchronously.
+  // No individual ID collection needed — backend filters system_managed + health_check_enabled.
+  qrApi('/instances/health-check-all', { method: 'POST' }).then(function(data) {
+    if (data.status !== 'ok') {
+      btn.textContent = 'Error';
+      setTimeout(function() {
+        btn.textContent = 'Health Check All';
+        btn.disabled = false;
+      }, 3000);
+      alert('Health check failed: ' + (data.message || ''));
+      return;
     }
+    var queued = data.data && data.data.queued_count ? data.data.queued_count : 0;
+    var instList = data.data && data.data.instances ? data.data.instances : [];
+    if (instList.length === 0) {
+      btn.textContent = 'No eligible instances';
+    } else {
+      btn.textContent = 'Queued ' + queued + '/' + instList.length;
+    }
+    // Wait for scheduler to process all SSH playbooks, then refresh herd view.
+    var delay = Math.max(30000, instList.length * 5000);
+    setTimeout(function() {
+      loadHerdServers();
+      if (herdCurrentLlamaId) showHerdDetail(herdCurrentLlamaId);
+      btn.textContent = 'Health Check All';
+      btn.disabled = false;
+    }, delay);
+  }).catch(function(err) {
+    btn.textContent = 'Error';
     setTimeout(function() {
       btn.textContent = 'Health Check All';
       btn.disabled = false;
     }, 3000);
-    // Refresh the table to pick up any state changes
-    loadHerdServers();
-    if (herdCurrentLlamaId) showHerdDetail(herdCurrentLlamaId);
-  }, 2000);
+    alert('Health check queue failed: ' + (err.message || JSON.stringify(err)));
+  });
 }
 
 // ---- Manual refresh only (no auto-refresh, no timestamp) ----
@@ -1830,6 +2007,14 @@ document.addEventListener('DOMContentLoaded', function() {
   if (hcb) {
     hcb.addEventListener('click', herdHealthCheckAll);
   }
+
+  // Unified auto-save: capture event, mark dirty sections, trigger debounced batch save
+  document.addEventListener('change', function(e) {
+    if (!herdCurrentLlamaId) return;
+    window._herdLastChangeEvent = e;
+    herdAutoSave();
+  });
+
   // Initial load on page open
   loadHerdServers();
 });

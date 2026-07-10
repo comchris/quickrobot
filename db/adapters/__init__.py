@@ -47,7 +47,7 @@ from db.adapters.instances import (
 )
 from db.adapters.logs import (
     log_instance_action, get_instance_logs_paginated,
-    cleanup_old_instance_logs, get_action_history,
+    cleanup_old_logs, get_action_history,
 )
 from db.adapters.playbooks import (
     register_playbook, get_playbook_by_path,
@@ -79,7 +79,7 @@ __all__ = [
     "assign_port", "log_action", "get_instance_logs", "cleanup_old_logs",
     # logs
     "log_instance_action", "get_instance_logs_paginated",
-    "cleanup_old_instance_logs", "get_action_history",
+    "cleanup_old_logs", "get_action_history",
     # playbooks
     "register_playbook", "get_playbook_by_path",
     "register_all_core_playbooks", "resolve_playbook_by_tags",

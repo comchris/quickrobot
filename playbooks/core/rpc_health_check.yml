@@ -6,7 +6,7 @@
 # Input variables: unit_name (e.g., qr-105-llama_rpc), rpc_id, inventory_host
 # Output: task results contain parsed JSON in debug msg → parsed by run_playbook()
 
-- hosts: "{{ inventory_host | default('localhost') }}"
+- hosts: "{{ inventory_host }}"
   become: yes
   gather_facts: no
 
@@ -28,7 +28,11 @@
         _main_pid_raw: >-
           {{ (_svc_show.stdout | regex_findall('MainPID=(.*)') | first | trim) | default('0') }}
 
+    - name: Convert PID to integer (0 for inactive services)
+      set_fact:
+        _main_pid: "{{ _main_pid_raw | int }}"
+
     - name: Output health result as JSON
       debug:
-        msg: '{"rpc_id":{{ rpc_id|default(0) }}, "unit":"{{ _unit_name }}", "state":"{{ _svc_state }}", "pid":"{{ _main_pid_raw }}"}'
+        msg: '{"rpc_id":{{ rpc_id|default(0) }}, "unit":"{{ _unit_name }}", "state":"{{ _svc_state }}", "pid":{{ _main_pid }}}'
       changed_when: false

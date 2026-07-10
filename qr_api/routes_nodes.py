@@ -500,18 +500,18 @@ def api_node_reboot(node_id):
         with db_pool(_CONFIG["db_path"]) as conn:
             # Create parent job (node_id stored in engine_type_name column)
             cursor = conn.execute(
-                """INSERT INTO jobs
-                   (instance_id, job_type, engine_type_name, priority, status, actor)
-                   VALUES (?, ?, ?, ?, 'queued', ?)""",
-                (None, "reboot", f"node_{node_id}", 5, "api"),
+                """INSERT INTO log_entries
+                   (instance_id, job_type, engine_type_name, status, actor, created_at)
+                   VALUES (?, ?, ?, 'queued', ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))""",
+                (None, "reboot", f"node_{node_id}", "api"),
             )
             job_id = cursor.lastrowid
 
             # Create task for the single reboot stage
             conn.execute(
-                """INSERT INTO tasks
-                   (job_id, stage, playbook_registry_id, status)
-                   VALUES (?, 'reboot', ?, 'queued')""",
+                """INSERT INTO log_entries
+                   (parent_id, task_stage, playbook_registry_id, status, created_at)
+                   VALUES (?, 'reboot', ?, 'queued', strftime('%Y-%m-%dT%H:%M:%SZ','now'))""",
                 (job_id, None),  # playbook_registry_id resolved at execution time
             )
             conn.commit()
@@ -534,13 +534,13 @@ def api_node_reboot(node_id):
                                           "node_user": user, "ansible_port": port},
                               action_type="reboot_node")
         if r["error"]:
-            conn.execute("UPDATE jobs SET status='failed' WHERE id=?", (job_id,))
+            conn.execute("UPDATE log_entries SET status='failed' WHERE id=?", (job_id,))
             conn.commit()
             return error_response("DEPLOYMENT_FAILED", r["error"])
 
         # Mark task completed
-        conn.execute("UPDATE tasks SET status='completed', finished_at=strftime('%Y-%m-%dT%H:%M:%S','now') WHERE job_id=? AND stage='reboot'", (job_id,))
-        conn.execute("UPDATE jobs SET status='completed', finished_at=strftime('%Y-%m-%dT%H:%M:%S','now') WHERE id=?", (job_id,))
+        conn.execute("UPDATE log_entries SET status='completed', finished_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE parent_id=? AND task_stage='reboot'", (job_id,))
+        conn.execute("UPDATE log_entries SET status='completed', finished_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?", (job_id,))
         conn.commit()
 
         return success_single({"action": "reboot", "node_id": node_id,
@@ -550,9 +550,21 @@ def api_node_reboot(node_id):
         return error_response("DEPLOYMENT_FAILED", f"Reboot failed: {exc}")
 
 
-def api_node_apt_update(node_id):
-    """Run apt update on a remote node."""
+def api_node_apt(node_id, action="update"):
+    """Unified APT operation endpoint (EP-CONSOLIDATE P2).
+
+    Dispatches to apt_update, apt_upgrade, or apt_update_upgrade based on action.
+
+    Args:
+        node_id: Node primary key.
+        action: "update", "upgrade", or "all" (update+upgrade combined).
+
+    Returns:
+        JSON with action, node_id, and result.
+    """
     from lib.lib_ansible_runner import log_ansible_action as _la
+    from lib.lib_runner import PlaybookRunner as _Runner
+    from db.sqlite import pool as db_pool
 
     # Check node is active (admin toggle)
     nd = _check_node_active(_CONFIG["db_path"], node_id)
@@ -561,15 +573,95 @@ def api_node_apt_update(node_id):
 
     hostname = nd.get("hostname") or nd.get("name")
 
-    # _execute_playbook handles all logging (starting/success/error) — single logging point
-    r = _execute_playbook("apt_update", resolver_type="playbook_id",
-                         limit=hostname, node_id=node_id,
-                         extra_vars={"inventory_host": hostname},
-                         action_type="apt_update")
-    if r["error"]:
-        return error_response("DEPLOYMENT_FAILED", r["error"])
-    return success_single({"action": "apt_update", "node_id": node_id,
-                            "result": r.get("result")})
+    if action == "all":
+        # Combined update + upgrade via RUNNER-1 staged chain
+        runner = _Runner(_CONFIG["db_path"])
+        stages = runner._get_stage_chain(None, "apt_update_upgrade", None)
+        if not stages:
+            return error_response("PLAYBOOK_NOT_FOUND", "No stages found for apt_update_upgrade job type")
+
+        with db_pool(_CONFIG["db_path"]) as conn:
+            cursor = conn.execute(
+                """INSERT INTO log_entries
+                   (instance_id, job_type, engine_type_name, node_id, status, actor, created_at)
+                   VALUES (?, ?, ?, ?, 'queued', ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))""",
+                (None, "apt_update_upgrade", f"node_{node_id}", node_id, "api"),
+            )
+            job_id = cursor.lastrowid
+
+            task_ids = []
+            for stage in stages:
+                tcur = conn.execute(
+                    """INSERT INTO log_entries
+                       (parent_id, task_stage, playbook_registry_id, status, created_at)
+                       VALUES (?, ?, NULL, 'queued', strftime('%Y-%m-%dT%H:%M:%SZ','now'))""",
+                    (job_id, stage["stage"]),
+                )
+                task_ids.append(tcur.lastrowid)
+            conn.commit()
+
+        from db.adapters.playbooks import resolve_playbook_by_id as _rpbi
+        results = []
+        for stage in stages:
+            pb_id = stage["playbook"]
+            pb_record = _rpbi(_CONFIG["db_path"], pb_id)
+            playbook_path = None
+            if pb_record and pb_record.get("file_path"):
+                playbook_path = os.path.join(
+                    _project_root, pb_record["file_path"]
+                    if not pb_record["file_path"].startswith("/") else pb_record["file_path"]
+                )
+            if not playbook_path:
+                playbook_path = os.path.join(_project_root, "playbooks", f"{pb_id}.yml")
+
+            r = _execute_playbook(playbook_path, resolver_type="file_path",
+                                 limit=hostname, node_id=node_id,
+                                 extra_vars={"inventory_host": hostname},
+                                 action_type=f"apt_{stage['stage']}")
+            if r["error"]:
+                conn.execute("UPDATE log_entries SET status='failed' WHERE id=?", (job_id,))
+                conn.execute("UPDATE log_entries SET status='failed' WHERE parent_id=?", (job_id,))
+                conn.commit()
+                return error_response("DEPLOYMENT_FAILED", r["error"])
+            results.append(r.get("result"))
+
+        conn.execute("""UPDATE log_entries SET status='completed',
+                        finished_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')
+                        WHERE parent_id=?""", (job_id,))
+        conn.execute("""UPDATE log_entries SET status='completed',
+                        finished_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')
+                        WHERE id=?""", (job_id,))
+        conn.commit()
+
+        return success_single({"action": "apt_update_upgrade", "node_id": node_id,
+                               "job_id": job_id, "message": "APT update + upgrade completed"})
+
+    else:
+        # Single operation: update or upgrade
+        playbook_name = "apt_update" if action == "update" else "apt_upgrade"
+        r = _execute_playbook(playbook_name, resolver_type="playbook_id",
+                             limit=hostname, node_id=node_id,
+                             extra_vars={"inventory_host": hostname},
+                             action_type=f"apt_{action}")
+        if r["error"]:
+            return error_response("DEPLOYMENT_FAILED", r["error"])
+        return success_single({"action": f"apt_{action}", "node_id": node_id,
+                               "result": r.get("result")})
+
+
+def api_node_apt_update(node_id):
+    """Run apt update — EP-CONSOLIDATE P2 (thin wrapper)."""
+    return api_node_apt(node_id, action="update")
+
+
+def api_node_apt_upgrade(node_id):
+    """Run apt upgrade — EP-CONSOLIDATE P2 (thin wrapper)."""
+    return api_node_apt(node_id, action="upgrade")
+
+
+def api_node_apt_update_upgrade(node_id):
+    """Combined apt update + upgrade — EP-CONSOLIDATE P2 (thin wrapper)."""
+    return api_node_apt(node_id, action="all")
 
 
 def api_node_ping(node_id):
@@ -610,110 +702,6 @@ def api_node_ping(node_id):
         pass  # non-critical
 
     return success_single({"ping_state": ps})
-
-
-def api_node_apt_upgrade(node_id):
-    """Run apt upgrade on a remote node."""
-    from lib.lib_ansible_runner import log_ansible_action as _la
-
-    # Check node is active (admin toggle)
-    nd = _check_node_active(_CONFIG["db_path"], node_id)
-    if isinstance(nd, tuple):
-        return nd
-
-    hostname = nd.get("hostname") or nd.get("name")
-
-    # _execute_playbook handles all logging (starting/success/error) — single logging point
-    r = _execute_playbook("apt_upgrade", resolver_type="playbook_id",
-                         limit=hostname, node_id=node_id,
-                         extra_vars={"inventory_host": hostname},
-                         action_type="apt_upgrade")
-    if r["error"]:
-        return error_response("DEPLOYMENT_FAILED", r["error"])
-    return success_single({"action": "apt_upgrade", "node_id": node_id,
-                             "result": r.get("result")})
-
-
-def api_node_apt_update_upgrade(node_id):
-    """Combined apt update + upgrade via RUNNER-1 staged chain.
-
-    Uses job_type='apt_update_upgrade' with stage chain:
-      [apt_update, apt_upgrade] — runs both playbooks sequentially.
-    Async fire-and-forget: returns within milliseconds after queueing.
-    """
-    from lib.lib_runner import PlaybookRunner as _Runner
-    from db.sqlite import pool as db_pool
-
-    # Check node is active (admin toggle)
-    nd = _check_node_active(_CONFIG["db_path"], node_id)
-    if isinstance(nd, tuple):
-        return nd
-
-    hostname = nd["hostname"]
-
-    runner = _Runner(_CONFIG["db_path"])
-    stages = runner._get_stage_chain(None, "apt_update_upgrade", None)
-    if not stages:
-        raise ValueError("No stages found for apt_update_upgrade job type")
-
-    with db_pool(_CONFIG["db_path"]) as conn:
-        cursor = conn.execute(
-            """INSERT INTO jobs
-               (instance_id, job_type, engine_type_name, priority, status, actor)
-               VALUES (?, ?, ?, ?, 'queued', ?)""",
-            (None, "apt_update_upgrade", f"node_{node_id}", 5, "api"),
-        )
-        job_id = cursor.lastrowid
-
-        task_ids = []
-        for stage in stages:
-            tcur = conn.execute(
-                """INSERT INTO tasks
-                   (job_id, stage, playbook_registry_id, status)
-                   VALUES (?, ?, NULL, 'queued')""",
-                (job_id, stage["stage"]),
-            )
-            task_ids.append(tcur.lastrowid)
-        conn.commit()
-
-    # Execute each stage sequentially via _execute_playbook
-    from db.adapters.playbooks import resolve_playbook_by_id as _rpbi
-    results = []
-    for stage in stages:
-        pb_id = stage["playbook"]
-        pb_record = _rpbi(_CONFIG["db_path"], pb_id)
-        playbook_path = None
-        if pb_record and pb_record.get("file_path"):
-            playbook_path = os.path.join(
-                _project_root, pb_record["file_path"]
-                if not pb_record["file_path"].startswith("/") else pb_record["file_path"]
-            )
-        if not playbook_path:
-            playbook_path = os.path.join(_project_root, "playbooks", f"{pb_id}.yml")
-
-        r = _execute_playbook(playbook_path, resolver_type="file_path",
-                              limit=hostname, node_id=node_id,
-                              extra_vars={"inventory_host": hostname},
-                              action_type=f"apt_{stage['stage']}")
-        if r["error"]:
-            conn.execute("UPDATE jobs SET status='failed' WHERE id=?", (job_id,))
-            conn.execute("UPDATE tasks SET status='failed' WHERE job_id=?", (job_id,))
-            conn.commit()
-            return error_response("DEPLOYMENT_FAILED", r["error"])
-        results.append(r.get("result"))
-
-    # Mark all tasks completed and job done
-    conn.execute("""UPDATE tasks SET status='completed',
-                    finished_at=strftime('%Y-%m-%dT%H:%M:%S','now')
-                    WHERE job_id=?""", (job_id,))
-    conn.execute("""UPDATE jobs SET status='completed',
-                    finished_at=strftime('%Y-%m-%dT%H:%M:%S','now')
-                    WHERE id=?""", (job_id,))
-    conn.commit()
-
-    return success_single({"action": "apt_update_upgrade", "node_id": node_id,
-                           "job_id": job_id,
-                           "message": "APT update + upgrade completed"})
 
 
 def api_instance_rebuild(inst_id):
@@ -2105,26 +2093,27 @@ def api_ansible_actions():
     limit = request.args.get("limit", 50, type=int)
 
     # Build the base query with JOINs for node/instance/playbook names
-    query = ("SELECT a.*, n.name as node_name, i.name as instance_name, "
-                "p.file_path as playbook_file, p.version as playbook_version "
-                "FROM ansible_actions a "
-                "LEFT JOIN nodes n ON a.node_id = n.id "
-                "LEFT JOIN instances i ON a.instance_id = i.id "
-                "LEFT JOIN playbook_registry p ON a.playbook_registry_id = p.id "
-                "WHERE 1=1")
+    # log_entries: job_type=action_type, stage_playbook=playbook_name
+    query = ("SELECT le.*, n.name as node_name, i.name as instance_name, "
+                 "p.file_path as playbook_file, p.version as playbook_version "
+                 "FROM log_entries le "
+                 "LEFT JOIN nodes n ON le.node_id = n.id "
+                 "LEFT JOIN instances i ON le.instance_id = i.id "
+                 "LEFT JOIN playbook_registry p ON le.playbook_registry_id = p.id "
+                 "WHERE 1=1 AND le.parent_id IS NULL")
     params = []
 
     if node_id:
-        query += " AND a.node_id = ?"
+        query += " AND le.node_id = ?"
         params.append(node_id)
     if instance_id:
-        query += " AND a.instance_id = ?"
+        query += " AND le.instance_id = ?"
         params.append(instance_id)
     if action_type:
-        query += " AND a.action_type = ?"
+        query += " AND le.job_type = ?"
         params.append(action_type)
 
-    query += " ORDER BY a.finished_at DESC LIMIT ?"
+    query += " ORDER BY le.started_at DESC LIMIT ?"
     params.append(limit)
 
     with pool(_CONFIG["db_path"]) as conn:
@@ -2193,28 +2182,28 @@ def api_qr_actions():
     action_type = request.args.get("action_type")
     limit = request.args.get("limit", 50, type=int)
 
-    query = ("SELECT a.*, n.name as node_name, i.name as instance_name "
-             "FROM qr_actions a "
-             "LEFT JOIN nodes n ON a.node_id = n.id "
-             "LEFT JOIN instances i ON a.instance_id = i.id "
-             "WHERE 1=1")
+    query = ("SELECT le.*, n.name as node_name, i.name as instance_name "
+             "FROM log_entries le "
+             "LEFT JOIN nodes n ON le.node_id = n.id "
+             "LEFT JOIN instances i ON le.instance_id = i.id "
+             "WHERE 1=1 AND le.parent_id IS NULL")
     params = []
 
     if status_filter:
-        query += " AND a.status = ?"
+        query += " AND le.status = ?"
         params.append(status_filter)
     if node_id:
-        query += " AND a.node_id = ?"
+        query += " AND le.node_id = ?"
         params.append(node_id)
     if instance_id:
-        query += " AND a.instance_id = ?"
+        query += " AND le.instance_id = ?"
         params.append(instance_id)
     if action_type:
-        query += " AND a.action_type = ?"
+        query += " AND le.job_type = ?"
         params.append(action_type)
 
     # Running tasks first, then newest
-    query += " ORDER BY CASE WHEN a.status='running' THEN 0 ELSE 1 END, a.created_at DESC LIMIT ?"
+    query += " ORDER BY CASE WHEN le.status='running' THEN 0 ELSE 1 END, le.created_at DESC LIMIT ?"
     params.append(limit)
 
     with pool(_CONFIG["db_path"]) as conn:
@@ -2275,7 +2264,7 @@ def api_clear_old_ansible_actions():
     days = int(body.get("days", 7)) if body.get("days") is not None else 7
     if days == 0:
         # Clear all entries
-        query = "DELETE FROM ansible_actions"
+        query = "DELETE FROM log_entries"
         with pool(_CONFIG["db_path"]) as conn:
             cur = conn.execute(query)
             deleted = cur.rowcount
@@ -2287,7 +2276,7 @@ def api_clear_old_ansible_actions():
 
     cutoff = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=days)).strftime('%Y-%m-%dT%H:%M:%SZ')
 
-    query = "DELETE FROM ansible_actions WHERE started_at < ?"
+    query = "DELETE FROM log_entries WHERE started_at < ?"
     with pool(_CONFIG["db_path"]) as conn:
         cur = conn.execute(query, (cutoff,))
         deleted = cur.rowcount
@@ -2309,7 +2298,7 @@ def api_clear_old_qr_actions():
     days = int(body.get("days", 7)) if body.get("days") is not None else 7
     if days == 0:
         # Clear all entries
-        query = "DELETE FROM qr_actions"
+        query = "DELETE FROM log_entries"
         with pool(_CONFIG["db_path"]) as conn:
             cur = conn.execute(query)
             deleted = cur.rowcount
@@ -2321,7 +2310,7 @@ def api_clear_old_qr_actions():
 
     cutoff = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=days)).strftime('%Y-%m-%dT%H:%M:%SZ')
 
-    query = "DELETE FROM qr_actions WHERE started_at < ?"
+    query = "DELETE FROM log_entries WHERE started_at < ?"
     with pool(_CONFIG["db_path"]) as conn:
         cur = conn.execute(query, (cutoff,))
         deleted = cur.rowcount
@@ -3234,6 +3223,161 @@ def api_cleanup_null_logs():
     from db.adapters.logs import cleanup_null_log_entries
     deleted = cleanup_null_log_entries(_CONFIG["db_path"])
     return success_single(deleted)
+
+
+def api_log_entries():
+    """List unified log entries with optional filters.
+
+    Queries the unified log_entries table (consolidated from jobs, tasks,
+    ansible_actions, qr_actions, and instance_logs).
+
+    Query params:
+        status: Filter by status ('running', 'completed', 'failed', etc.)
+        job_type: Filter by job type ('deploy', 'restart', 'reconfigure', etc.)
+        instance_id: Filter by instance (int)
+        node_id: Filter by node (int)
+        parent_id: Filter by parent job ID (for task sub-rows)
+        limit: Max results (default 50)
+        offset: Pagination offset (default 0)
+
+    Returns:
+        { status: "ok", total: N, items: [...], offset: N }
+    """
+    from db.sqlite import pool
+    import datetime as _dt
+
+    status_filter = request.args.get("status")
+    job_type = request.args.get("job_type")
+    instance_id = request.args.get("instance_id", type=int)
+    node_id = request.args.get("node_id", type=int)
+    parent_id = request.args.get("parent_id", type=int)
+    limit = request.args.get("limit", 50, type=int)
+    offset = request.args.get("offset", 0, type=int)
+
+    query = ("SELECT le.id, le.parent_id, le.job_type, le.engine_type_name, "
+             "le.instance_id, le.node_id, le.status, le.actor, "
+             "le.error_message, le.created_at, le.started_at, "
+             "le.finished_at, le.duration_ms, le.task_stage, "
+             "le.stage_playbook, le.retry_count, le.max_retries, "
+             "le.details_json, le.results_json, "
+             "le.playbook_registry_id, le.playbook_version, "
+             "n.name as node_name, i.name as instance_name "
+             "FROM log_entries le "
+             "LEFT JOIN nodes n ON le.node_id = n.id "
+             "LEFT JOIN instances i ON le.instance_id = i.id "
+             "WHERE 1=1")
+    params = []
+
+    if status_filter:
+        query += " AND le.status = ?"
+        params.append(status_filter)
+    if job_type:
+        query += " AND le.job_type = ?"
+        params.append(job_type)
+    if instance_id:
+        query += " AND le.instance_id = ?"
+        params.append(instance_id)
+    if node_id:
+        query += " AND le.node_id = ?"
+        params.append(node_id)
+    if parent_id is not None:
+        query += " AND le.parent_id = ?"
+        params.append(parent_id)
+
+    # Job headers first (parent_id IS NULL), then task sub-rows
+    query += " ORDER BY CASE WHEN le.parent_id IS NULL THEN 0 ELSE 1 END, le.created_at DESC LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+
+    with pool(_CONFIG["db_path"]) as conn:
+        rows = conn.execute(query, params).fetchall()
+
+    items = []
+    for row in rows:
+        d = {k: row[k] for k in row.keys()}
+        # Parse JSON fields if present
+        for json_field in ("details_json", "results_json"):
+            if d.get(json_field):
+                try:
+                    d[json_field] = json.loads(d[json_field])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        items.append(d)
+
+    # Get total count (excluding offset)
+    count_query = ("SELECT COUNT(*) FROM log_entries le "
+                   "LEFT JOIN nodes n ON le.node_id = n.id "
+                   "LEFT JOIN instances i ON le.instance_id = i.id "
+                   "WHERE 1=1")
+    count_params = []
+    if status_filter:
+        count_query += " AND le.status = ?"
+        count_params.append(status_filter)
+    if job_type:
+        count_query += " AND le.job_type = ?"
+        count_params.append(job_type)
+    if instance_id:
+        count_query += " AND le.instance_id = ?"
+        count_params.append(instance_id)
+    if node_id:
+        count_query += " AND le.node_id = ?"
+        count_params.append(node_id)
+    if parent_id is not None:
+        count_query += " AND le.parent_id = ?"
+        count_params.append(parent_id)
+
+    with pool(_CONFIG["db_path"]) as conn:
+        total = conn.execute(count_query, count_params).fetchone()[0]
+
+    return success_list(items, total=total, meta={"offset": offset, "limit": limit})
+
+
+def api_cleanup_log_entries():
+    """Bulk delete log entries with optional filters.
+
+    POST /api/v1/log_entries/cleanup with JSON body:
+        { older_than_minutes: N }       — delete entries older than N minutes
+        { older_than_minutes: N, status: "completed" } — only completed entries
+
+    Returns:
+        { status: "ok", data: { deleted_count } }
+    """
+    from db.sqlite import pool
+    import datetime as _dt
+
+    try:
+        body = request.get_json(silent=True) or {}
+        older_than = body.get("older_than_minutes", 4320)  # 3 days default
+        status_filter = body.get("status")  # optional: only delete specific status
+    except Exception:
+        return error_response("VALIDATION_ERROR", "Invalid JSON body")
+
+    try:
+        older_than = int(older_than)
+    except (ValueError, TypeError):
+        return error_response("VALIDATION_ERROR", "older_than_minutes must be an integer")
+
+    if older_than < 1:
+        older_than = 1
+
+    cutoff = (_dt.datetime.utcnow() - _dt.timedelta(minutes=older_than)).strftime("%Y-%m-%dT%H:%M:%S")
+    # Protect running/recent jobs: never delete entries with status 'running', 'received', or 'queued'
+    # unless the user explicitly filters by that status
+    if not status_filter:
+        query = "DELETE FROM log_entries WHERE created_at < ? AND status NOT IN ('running','received','queued')"
+    else:
+        query = "DELETE FROM log_entries WHERE created_at < ?"
+    params = [cutoff]
+
+    if status_filter:
+        query += " AND status = ?"
+        params.append(status_filter)
+
+    with pool(_CONFIG["db_path"]) as conn:
+        cursor = conn.execute(query, params)
+        deleted = cursor.rowcount
+        conn.commit()
+
+    return success_single({"deleted_count": deleted})
 
 
 def api_health_check():

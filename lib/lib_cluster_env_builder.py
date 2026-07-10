@@ -36,7 +36,7 @@ from lib.lib_config_level import (
     LayeredMergeChain,
     _deep_merge_dicts,
 )
-from lib.qr_engine_ids import QR_ENGINE_LLAMA_SERVER, QR_ENGINE_LLAMA_RPC, QR_DEFAULT_LOCALHOST
+from lib.qr_engine_ids import QR_ENGINE_LLAMA_SERVER, QR_ENGINE_LLAMA_RPC, QR_DEFAULT_LOCALHOST, QR_ENGINE_LLAMA_SERVER_NAME
 
 
 DEFAULT_SPLIT_MODE = "layer"
@@ -407,7 +407,7 @@ def build_llama_server_env(db_path, instance_id):
                 cleaned = _clean_model_dict(preset_model)
                 preset_metadata = {}
                 if preset_gpu:
-                    preset_env["LLAMA_ARG_DEVICE"] = preset_gpu
+                    preset_env["qr_cluster_gpu_override"] = preset_gpu
                     preset_metadata["gpu_device"] = preset_gpu
 
                 chain.append(ConfigLevel(3, "preset_template",
@@ -423,14 +423,24 @@ def build_llama_server_env(db_path, instance_id):
             has_flat = isinstance(override_raw, dict) and len(override_raw) > 0
 
             if has_structured:
-                ov_env = override_raw.get("env") or {}
+                ov_env = dict(override_raw.get("env") or {})
                 ov_cli = list(override_raw.get("cli_opts") or [])
                 ov_model = override_raw.get("model") or {}
+                # GPU override aliases at top-level of config_override — merge into env
+                for alias in ("gpu_override", "device", "qr_cluster_gpu_override"):
+                    if alias in override_raw and override_raw[alias] is not None:
+                        ov_env["qr_cluster_gpu_override"] = override_raw[alias]
             elif supports_models and has_flat:
+                # NOTE: qr_cluster_gpu_override goes into env — it's a GPU device name, not a file path.
+                # If it lands in model, _resolve_model_paths() post-cleanup will strip it out
+                # because "none" doesn't end with .gguf/.bin/.model.
                 ov_env = {}
                 ov_model = {}
                 for k, v in override_raw.items():
-                    if k.startswith("LLAMA_ARG_"):
+                    # Normalize gpu_override/device aliases to canonical name for env
+                    if k in ("gpu_override", "device"):
+                        k = "qr_cluster_gpu_override"
+                    if k.startswith("LLAMA_ARG_") or k == "qr_cluster_gpu_override":
                         ov_env[k] = v
                     else:
                         wrapped = _wrap_flat_as_model({k: v})
@@ -495,8 +505,10 @@ def build_llama_server_env(db_path, instance_id):
     if port:
         base_cli.extend(["--port", str(port)])
 
-    # GPU Override: read from merged env (Layer 5: config_override)
-    gpu_override = chain_result.get("env", {}).get("LLAMA_ARG_DEVICE") or None
+    # GPU Override: read from env (qr_cluster_gpu_override now lands in env, not model,
+    # since it's a GPU device name not a file path — avoids _resolve_model_paths() mangling)
+    # get_merged() returns {"env": ..., "cli_opts": ..., "model": ...}
+    gpu_override = chain_result.get("env", {}).get("qr_cluster_gpu_override") or None
     preset_cli_opts = list(chain_result.get("cli_opts", []))
 
     # Extract base device from preset cli_opts (format: "-dev <value>")
@@ -516,6 +528,8 @@ def build_llama_server_env(db_path, instance_id):
         inst.get("split"), [str(b["split"]) for b in rpc_bindings], has_explicit_device)
 
     # Build -dev flag: GPU override > base_dev > RPC refs
+    # NOTE: gpu_override can be "none" — this is a VALID option meaning "no GPU devices"
+    # (explicitly tell llama-server to use CPU only, distinct from omitting -dev entirely)
     dev_refs = []
     if gpu_override:
         dev_refs.append(gpu_override)
@@ -583,17 +597,69 @@ def build_llama_server_env(db_path, instance_id):
         if isinstance(flag, str) and flag.strip():
             cli_parts.append(flag.strip())
 
-    cli_args = " ".join(str(x) for x in cli_parts)
+    # HERD-CLI-DUP: Deduplicate CLI flags by flag name, keeping LAST occurrence.
+    # Also strips --host/--port for llama_server (handled by LLAMA_ARG_HOST/PORT env vars).
+    # NOTE: instances table has engine_type_id column but NOT engine_type_name —
+    # use the ID directly to avoid comparing against a missing DB field.
+    _strip_flags = set()
+    if inst.get("engine_type_id") == QR_ENGINE_LLAMA_SERVER:
+        _strip_flags.add("--host")
+        _strip_flags.add("--port")
+
+    # Parse cli_parts into (flag_key, flag_value_or_None) pairs, then dedup by key.
+    # Iterates backwards to keep the last occurrence of each flag while preserving order.
+    _pairs = []  # [(key, value_or_None), ...]
+    i = 0
+    while i < len(cli_parts):
+        part = cli_parts[i]
+        if isinstance(part, str) and part.startswith("--"):
+            # Long flag: check if next element is its value (doesn't start with -)
+            nxt = cli_parts[i + 1] if i + 1 < len(cli_parts) else None
+            if isinstance(nxt, str) and not nxt.startswith("-"):
+                _pairs.append((part, nxt))
+                i += 2
+            else:
+                _pairs.append((part, None))
+                i += 1
+        elif isinstance(part, str) and part.startswith("-") and len(part) == 2:
+            # Short flag like "-v" — single element, value goes in separate slot
+            _pairs.append((part, None))
+            i += 1
+        else:
+            # Free-form value (e.g., positional args) — keep as-is
+            _pairs.append((str(part), None))
+            i += 1
+
+    # Deduplicate: iterate backwards, keep only first seen key (last in original order).
+    # Also removes flags listed in _strip_flags (--host/--port for llama_server).
+    _seen = set()
+    _deduped = []
+    for key, val in reversed(_pairs):
+        if key not in _seen:
+            if _strip_flags and key in _strip_flags:
+                continue  # skip this flag entirely
+            _seen.add(key)
+            _deduped.append((key, val))
+    _deduped.reverse()
+
+    # Flatten back to list
+    cli_parts_final = []
+    for key, val in _deduped:
+        cli_parts_final.append(key)
+        if val is not None:
+            cli_parts_final.append(val)
+
+    cli_args = " ".join(str(x) for x in cli_parts_final)
 
     # Build L7 cluster bindings ConfigLevel
-    # env: tensor_split + split_mode + binary_path; remove LLAMA_ARG_DEVICE
+    # env: tensor_split + split_mode + binary_path; remove qr_cluster_gpu_override
     cluster_env = {
         "LLAMA_ARG_TENSOR_SPLIT": tensor_split_str,
         "binary_path": binary_path,
     }
     if split_mode:
         cluster_env["LLAMA_ARG_SPLIT_MODE"] = split_mode
-    # Remove LLAMA_ARG_DEVICE — device is set via CLI -dev flag, not env var
+    # Remove qr_cluster_gpu_override — device is set via CLI -dev flag, not env var
     # (The merge will remove it since we add it with None sentinel)
 
     # Build L7 CLI opts from cluster additions
@@ -604,8 +670,8 @@ def build_llama_server_env(db_path, instance_id):
         cluster_cli.extend(["-dev", base_dev])
     cluster_cli.extend(draft_devices_cli)
 
-    # Remove LLAMA_ARG_DEVICE from the L7 env layer (null sentinel)
-    cluster_env["LLAMA_ARG_DEVICE"] = ""  # Empty string removes the key
+    # Remove qr_cluster_gpu_override from the L7 env layer (null sentinel)
+    cluster_env["qr_cluster_gpu_override"] = ""  # Empty string removes the key
 
     chain.append(ConfigLevel(7, "cluster_bindings",
                              env_vars=cluster_env, cli_opts=cluster_cli))
@@ -740,7 +806,7 @@ def build_rpc_server_env(db_path, instance_id):
                 cleaned = _clean_model_dict(preset_model)
                 preset_metadata = {}
                 if preset_gpu:
-                    preset_env["LLAMA_ARG_DEVICE"] = preset_gpu
+                    preset_env["qr_cluster_gpu_override"] = preset_gpu
                     preset_metadata["gpu_device"] = preset_gpu
 
                 chain.append(ConfigLevel(3, "preset_template",
@@ -756,14 +822,21 @@ def build_rpc_server_env(db_path, instance_id):
             has_flat = isinstance(override_raw, dict) and len(override_raw) > 0
 
             if has_structured:
-                ov_env = override_raw.get("env") or {}
+                ov_env = dict(override_raw.get("env") or {})
                 ov_cli = list(override_raw.get("cli_opts") or [])
                 ov_model = override_raw.get("model") or {}
+                # GPU override aliases at top-level of config_override — merge into env
+                for alias in ("gpu_override", "device", "qr_cluster_gpu_override"):
+                    if alias in override_raw and override_raw[alias] is not None:
+                        ov_env["qr_cluster_gpu_override"] = override_raw[alias]
             elif has_flat:
                 ov_env = {}
                 ov_model = {}
                 for k, v in override_raw.items():
-                    if k.startswith("LLAMA_ARG_"):
+                    # Normalize gpu_override/device aliases to canonical name for env
+                    if k in ("gpu_override", "device"):
+                        k = "qr_cluster_gpu_override"
+                    if k.startswith("LLAMA_ARG_") or k == "qr_cluster_gpu_override":
                         ov_env[k] = v
                     else:
                         wrapped = _wrap_flat_as_model({k: v})
@@ -783,8 +856,8 @@ def build_rpc_server_env(db_path, instance_id):
 
     # Build CLI args: -H {host} -p {port} -d {device} + remaining preset cli_opts
     device = None
-    if chain_result.get("env", {}).get("LLAMA_ARG_DEVICE"):
-        device = chain_result["env"]["LLAMA_ARG_DEVICE"]
+    if chain_result.get("env", {}).get("qr_cluster_gpu_override"):
+        device = chain_result["env"]["qr_cluster_gpu_override"]
     for i in range(len(chain_result.get("cli_opts", [])) - 1):
         if chain_result["cli_opts"][i] == "-d" and i + 1 < len(chain_result["cli_opts"]):
             device = chain_result["cli_opts"][i + 1]
@@ -916,7 +989,7 @@ def get_cluster_summary(db_path, llama_id):
         try:
             co_data = json.loads(inst_co_raw) if isinstance(inst_co_raw, str) else {}
             if isinstance(co_data, dict):
-                gpu_override_summary = co_data.get("LLAMA_ARG_DEVICE") or None
+                gpu_override_summary = co_data.get("qr_cluster_gpu_override") or None
         except (json.JSONDecodeError, TypeError):
             pass
 
@@ -948,7 +1021,7 @@ def get_cluster_summary(db_path, llama_id):
         try:
             co_data2 = json.loads(co_raw) if isinstance(co_raw, str) else {}
             if isinstance(co_data2, dict):
-                gpu_override = co_data2.get("LLAMA_ARG_DEVICE") or None
+                gpu_override = co_data2.get("qr_cluster_gpu_override") or None
         except (json.JSONDecodeError, TypeError):
             pass
         # Resolve draft devices: RPCs with draft > 0 get --device-draft RPC<N>

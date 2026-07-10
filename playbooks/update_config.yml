@@ -14,13 +14,13 @@
     instance_port: "{{ instance_port }}"
     unit_name: "qr-{{ instance_id }}-{{ engine_type }}"
     env_file: "/etc/quickrobot/{{ unit_name }}.env"
-    binary_path: "{{ binary_path | default('') }}"
+    binary_path: "{{ binary_path }}"
     remote_node_user: "{{ remote_node_user }}"
     # Pre-computed cluster values (from lib_cluster_env_builder)
-    merged_env: "{{ merged_env | default({}) }}"
-    merged_cli_opts: "{{ merged_cli_opts | default([]) }}"
-    tensor_split_value: "{{ tensor_split_value | default('') }}"
-    split_mode_value: "{{ split_mode_value | default('layer') }}"
+    merged_env: "{{ merged_env }}"
+    merged_cli_opts: "{{ merged_cli_opts }}"
+    tensor_split_value: "{{ tensor_split_value }}"
+    split_mode_value: "{{ split_mode_value }}"
     rpc_bind_ids: "{{ rpc_bind_ids | default([]) }}"
 
   tasks:
@@ -52,7 +52,7 @@
     # Build CLI args string (CONFIG-1) — converts list to space-joined string for env templates
     - name: Build CLI args string (CONFIG-1)
       set_fact:
-        cli_args_joined: "{{ merged_cli_opts | default('') }}"
+        cli_args_joined: "{{ merged_cli_opts }}"
 
     # --- Write env file (engine-specific template) ---
     - name: Write environment file from template (llama_server)

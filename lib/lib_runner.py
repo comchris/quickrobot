@@ -54,6 +54,7 @@ from lib.qr_engine_ids import (
     QR_JOB_START,
     QR_JOB_RESTART,
     QR_JOB_STOP,
+    QR_JOB_HEALTH_CHECK,
     QR_JOB_REBOOT,
     QR_JOB_APT_UPDATE,
     QR_JOB_APT_UPGRADE,
@@ -67,6 +68,9 @@ from lib.qr_engine_ids import (
     QR_STAGE_START,
     QR_STAGE_STOP,
     QR_STAGE_HEALTH_PROBE,
+    QR_STAGE_HEALTH_CHECK,
+    QR_STAGE_UNDEPLOY,
+    QR_STAGE_VERIFY,
     QR_TIMEOUT_COMPILE,
     QR_TIMEOUT_SOURCE,
     QR_TIMEOUT_DEFAULT,
@@ -145,6 +149,10 @@ DEFAULT_STAGE_CHAINS = {
                 {"stage": "start",       "playbook": "service_start"},
             ],
         },
+        # Health check — runs instance_health_check playbook once, returns status
+        "health_check": [
+            {"stage": "health_check",  "playbook": "instance_health_check"},
+        ],
 }
 
 
@@ -189,36 +197,54 @@ class PlaybookRunner:
         stages = self._get_stage_chain(engine_name, job_type, inst)
 
         with pool(self.db_path) as conn:
-            # Create the parent job
+            # Create the parent job-header row (parent_id=NULL)
             cursor = conn.execute(
-                """INSERT INTO jobs
-                   (instance_id, job_type, engine_type_name, priority, status, actor)
-                   VALUES (?, ?, ?, ?, 'queued', ?)""",
-                (instance_id, job_type, engine_name, priority, actor),
+                """INSERT INTO log_entries
+                   (parent_id, job_type, engine_type_name, instance_id, node_id, status, actor,
+                    created_at, task_stage, stage_playbook, retry_count, max_retries, details_json)
+                   VALUES (NULL, ?, ?, ?, ?, 'queued', ?,
+                           strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+                           NULL, NULL, 0, 1, ?)""",
+                (job_type, engine_name, instance_id, inst.get("node_id"), actor, json.dumps({"job_type": job_type})),
             )
             job_id = cursor.lastrowid
 
-            # Create one task per stage
+            # Create task sub-rows (parent_id=job_id)
             tasks = []
             for s in stages:
-                # service_start has no retry value — if systemd can't start the
-                # service (wrong path, bad CLI args, missing env), retrying is
-                # pointless and just wastes time / creates noise.
-                _max_retries = 0 if s["playbook"] == "service_start" else None
-                if _max_retries is not None:
-                    cur = conn.execute(
-                        """INSERT INTO tasks
-                           (job_id, instance_id, stage, playbook, status, max_retries)
-                           VALUES (?, ?, ?, ?, 'queued', ?)""",
-                        (job_id, instance_id, s["stage"], s["playbook"], _max_retries),
-                    )
-                else:
-                    cur = conn.execute(
-                        """INSERT INTO tasks
-                           (job_id, instance_id, stage, playbook, status)
-                           VALUES (?, ?, ?, ?, 'queued')""",
-                        (job_id, instance_id, s["stage"], s["playbook"]),
-                    )
+                # service_start has no retry value
+                _max_retries = 0 if s["playbook"] == "service_start" else 1
+                # Look up playbook_registry_id and version for logging
+                try:
+                    registry_entry = conn.execute(
+                        "SELECT id, version FROM playbook_registry WHERE playbook_id=?",
+                        (s["playbook"],),
+                    ).fetchone()
+                    pb_reg_id = registry_entry[0] if registry_entry else None
+                    pb_ver = registry_entry[1] if registry_entry else None
+                except Exception:
+                    pb_reg_id = None
+                    pb_ver = None
+                # Pre-compute SSOT extra_vars at creation time — avoids re-fetching
+                # instance + engine_configs during task execution (Issue 1B).
+                try:
+                    computed_vars = self._build_extra_vars(inst, s["stage"])
+                    details_payload = {"playbook": s["playbook"], "extra_vars": computed_vars}
+                except Exception:
+                    details_payload = {"playbook": s["playbook"]}
+                cur = conn.execute(
+                    """INSERT INTO log_entries
+                       (parent_id, job_type, engine_type_name, instance_id, node_id, status, actor,
+                        error_message, created_at, started_at, finished_at, duration_ms, task_stage, stage_playbook,
+                        retry_count, max_retries, details_json, results_json, playbook_registry_id,
+                        playbook_version)
+                       VALUES (?, ?, ?, ?, ?, 'queued', ?, NULL,
+                               strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+                               NULL, NULL, 0, ?, ?,
+                               ?, 1, ?, '', ?, ?)""",
+                    (job_id, job_type, engine_name, instance_id, inst.get("node_id"), actor,
+                     s["stage"], s["playbook"], _max_retries, json.dumps(details_payload), pb_reg_id, pb_ver),
+                )
                 task_id = cur.lastrowid
                 tasks.append({
                     "id": task_id,
@@ -229,10 +255,6 @@ class PlaybookRunner:
                     "status": "queued",
                 })
 
-            conn.execute(
-                "UPDATE jobs SET updated_at = strftime('%Y-%m-%dT%H:%M:%S','now') "
-                "WHERE id = ?", (job_id,)
-            )
             conn.commit()
 
         return {"id": job_id, "job_type": job_type, "status": "queued", "stage_count": len(tasks)}, tasks
@@ -244,41 +266,118 @@ class PlaybookRunner:
         with pool(self.db_path) as conn:
             # Check for existing enabled health check
             existing = conn.execute(
-                "SELECT id FROM jobs WHERE instance_id=? AND job_type='health_check' AND disabled=0",
+                "SELECT id FROM log_entries WHERE instance_id=? AND job_type='health_check' AND parent_id IS NULL",
                 (instance_id,),
             ).fetchone()
             if existing:
                 return None  # Already exists
 
             cursor = conn.execute(
-                """INSERT INTO jobs
-                   (instance_id, job_type, priority, status, recurrence_interval, next_run_at)
-                   VALUES (?, 'health_check', 10, 'queued', 30, datetime('now'))""",
+                """INSERT INTO log_entries
+                   (parent_id, job_type, engine_type_name, instance_id, status, actor,
+                    created_at, started_at, finished_at, task_stage, stage_playbook,
+                    retry_count, max_retries, details_json)
+                   VALUES (NULL, 'health_check', NULL, ?, 'queued', 'system',
+                           strftime('%Y-%m-%dT%H:%M:%SZ','now'), NULL, NULL, NULL, NULL,
+                           0, 1, '{}')""",
                 (instance_id,),
             )
             job_id = cursor.lastrowid
 
+            # Look up playbook_registry for health_probe task
+            try:
+                hpb = conn.execute(
+                    "SELECT id, version FROM playbook_registry WHERE playbook_id='service_start'",
+                ).fetchone()
+                hpb_reg_id = hpb[0] if hpb else None
+                hpb_ver = hpb[1] if hpb else None
+            except Exception:
+                hpb_reg_id = None
+                hpb_ver = None
             conn.execute(
-                "INSERT INTO tasks (job_id, instance_id, stage, playbook, status) "
-                "VALUES (?, ?, 'health_probe', 'playbooks/core/service_start.yml', 'queued')",
-                (job_id, instance_id),
+                """INSERT INTO log_entries
+                   (parent_id, job_type, engine_type_name, instance_id, status, actor,
+                    created_at, started_at, finished_at, task_stage, stage_playbook,
+                    retry_count, max_retries, playbook_registry_id, playbook_version, details_json)
+                   VALUES (?, 'health_check', NULL, ?, 'queued', 'system',
+                           strftime('%Y-%m-%dT%H:%M:%SZ','now'), NULL, NULL, 'health_probe',
+                           'playbooks/core/service_start.yml', 0, 1, ?, ?, '{}')""",
+                (job_id, instance_id, hpb_reg_id, hpb_ver),
             )
             conn.commit()
 
             return {"id": job_id, "job_type": "health_check", "status": "queued"}
+
+    def create_periodic_health_check(self, instance_id):
+        """Create a one-shot health check task for periodic scheduler runs.
+
+        Unlike create_health_check_job() (which is recurring with existence check),
+        this creates a fresh job+task pair each time for the scheduler's periodic loop.
+        Uses the instance_health_check playbook via the standard health_check chain.
+
+        Args:
+            instance_id: Integer primary key of the instance.
+
+        Returns:
+            Dict with job info, or None if the instance doesn't exist.
+        """
+        from db.sqlite import pool
+
+        # Verify instance exists — join engine_types for engine_type_name
+        with pool(self.db_path) as conn:
+            inst = conn.execute(
+                """SELECT i.id, et.name as engine_type_name
+                   FROM instances i
+                   LEFT JOIN engine_types et ON i.engine_type_id = et.id
+                   WHERE i.id = ?""",
+                (instance_id,),
+            ).fetchone()
+        if not inst:
+            return None
+
+        with pool(self.db_path) as conn:
+            # Create job header row
+            cursor = conn.execute(
+                """INSERT INTO log_entries
+                   (parent_id, job_type, engine_type_name, instance_id, status, actor,
+                    created_at, started_at, finished_at, task_stage, stage_playbook,
+                    retry_count, max_retries, details_json)
+                   VALUES (NULL, 'health_check', ?, ?, 'queued', 'system',
+                           strftime('%Y-%m-%dT%H:%M:%SZ','now'), NULL, NULL, NULL, NULL,
+                           0, 1, '{}')""",
+                (inst["engine_type_name"], instance_id),
+            )
+            job_id = cursor.lastrowid
+
+            # Create task row using the health_check chain playbook
+            conn.execute(
+                """INSERT INTO log_entries
+                   (parent_id, job_type, engine_type_name, instance_id, status, actor,
+                    created_at, started_at, finished_at, task_stage, stage_playbook,
+                    retry_count, max_retries, details_json)
+                   VALUES (?, 'health_check', ?, ?, 'queued', 'system',
+                           strftime('%Y-%m-%dT%H:%M:%SZ','now'), NULL, NULL, 'health_check',
+                           'instance_health_check', 0, 1, '{}')""",
+                (job_id, inst["engine_type_name"], instance_id),
+            )
+            conn.commit()
+
+        return {"id": job_id, "job_type": "health_check", "status": "queued"}
 
     def cancel_job(self, job_id):
         """Cancel all tasks in a job."""
         from db.sqlite import pool
 
         with pool(self.db_path) as conn:
+            # Cancel child task rows
             conn.execute(
-                "UPDATE tasks SET status='cancelled', updated_at=strftime('%Y-%m-%dT%H:%M:%S','now') "
-                "WHERE job_id=? AND status IN ('queued','running')", (job_id,)
+                "UPDATE log_entries SET status='cancelled', finished_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') "
+                "WHERE parent_id=? AND status IN ('queued','running')", (job_id,)
             )
+            # Cancel parent job-header row
             conn.execute(
-                "UPDATE jobs SET status='cancelled', finished_at=strftime('%Y-%m-%dT%H:%M:%S','now') "
-                "WHERE id=?", (job_id,)
+                "UPDATE log_entries SET status='cancelled', finished_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') "
+                "WHERE id=? AND parent_id IS NULL", (job_id,)
             )
             conn.commit()
 
@@ -380,49 +479,67 @@ class PlaybookRunner:
             return {"ok": False, "error": f"Instance {instance_id} not found"}
 
         node_hostname = inst.get("node_hostname", "")
+        logger.info(
+            "[qr-runner] PHASE1: instance_id=%d node_hostname='%s' ipv4_addr='%s' engine=%s",
+            instance_id, node_hostname, inst.get("ipv4_address", ""),
+            inst.get("engine_type_name", ""),
+        )
+
         if not node_hostname:
             node_hostname = inst.get("ipv4_address", "") or ""
 
-        # Compute merged env/cli_opts for config/start stages
+        # Compute merged env/cli_opts for config/start stages.
+        # Uses engine CAPABILITIES["env_builder"] — if the key is missing, the
+        # engine does not participate in the config merge chain (iperf3,
+        # universal, subprocess use their own extra_vars paths).
         engine_type_name = inst.get("engine_type_name", "")
         merged_cli_opts = None
         merged_env = None
-        if engine_type_name in (QR_ENGINE_LLAMA_SERVER_NAME, QR_ENGINE_LLAMA_RPC_NAME):
+        if engine_type_name:
             try:
-                if engine_type_name == QR_ENGINE_LLAMA_SERVER_NAME:
+                from engine import get_engine_capabilities
+                cap = get_engine_capabilities(engine_type_name)
+                builder_name = cap.get("env_builder") if cap else None
+                if builder_name:
                     from lib.lib_cluster_env_builder import (
-                        build_llama_server_env as _builder,
+                        build_llama_server_env,
+                        build_rpc_server_env,
                     )
-                    result = _builder(self.db_path, instance_id)
-                    merged_cli_opts = result.get("cli_args")
-                    merged_env = result.get("env")
-                else:
-                    from lib.lib_cluster_env_builder import (
-                        build_rpc_server_env as _builder,
-                    )
-                    result = _builder(self.db_path, instance_id)
-                    merged_cli_opts = result.get("cli_args")
-                    merged_env = result.get("env")
+                    _BUILDERS = {
+                        "build_llama_server_env": build_llama_server_env,
+                        "build_rpc_server_env": build_rpc_server_env,
+                    }
+                    builder = _BUILDERS.get(builder_name)
+                    if builder:
+                        result = builder(self.db_path, instance_id)
+                        merged_cli_opts = result.get("cli_args")
+                        merged_env = result.get("env")
             except Exception as exc:
-                logger.warning("[qr-runner] Env builder failed for instance %d: %s", instance_id, exc)
+                logger.warning(
+                    "[qr-runner] Env builder failed for instance %d (%s): %s",
+                    instance_id, engine_type_name, exc,
+                )
 
         extra_vars = self._build_extra_vars(inst, stage, merged_cli_opts, merged_env, task)
 
-        # Update task to running and job to running (first task)
+        # Update task sub-row to running and parent job-header to running
         with pool(self.db_path) as conn:
             conn.execute(
-                "UPDATE tasks SET status='running', started_at=strftime('%Y-%m-%dT%H:%M:%S','now'), "
-                "updated_at=strftime('%Y-%m-%dT%H:%M:%S','now') WHERE id=?", (task_id,)
+                "UPDATE log_entries SET status='running', started_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') "
+                "WHERE id=? AND parent_id IS NOT NULL", (task_id,)
             )
             conn.execute(
-                "UPDATE jobs SET status='running', started_at=strftime('%Y-%m-%dT%H:%M:%S','now') "
-                "WHERE id=? AND status='queued'", (task["job_id"],)
+                "UPDATE log_entries SET status='running', started_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') "
+                "WHERE id=? AND parent_id IS NULL", (task["job_id"],)
             )
-            state = STAGE_STATE_MAP.get(stage, "configuring")
-            conn.execute(
-                "UPDATE instances SET state=?, last_state_change=strftime('%Y-%m-%dT%H:%M:%S','now') WHERE id=?",
-                (state, task["instance_id"]),
-            )
+            # Health check is read-only — do NOT change instance state in Phase 1.
+            # _finalize_job() handles all state transitions based on actual service findings.
+            if stage != QR_STAGE_HEALTH_CHECK:
+                state = STAGE_STATE_MAP.get(stage, "configuring")
+                conn.execute(
+                    "UPDATE instances SET state=?, last_state_change=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
+                    (state, task["instance_id"]),
+                )
             conn.commit()
 
         return {
@@ -487,6 +604,12 @@ class PlaybookRunner:
         try:
             if build_lock is not None:
                 build_lock.acquire(timeout=300)
+            logger.info(
+                "[qr-runner] PLAYBOOK RUN: playbook=%s limit=%s node_id=%s inventory_host=%s",
+                playbook_path, node_hostname,
+                extra_vars.get("node_id", "N/A"),
+                extra_vars.get("inventory_host", "N/A"),
+            )
             result = run_playbook(
                 playbook_path,
                 limit=node_hostname,
@@ -499,6 +622,12 @@ class PlaybookRunner:
                 logger.info("[qr-runner] Task %d (%s) completed on %s", task_id, stage, node_hostname)
             else:
                 error_msg = self._extract_error(result)
+                # Stop stage is idempotent: already-stopped or no hosts matched = success
+                if stage == "stop" and error_msg:
+                    low = error_msg.lower()
+                    if "no hosts matched" in low or "empty ansible" in low or "already stopped" in low:
+                        success = True
+                        error_msg = None
                 logger.warning("[qr-runner] Task %d (%s) failed on %s: %s", task_id, stage, node_hostname, error_msg)
 
         except TimeoutError as exc:
@@ -559,8 +688,8 @@ class PlaybookRunner:
                 QR_STAGE_STOP:       "stop_instance",
                 QR_STAGE_HEALTH_PROBE: "rpc_health_check",
             }
-            _action_map["undeploy"] = "undeploy_instance"
-            _action_map["verify"]   = "get_logs"
+            _action_map[QR_STAGE_UNDEPLOY] = "undeploy_instance"
+            _action_map[QR_STAGE_VERIFY]   = "get_logs"
             action_type = _action_map.get(_stage)
             if not action_type:
                 # Fallback for unknown stages — try common prefix mapping
@@ -584,46 +713,53 @@ class PlaybookRunner:
         new_status = "completed" if success else "failed"
         err_val = error_msg if not success and error_msg else None
 
-        # Update task + job status
+        # Update task sub-row + job-header status
         with pool(self.db_path) as conn:
+            result_json = json.dumps(result) if isinstance(result, dict) and result else None
             conn.execute(
-                "UPDATE tasks SET status=?, error_message=?, finished_at=strftime('%Y-%m-%dT%H:%M:%S','now'), "
-                "updated_at=strftime('%Y-%m-%dT%H:%M:%S','now') WHERE id=?",
-                (new_status, err_val, task_id),
+                "UPDATE log_entries SET status=?, error_message=?, finished_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'), "
+                "results_json=? WHERE id=? AND parent_id IS NOT NULL",
+                (new_status, err_val, result_json, task_id),
             )
 
             if not success and error_msg:
                 conn.execute(
-                    "INSERT INTO qr_actions (action_type, instance_id, actor, details, status, created_at) "
-                    "VALUES ('runner_task_failed', ?, 'scheduler', ?, 'failed', strftime('%Y-%m-%dT%H:%M:%S','now'))",
+                    """INSERT INTO log_entries
+                       (parent_id, job_type, engine_type_name, instance_id, status, actor,
+                        details_json, created_at)
+                       VALUES (NULL, 'runner_task_failed', NULL, ?, 'failed', 'scheduler',
+                               ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))""",
                     (instance_id, json.dumps({"task_id": task_id, "stage": stage, "error": error_msg})),
                 )
 
             if success:
                 self._advance_job_to_next(conn, task_id)
             else:
+                # Retry logic — update log_entries row
                 conn.execute(
-                    "UPDATE tasks SET retry_count=retry_count+1 WHERE id=?", (task_id,)
+                    "UPDATE log_entries SET retry_count=retry_count+1 WHERE id=? AND parent_id IS NOT NULL", (task_id,)
                 )
-                row = conn.execute("SELECT retry_count, max_retries FROM tasks WHERE id=?", (task_id,)).fetchone()
+                row = conn.execute(
+                    "SELECT retry_count, max_retries FROM log_entries WHERE id=? AND parent_id IS NOT NULL", (task_id,)
+                ).fetchone()
                 if row and row["retry_count"] < row["max_retries"]:
                     conn.execute(
-                        "UPDATE tasks SET status='queued', started_at=NULL, finished_at=NULL, "
-                        "updated_at=strftime('%Y-%m-%dT%H:%M:%S','now') WHERE id=?", (task_id,)
+                        "UPDATE log_entries SET status='queued', started_at=NULL, finished_at=NULL "
+                        "WHERE id=?", (task_id,)
                     )
                     logger.info("[qr-runner] Task %d (%s) requeued (retry %d/%d)", task_id, stage, row["retry_count"], row["max_retries"])
                 else:
                     conn.execute(
-                        "UPDATE jobs SET status='failed', error_message=?, finished_at=strftime('%Y-%m-%dT%H:%M:%S','now'), "
-                        "updated_at=strftime('%Y-%m-%dT%H:%M:%S','now') WHERE id=?",
+                        "UPDATE log_entries SET status='failed', error_message=?, finished_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') "
+                        "WHERE id=? AND parent_id IS NULL",
                         (f"Task '{stage}' failed after max retries", job_id),
                     )
                     conn.execute(
-                        "UPDATE tasks SET status='cancelled', updated_at=strftime('%Y-%m-%dT%H:%M:%S','now') "
-                        "WHERE job_id=? AND status IN ('queued','running')", (job_id,)
+                        "UPDATE log_entries SET status='cancelled', finished_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') "
+                        "WHERE parent_id=? AND status IN ('queued','running')", (job_id,)
                     )
                     conn.execute(
-                        "UPDATE instances SET state='error', last_state_change=strftime('%Y-%m-%dT%H:%M:%S','now') WHERE id=?",
+                        "UPDATE instances SET state='error', last_state_change=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
                         (instance_id,),
                     )
 
@@ -654,9 +790,12 @@ class PlaybookRunner:
 
         Args:
             conn: Active DB connection (caller-created or passed-through).
-            job_id: Primary key of the completed job.
+            job_id: Primary key of the completed job (parent row in log_entries).
         """
-        job = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+        # Get job header row from log_entries (parent_id IS NULL)
+        job = conn.execute(
+            "SELECT id, instance_id, job_type, engine_type_name FROM log_entries WHERE id=? AND parent_id IS NULL", (job_id,)
+        ).fetchone()
         if not job:
             return
         instance_id = job["instance_id"]
@@ -677,7 +816,126 @@ class PlaybookRunner:
 
         # Set instance state based on job type — SSOT lookup from JOB_FINAL_STATES
         # bind/unbind are not in the dict — they preserve the pre-operation state
-        if job_type in (QR_JOB_BIND, QR_JOB_UNBIND):
+        ERROR_STATES = frozenset(["error", "build_error", "timeout"])
+
+        if job_type == QR_JOB_HEALTH_CHECK:
+            # Health check = discrepancy detector.
+            # Compare remote service state vs DB instance.state.
+            # Only update if there's an unexpected mismatch.
+            # Skip if instance is in a transition state (deploy/rebuild chain active).
+            
+            _TRANSITIONING = frozenset(["deploying", "configuring", "compiling", "updating", "loading"])
+
+            task_run = conn.execute(
+                "SELECT results_json FROM log_entries "
+                "WHERE parent_id=? AND status='completed' LIMIT 1",
+                (job_id,),
+            ).fetchone()
+
+            # Read the instance state BEFORE this health check ran.
+            # Phase 1 no longer changes instance state for health checks,
+            # so this is the pre-check DB state.
+            pre_state = conn.execute(
+                "SELECT state FROM instances WHERE id=?", (instance_id,)
+            ).fetchone()["state"]
+
+            # If in a transition state, skip — let the chain handle state
+            if pre_state in _TRANSITIONING:
+                logger.debug(
+                    "[qr-runner] HC skipped state update for inst=%d: instance in '%s' "
+                    "(deploy/rebuild chain active)",
+                    instance_id, pre_state,
+                )
+            elif not task_run or not task_run["results_json"]:
+                # Parse failure → error, unless instance intentionally stopped
+                logger.warning(
+                    "[qr-runner] HC parse failure for inst=%d — marking error", instance_id,
+                )
+                # Guard: preserve stopped state instead of overwriting with error
+                if pre_state == "stopped":
+                    new_state = pre_state
+                else:
+                    new_state = "error"
+            else:
+                try:
+                    import json as _json
+                    parsed = _json.loads(task_run["results_json"])
+
+                    # Extract service_state from ansible playbook debug output
+                    service_state = None
+                    plays = parsed.get("results", {}).get("plays", [])
+                    if plays:
+                        for play in plays:
+                            tasks = play.get("tasks", [])
+                            for task in tasks:
+                                host_results = task.get("hosts", {})
+                                for host, result_data in host_results.items():
+                                    debug_msg = result_data.get("msg", "")
+                                    if debug_msg and debug_msg.startswith("{"):
+                                        try:
+                                            svc_data = _json.loads(debug_msg)
+                                            service_state = svc_data.get("service_state")
+                                        except ValueError:
+                                            pass
+                                if service_state:
+                                    break
+                            if service_state:
+                                break
+
+                    if service_state is None:
+                        # Parse failure — preserve current state if intentionally stopped
+                        if pre_state == "stopped":
+                            new_state = pre_state
+                        else:
+                            new_state = "error"
+                    elif service_state in ("active", "activating"):
+                        new_state = "running"
+                        # Guard: don't correct stopped→running if a stop job is active
+                        # (would collide with the user-initiated stop chain)
+                        if pre_state == "stopped":
+                            has_stop_job = conn.execute(
+                                "SELECT 1 FROM log_entries WHERE instance_id=? "
+                                "AND parent_id IS NULL AND job_type IN ('stop', 'undeploy') "
+                                "AND status IN ('running', 'queued', 'received') LIMIT 1",
+                                (instance_id,),
+                            ).fetchone()
+                            if has_stop_job:
+                                new_state = pre_state  # preserve stopped
+
+                    elif service_state in ("inactive", "failed", "deactivating"):
+                        # Guard: user intentionally stopped the instance — preserve stopped
+                        # Don't overwrite intentional stop with error from health check
+                        if pre_state == "stopped":
+                            new_state = pre_state  # preserve stopped
+                        else:
+                            new_state = "error"
+                    else:
+                        # Unknown state (e.g., "unknown") — preserve current
+                        new_state = pre_state
+
+                    # Only write if the detected state differs from DB state
+                    if new_state != pre_state:
+                        conn.execute(
+                            "UPDATE instances SET state=?, "
+                            "last_state_change=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
+                            (new_state, instance_id),
+                        )
+                        logger.info(
+                            "[qr-runner] HC corrected inst=%d: '%s' → '%s' "
+                            "(service_state=%s)",
+                            instance_id, pre_state, new_state, service_state,
+                        )
+                    else:
+                        logger.debug(
+                            "[qr-runner] HC stable for inst=%d: '%s' (service_state=%s) — no change",
+                            instance_id, pre_state, service_state,
+                        )
+
+                except Exception as exc:
+                    logger.warning(
+                        "[qr-runner] HC parse error for inst=%d: %s", instance_id, exc,
+                    )
+        elif job_type in (QR_JOB_BIND, QR_JOB_UNBIND):
             new_state = pre_state
         else:
             if job_type not in JOB_FINAL_STATES:
@@ -695,34 +953,43 @@ class PlaybookRunner:
                 if pre_state in ("running", "starting", "deploying", "configuring"):
                     new_state = pre_state
 
-        conn.execute(
-            "UPDATE instances SET state=?, last_state_change=strftime('%Y-%m-%dT%H:%M:%S','now') WHERE id=?",
-            (new_state, instance_id),
-        )
-        conn.execute(
-            "UPDATE jobs SET status='completed', finished_at=strftime('%Y-%m-%dT%H:%M:%S','now'), "
-            "updated_at=strftime('%Y-%m-%dT%H:%M:%S','now') WHERE id=?", (job_id,)
-        )
+        # HS-1: Preserve error state when deploy/rebuild tasks actually failed.
+        # Check for both 'failed' (from _run_task_playbook) and 'error' (from
+        # _detect_stale_tasks stale/expired detection). If any child task is
+        # in a terminal failure state, do NOT overwrite with JOB_FINAL_STATES.
+        # This ensures expired jobs correctly keep the instance in 'error'
+        # instead of masking failures as 'running'.
+        if job_type in (QR_JOB_DEPLOY, QR_JOB_REBUILD):
+            failed_children = conn.execute(
+                "SELECT COUNT(*) FROM log_entries WHERE parent_id=? AND status IN ('failed','error')",
+                (job_id,),
+            ).fetchone()[0]
+            if failed_children > 0:
+                new_state = "error"
 
-        # Handle recurring jobs
-        if job["recurrence_interval"] and job["recurrence_interval"] > 0:
+        # Update state + last_state_change. Health_check handled above
+        # (conditional update only on state transition). All other job types
+        # always write their final state here.
+        if job_type != QR_JOB_HEALTH_CHECK:
             conn.execute(
-                "UPDATE jobs SET next_run_at=datetime('now', '+' || ? || ' seconds'), "
-                "status='scheduled', updated_at=strftime('%Y-%m-%dT%H:%M:%S','now') WHERE id=?",
-                (str(job["recurrence_interval"]), job_id),
+                "UPDATE instances SET state=?, last_state_change=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
+                (new_state, instance_id),
             )
+        conn.execute(
+            "UPDATE log_entries SET status='completed', finished_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') "
+            "WHERE id=? AND parent_id IS NULL", (job_id,)
+        )
 
         # Extract build_number from source stage output (deploy + rebuild)
         if job_type in (QR_JOB_DEPLOY, QR_JOB_REBUILD):
             try:
                 source_run = conn.execute(
-                    "SELECT output FROM playbook_runs pr JOIN tasks t ON t.id=pr.task_id "
-                    "WHERE t.job_id=? AND t.stage='source' ORDER BY pr.id DESC LIMIT 1",
+                    "SELECT results_json FROM log_entries WHERE parent_id=? AND task_stage='source' ORDER BY id DESC LIMIT 1",
                     (job_id,),
                 ).fetchone()
-                if source_run and source_run["output"]:
+                if source_run and source_run["results_json"]:
                     import re as _re
-                    bm = _re.search(r'commit=([a-f0-9]{7})', str(source_run["output"]))
+                    bm = _re.search(r'commit=([a-f0-9]{7})', str(source_run["results_json"]))
                     if bm:
                         conn.execute(
                             "UPDATE instances SET build_number=? WHERE id=?",
@@ -828,9 +1095,24 @@ class PlaybookRunner:
         except Exception:
             pass  # Non-critical — proceed regardless
 
-        # Async mode: create job + tasks, return immediately. Scheduler picks up.
+        # Async mode: create job + tasks, update instance state, return immediately.
         if async_mode:
             job, tasks = self.create_deploy_job(instance_id, job_type, priority=5, actor=actor)
+            # Update instance state immediately — visible in WebUI before scheduler picks up task.
+            # The first task's stage determines the initial display state (deploying/configuring/etc.)
+            from db.sqlite import pool
+            with pool(self.db_path) as conn:
+                first_task = conn.execute(
+                    "SELECT task_stage FROM log_entries WHERE parent_id=? ORDER BY id ASC LIMIT 1",
+                    (job["id"],),
+                ).fetchone()
+                initial_state = STAGE_STATE_MAP.get(first_task["task_stage"]) if first_task else None
+                if initial_state:
+                    conn.execute(
+                        "UPDATE instances SET state=?, last_state_change=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
+                        (initial_state, instance_id),
+                    )
+                    conn.commit()
             result["job_id"] = job["id"]
             result["tasks_created"] = len(tasks)
             result["task_ids"] = [t["id"] for t in tasks]
@@ -907,12 +1189,12 @@ class PlaybookRunner:
         with pool(self.db_path) as conn:
             if status:
                 rows = conn.execute(
-                    "SELECT * FROM jobs WHERE instance_id=? AND status=? ORDER BY created_at DESC",
+                    "SELECT * FROM log_entries WHERE instance_id=? AND parent_id IS NULL AND status=? ORDER BY created_at DESC",
                     (instance_id, status),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT * FROM jobs WHERE instance_id=? ORDER BY created_at DESC LIMIT 10",
+                    "SELECT * FROM log_entries WHERE instance_id=? AND parent_id IS NULL ORDER BY created_at DESC LIMIT 10",
                     (instance_id,),
                 ).fetchall()
             return [dict(r) for r in rows]
@@ -930,7 +1212,7 @@ class PlaybookRunner:
 
         with pool(self.db_path) as conn:
             rows = conn.execute(
-                "SELECT * FROM tasks WHERE job_id=? ORDER BY stage", (job_id,)
+                "SELECT *, parent_id AS job_id FROM log_entries WHERE parent_id=? ORDER BY stage", (job_id,)
             ).fetchall()
             return [dict(r) for r in rows]
 
@@ -959,22 +1241,23 @@ class PlaybookRunner:
             try:
                 conn.execute("BEGIN IMMEDIATE")
                 row = conn.execute(
-                    """SELECT t.id, t.job_id, t.instance_id, t.stage, t.playbook,
-                              t.status, t.error_message, t.started_at, t.finished_at,
-                              t.retry_count, t.max_retries, t.created_at, t.updated_at,
-                              j.priority, i.node_id
-                       FROM tasks t
-                       JOIN jobs j ON t.job_id = j.id
-                       JOIN instances i ON t.instance_id = i.id
-                       WHERE t.status = 'queued'
+                    """SELECT le.id, j.id AS job_id, le.instance_id, le.task_stage AS stage,
+                              le.stage_playbook AS playbook,
+                              le.status, le.error_message, le.started_at, le.finished_at,
+                              le.retry_count, le.max_retries, le.created_at,
+                              0 AS priority, i.node_id
+                       FROM log_entries le
+                       JOIN log_entries j ON le.parent_id = j.id
+                       JOIN instances i ON le.instance_id = i.id
+                       WHERE le.status = 'queued'
                          AND NOT EXISTS (
-                             SELECT 1 FROM tasks t2
-                             JOIN jobs j2 ON t2.job_id = j2.id
-                             JOIN instances i2 ON t2.instance_id = i2.id
-                             WHERE t2.status = 'running'
+                             SELECT 1 FROM log_entries le2
+                             JOIN log_entries j2 ON le2.parent_id = j2.id
+                             JOIN instances i2 ON le2.instance_id = i2.id
+                             WHERE le2.status = 'running'
                                AND i2.node_id = i.node_id
                          )
-                       ORDER BY i.node_id ASC, t.created_at ASC
+                       ORDER BY i.node_id ASC, le.created_at ASC
                        LIMIT 1"""
                 ).fetchone()
                 return dict(row) if row else None
@@ -997,10 +1280,11 @@ class PlaybookRunner:
 
         with pool(self.db_path) as conn:
             query = ("SELECT j.*, i.node_id, "
-                     "n.name AS node_name, n.hostname AS node_hostname "
-                     "FROM jobs j "
-                     "LEFT JOIN instances i ON j.instance_id = i.id "
-                     "LEFT JOIN nodes n ON i.node_id = n.id")
+                      "n.name AS node_name, n.hostname AS node_hostname "
+                      "FROM log_entries j "
+                      "LEFT JOIN instances i ON j.instance_id = i.id "
+                      "LEFT JOIN nodes n ON i.node_id = n.id "
+                      "WHERE j.parent_id IS NULL")
             conditions = []
             params = []
 
@@ -1033,11 +1317,11 @@ class PlaybookRunner:
         from db.sqlite import pool
 
         with pool(self.db_path) as conn:
-            job = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            job = conn.execute("SELECT * FROM log_entries WHERE id=? AND parent_id IS NULL", (job_id,)).fetchone()
             if not job:
                 return None
             tasks = conn.execute(
-                "SELECT id FROM tasks WHERE job_id=? ORDER BY stage", (job_id,)
+                "SELECT id, parent_id AS job_id FROM log_entries WHERE parent_id=? ORDER BY stage", (job_id,)
             ).fetchall()
             return {"job": dict(job), "tasks": [t["id"] for t in tasks]}
 
@@ -1055,7 +1339,7 @@ class PlaybookRunner:
         from db.sqlite import pool
 
         with pool(self.db_path) as conn:
-            query = "SELECT t.* FROM tasks t"
+            query = "SELECT *, parent_id AS job_id FROM log_entries le WHERE parent_id IS NOT NULL"
             conditions = []
             params = []
 
@@ -1071,7 +1355,7 @@ class PlaybookRunner:
 
             if conditions:
                 query += " WHERE " + " AND ".join(conditions)
-            query += " ORDER BY t.created_at DESC LIMIT 200"
+            query += " ORDER BY le.created_at DESC LIMIT 200"
 
             rows = conn.execute(query, params).fetchall()
             return [dict(r) for r in rows]
@@ -1088,7 +1372,7 @@ class PlaybookRunner:
         from db.sqlite import pool
 
         with pool(self.db_path) as conn:
-            task = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+            task = conn.execute("SELECT *, parent_id AS job_id FROM log_entries WHERE id=? AND parent_id IS NOT NULL", (task_id,)).fetchone()
             if not task:
                 return None
             playbook_output = None
@@ -1148,12 +1432,13 @@ class PlaybookRunner:
             ]
 
         if job_type == QR_JOB_RECONFIGURE:
-            # Config-only env update + service restart (no sudo, no service unit regen)
-            # Replaces legacy api_reconfigure_instance() direct playbook call with RUNNER-1 chain.
-            # Includes start stage so new env values are picked up by the running service.
+            # Config-only update: service unit regen (for start_on_boot/restart_policy) +
+            # env file update + service restart. Replaces legacy api_reconfigure_instance().
+            # config_svc stage handles systemd enable/disable for start_on_boot changes.
+            # config_env stage handles env file for all env vars including restart_policy.
             return [
                 s for s in DEFAULT_STAGE_CHAINS[engine_name]
-                if s["stage"] in (QR_STAGE_CONFIG_ENV, QR_STAGE_START)
+                if s["stage"] in (QR_STAGE_CONFIG_SVC, QR_STAGE_CONFIG_ENV, QR_STAGE_START)
             ]
 
         if job_type == QR_JOB_DEPLOY_FAST:
@@ -1325,6 +1610,18 @@ class PlaybookRunner:
         Returns:
             Dict of extra vars.
         """
+        # Use pre-computed extra_vars from task details_json when available
+        # (stored at job creation time to avoid re-fetching instance + engine_configs).
+        if task and task.get("details_json"):
+            try:
+                payload = json.loads(task["details_json"])
+                precomputed = payload.get("extra_vars")
+                if precomputed and stage == "stop":
+                    # Stop stage only needs base params — no merge chain needed.
+                    return precomputed
+            except (json.JSONDecodeError, TypeError):
+                pass  # Fall through to normal build
+
         config_override = {}
         if instance.get("config_override"):
             try:
@@ -1387,9 +1684,30 @@ class PlaybookRunner:
         except Exception:
             pass
 
+        # Service config — read from config_override (top-level or nested env) first, fall back to DB column
+        sob_raw = instance.get("start_on_boot", "true")
+        if isinstance(sob_raw, bool):
+            sob_bool = sob_raw
+        elif isinstance(sob_raw, str):
+            sob_bool = sob_raw.lower() in ("true", "1", "yes")
+        else:
+            sob_bool = bool(sob_raw)
+        # Override with config_override value if present (top-level or nested env)
+        co_sob = config_override.get("start_on_boot") or (config_override.get("env", {}) or {}).get("start_on_boot")
+        if co_sob is not None:
+            if isinstance(co_sob, bool):
+                sob_bool = co_sob
+            elif isinstance(co_sob, str):
+                sob_bool = co_sob.lower() in ("true", "1", "yes")
+            else:
+                 sob_bool = bool(co_sob)
+
+        # DEBUG: log config_override values used
+
         extra = {
             # Host / identity — used by all playbooks
             "inventory_host": instance.get("node_hostname") or instance.get("ipv4_address", ""),
+            "node_id": instance.get("node_id", 1),
             "instance_id": instance["id"],
             "instance_name": instance.get("name", ""),
             "engine_type": instance.get("engine_type_name", ""),
@@ -1397,14 +1715,15 @@ class PlaybookRunner:
             # UUID — used in service templates ({{ instance_uuid }})
             "instance_uuid": instance.get("instance_uuid", ""),
             # Service config
-            "start_on_boot": instance.get("start_on_boot", "true") == "true",
-            "restart_policy": config_override.get("restart_policy", "no"),
+            "start_on_boot": sob_bool,
+            "restart_policy": config_override.get("restart_policy") or (config_override.get("env", {}) or {}).get("restart_policy") or "no",
             "start_after_deploy": instance.get("start_after_deploy", 0) != 0,
             # Device / GPU
-            "device": instance.get("gpu_device") or ec_rows.get("LLAMA_ARG_DEVICE", ""),
+            "device": instance.get("gpu_device") or ec_rows.get("qr_cluster_gpu_override", ""),
             # Remote node user — resolved from node record (PRIO-1-A1)
             "remote_node_user": remote_user,
-            "user": remote_user,  # alias for universal engine compatibility
+            "user": remote_user,       # alias for universal engine compatibility
+            "ansible_user": remote_user, # alias for preflight/validate playbooks
             "model_path": instance.get("model_path", ""),
             # Build source paths + cmake commands + git pull (engine_configs)
             "node_src_dir": ec_rows.get("node_src_dir", "/opt/quickrobot/llama.cpp"),
@@ -1421,6 +1740,11 @@ class PlaybookRunner:
 
         # RPC health check stages override inventory_host, unit_name, rpc_id
         extra.update(rpc_vars)
+
+        # Health check stage requires unit_name for systemctl probe
+        if stage == "health_check":
+            _eng_name = instance.get("engine_type_name", "instance")
+            extra["unit_name"] = f"qr-{instance['id']}-{_eng_name}"
 
         # Pass merged CLI opts for env file generation (CONFIG-1)
         if merged_cli_opts is not None:
@@ -1491,20 +1815,22 @@ class PlaybookRunner:
 
         Args:
             conn: DB connection (must be open).
-            completed_task_id: ID of just-completed task.
+            completed_task_id: ID of just-completed task (sub-row in log_entries).
         """
-        # Get the completed task
-        task = conn.execute("SELECT * FROM tasks WHERE id=?", (completed_task_id,)).fetchone()
+        # Get the completed task sub-row
+        task = conn.execute(
+            "SELECT id, parent_id, task_stage AS stage, instance_id FROM log_entries WHERE id=? AND parent_id IS NOT NULL", (completed_task_id,)
+        ).fetchone()
         if not task:
             return
 
-        job_id = task["job_id"]
+        job_id = task["parent_id"]  # parent_id on sub-row = parent job-header ID
         current_stage = task["stage"]
 
         # Check if there are more queued tasks for this job
         # ORDER BY id ASC respects creation order (tasks inserted in chain sequence)
         next_task = conn.execute(
-            "SELECT * FROM tasks WHERE job_id=? AND status='queued' "
+            "SELECT * FROM log_entries WHERE parent_id=? AND status='queued' "
             "ORDER BY id ASC LIMIT 1", (job_id,)
         ).fetchone()
 
@@ -1512,7 +1838,7 @@ class PlaybookRunner:
             # Transition instance state based on completed stage
             state = STAGE_STATE_MAP.get(current_stage, "configuring")
             conn.execute(
-                "UPDATE instances SET state=?, last_state_change=strftime('%Y-%m-%dT%H:%M:%S','now') WHERE id=?",
+                "UPDATE instances SET state=?, last_state_change=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
                 (state, task["instance_id"]),
             )
         else:
@@ -1520,10 +1846,10 @@ class PlaybookRunner:
             self._finalize_job(conn, job_id)
 
     def _get_task(self, task_id):
-        """Get a single task by ID.
+        """Get a single task sub-row by ID.
 
         Args:
-            task_id: Task primary key.
+            task_id: Task sub-row primary key (parent_id IS NOT NULL).
 
         Returns:
             Task dict or None.
@@ -1531,8 +1857,18 @@ class PlaybookRunner:
         from db.sqlite import pool
 
         with pool(self.db_path) as conn:
-            row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
-            return dict(row) if row else None
+            row = conn.execute(
+                "SELECT *, parent_id AS job_id FROM log_entries WHERE id=? AND parent_id IS NOT NULL", (task_id,)
+            ).fetchone()
+            if not row:
+                return None
+            d = dict(row)
+            # Alias log_entries columns → legacy task column names for compatibility
+            if "task_stage" in d and "stage" not in d:
+                d["stage"] = d["task_stage"]
+            if "stage_playbook" in d and "playbook" not in d:
+                d["playbook"] = d["stage_playbook"]
+            return d
 
 
 def get_instance(db_path, instance_id):

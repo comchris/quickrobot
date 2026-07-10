@@ -18,7 +18,7 @@
 #   skip_build       (optional) - skip cmake build
 #   node_src_dir     (required) - shared source directory path
 #   node_build_dir   (required) - shared build directory path
-#   git_pull_cmd     (optional) - custom git pull command
+#   binary_path      (required) - full path to expected binary (e.g., /opt/quickrobot/llama.cpp/build/bin/llama-server)
 #   node_build_set_cmd (optional) - cmake configure command from engine_configs
 #   node_build_run_cmd (optional) - cmake build command from engine_configs
 
@@ -35,20 +35,20 @@
     # --- Pre-flight checks (run as root) ---
     - name: Check if shared source is a git repo
       stat:
-        path: "{{ node_src_dir | default('/opt/quickrobot/llama.cpp') }}/.git"
+        path: "{{ node_src_dir }}/.git"
       register: git_repo_exists
 
     - name: Fail if not a git repository
       fail:
-        msg: "{{ node_src_dir | default('/opt/quickrobot/llama.cpp') }} is not a git repository (no .git). Deploy first."
+        msg: "{{ node_src_dir }} is not a git repository (no .git). Deploy first."
       when: not git_repo_exists.stat.exists
 
     # --- Git operations (run as remote_node_user) ---
     - block:
-        - name: Pull latest source ({{ node_git_pull_cmd | default('git pull origin master') }})
-          shell: "{{ node_git_pull_cmd | default('git pull origin master') }}"
+        - name: Pull latest source ({{ node_git_pull_cmd }})
+          shell: "{{ node_git_pull_cmd }}"
           args:
-            chdir: "{{ node_src_dir | default('/opt/quickrobot/llama.cpp') }}"
+            chdir: "{{ node_src_dir }}"
           register: git_result
           changed_when: git_result.rc == 0
           failed_when: false
@@ -57,7 +57,7 @@
         - name: Get short commit hash
           shell: git rev-parse --short=7 HEAD
           args:
-            chdir: "{{ node_src_dir | default('/opt/quickrobot/llama.cpp') }}"
+            chdir: "{{ node_src_dir }}"
           register: commit_hash
           changed_when: false
       become_user: "{{ remote_node_user }}"
@@ -76,32 +76,32 @@
 
         - name: Ensure build directory exists
           file:
-            path: "{{ node_build_dir | default('/opt/quickrobot/llama.cpp/build') }}"
+            path: "{{ node_build_dir }}"
             state: directory
             mode: '0755'
 
         - name: Reconfigure cmake (from node_build_set_cmd)
-          shell: "{{ node_build_set_cmd | default('cmake -B {{ node_build_dir }} -DGGML_RPC=ON -DGGML_NATIVE=ON -DGGML_CPU=ON -DLLAMA_OPENSSL=ON -DGGML_AVX2=ON -DGGML_VULKAN=ON') }}"
+          shell: "{{ node_build_set_cmd }}"
           args:
-            chdir: "{{ node_src_dir | default('/opt/quickrobot/llama.cpp') }}"
+            chdir: "{{ node_src_dir }}"
           register: cmake_configure
           changed_when: "'-- Configuring' in cmake_configure.stdout"
 
         - name: Build with cmake (from node_build_run_cmd)
-          shell: "{{ node_build_run_cmd | default('cmake --build {{ node_build_dir }} --config Release -j 2') }}"
+          shell: "{{ node_build_run_cmd }}"
           args:
-            chdir: "{{ node_src_dir | default('/opt/quickrobot/llama.cpp') }}"
+            chdir: "{{ node_src_dir }}"
           register: build_result
           changed_when: false
 
-        - name: Verify new binary exists
+        - name: Verify new binary exists at configured path
           stat:
-            path: "{{ node_build_dir | default('/opt/quickrobot/llama.cpp/build') }}/bin/{{ 'llama-server' if engine_type == 'llama_server' else 'ggml-rpc-server' }}"
+            path: "{{ binary_path }}"
           register: new_binary
 
         - name: Fail if binary not found after build
           fail:
-            msg: "Build completed but {{ 'llama-server' if engine_type == 'llama_server' else 'ggml-rpc-server' }} not found in {{ node_build_dir | default('/opt/quickrobot/llama.cpp/build') }}/bin/"
+            msg: "Build completed but {{ binary_path | basename }} not found in {{ node_build_dir }}/bin/"
           when: not new_binary.stat.exists
       become_user: "{{ remote_node_user }}"
 

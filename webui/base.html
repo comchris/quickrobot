@@ -355,9 +355,9 @@ nav .nav-section-header { padding: 12px 16px 4px; font-size: 0.75em; text-transf
    a.row-link:hover { text-decoration: underline; }
    a.row-link:visited { color: var(--row-link); }
 
-  /* Status badges */
-  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px;
-            font-size: 0.8em; font-weight: 600; }
+   /* Status badges — compact vertical sizing */
+   .badge { display: inline-block; padding: 1px 8px; border-radius: 10px;
+             font-size: 0.8em; font-weight: 600; line-height: 1.2; }
   .badge-running { background: var(--badge-running); color: var(--fg-body); }
   .badge-success { background: var(--badge-success); color: #fff; }
   .badge-loading { background: var(--badge-loading); color: var(--fg-body); }
@@ -367,10 +367,20 @@ nav .nav-section-header { padding: 12px 16px 4px; font-size: 0.75em; text-transf
   .badge-system { background: var(--badge-system); color: var(--fg-body); }
   .badge-active { background: var(--badge-active); color: var(--fg-body); }
   .badge-unknown { background: var(--badge-unknown); color: var(--fg-body); }
-   .badge-failed { background: var(--badge-failed); color: var(--fg-body); }
-   .badge-over   { background: var(--badge-over, #fdebd0); color: var(--fg-over, #873b00); }
+    .badge-failed { background: var(--badge-failed); color: var(--fg-body); }
+    .badge-over   { background: var(--badge-over, #fdebd0); color: var(--fg-over, #873b00); }
 
-  /* Detail cards */
+   /* Job indicator badge — shown below state when active jobs exist */
+    .job-badge { display:inline-block;padding:2px 8px;border-radius:4px;font-size:0.85em;font-weight:600;margin-top:2px;line-height:1.3;opacity:0.9; }
+    .job-badge:hover { opacity:1; }
+    .job-deploy     { background:#e3f2fd;color:#1565c0; }
+    .job-reconfigure{ background:#fff3e0;color:#e65100; }
+    .job-rebuild    { background:#e8f5e9;color:#2e7d32; }
+    .job-start      { background:#f3e5f5;color:#6a1b9a; }
+    .job-restart    { background:#fce4ec;color:#c62828; }
+    .job-undeploy   { background:#fbe9e7;color:#d84315; }
+
+   /* Detail cards */
   .detail-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; margin-bottom: 16px; }
   .detail-card { background: var(--bg-card); border-radius: 6px; padding: 14px;
                   box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
@@ -481,7 +491,7 @@ nav .nav-section-header { padding: 12px 16px 4px; font-size: 0.75em; text-transf
     <li><a href="/webui/hosts" {{ hosts }}>Hosts</a></li>
     <li><a href="/webui/instances" {{ instances }}>Instances</a></li>
     <li><a href="/webui/models" {{ models }}>Models</a></li>
-    <li><a href="/webui/ansible-logs" {{ logs }}>Logs</a></li>
+    <li><a href="/webui/logs" {{ logs }}>Logs</a></li>
     {% for section in engines_nav %}
     <li class="nav-section" data-section="{{ section.header | lower | replace(' ', '-') }}">
       <div class="nav-section-header">{{ section.header }} <span class="nav-chevron">&#9660;</span></div>

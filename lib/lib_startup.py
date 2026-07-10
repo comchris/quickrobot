@@ -177,7 +177,7 @@ def resolve_seed_path(project_root=None):
         from qr_api import _project_root
         project_root = _project_root
     if _seed_file_path is None:
-        _seed_file_path = os.path.join(project_root, "data", "_seed", "seed_v007.sql")
+        _seed_file_path = os.path.join(project_root, "data", "_seed", "seed_v008.sql")
     return _seed_file_path
 
 
@@ -213,10 +213,16 @@ def import_seed_file(db_path):
     try:
         with _pool(db_path) as conn:
             conn.executescript(sql)
-        print("[qr] Seed file imported successfully")
+            # Seed has NULL for node 1 ansible_user — set to current OS user at runtime.
+            from lib.lib_constants import DEFAULT_ANSIBLE_USER
+            conn.execute(
+                "UPDATE nodes SET ansible_user=? WHERE id=1",
+                (DEFAULT_ANSIBLE_USER,),
+            )
+            conn.commit()
+            print("[qr] Seed file imported successfully, node 1 ansible_user=%s", DEFAULT_ANSIBLE_USER)
     except Exception as exc:
         print(f"[qr] WARNING: seed import failed: {exc}")
-
 
 def pre_validate_seed_checksum(env_cfg):
     """Validate seed file integrity BEFORE any filesystem change.
