@@ -16,7 +16,7 @@ WIP
 
 ![RPCandClusterSetup](docs/pics/insane1.png)
 
-![RPCandClusterSetup](docs/pics/docs/examples/llamaCPP_cluster/Expertsplit9nodes-GLM52-Q2XXS/Expertsplit9nodes-GLM52-Q2XXS_001.png)
+![RPCandClusterSetup](docs/examples/llamaCPP_cluster/Expertsplit9nodes-GLM52-Q2XXS/Expertsplit9nodes-GLM52-Q2XXS_001.png)
 
 Example Quickrobot prompt:
 
