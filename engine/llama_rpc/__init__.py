@@ -18,8 +18,12 @@ Provides the LLAMA.RPC engine class and its CAPABILITIES metadata for
 discovery by the engine loader.
 """
 
+import logging
+
 from lib.qr_engine_ids import QR_DEFAULT_LOCALHOST, QR_ENGINE_PORT_DEFAULTS
 from engine.base import BaseEngine
+
+logger = logging.getLogger(__name__)
 
 
 CAPABILITIES = {
@@ -243,7 +247,8 @@ class RpcEngine(BaseEngine):
                         try:
                             d = _json.loads(msg)
                             service_state = d.get("service_state", "unknown")
-                        except Exception:
+                        except Exception as _e:
+                            logger.debug("rpc health check JSON parse failed: %s", _e)
                             pass
 
             active = (service_state == "active")
@@ -253,7 +258,8 @@ class RpcEngine(BaseEngine):
                 "error": None if active else f"systemctl reports: {service_state or 'unknown'}",
             }
 
-        except Exception:
+        except Exception as _e:
+            logger.debug("rpc systemd health check failed: %s", _e)
             return {"alive": False, "latency_ms": None,
                     "error": "_check_rpc_systemd failed"}
 
@@ -477,20 +483,20 @@ class RpcEngine(BaseEngine):
     def _get_available_actions(cls, state):
         """Map instance state to available actions."""
         action_map = {
-            "unconfigured": [{"name": "deploy", "label": "Deploy"}, {"name": "undeploy", "label": "Undeploy"}, {"name": "delete", "label": "Delete"}],
-            "configuring": [{"name": "stop", "label": "Stop"}],
-            "deployed": [{"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "reconfigure", "label": "Reconfigure"}, {"name": "delete", "label": "Delete"}],
-            "starting": [{"name": "stop", "label": "Stop"}],
-            "loading": [{"name": "stop", "label": "Stop"}],
-            "running": [{"name": "stop", "label": "Stop"}, {"name": "restart", "label": "Restart"}, {"name": "reconfigure", "label": "Reconfigure"}],
-            "stopping": [{"name": "start", "label": "Start"}],
-            "stopped": [{"name": "start", "label": "Start"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "reconfigure", "label": "Reconfigure"}, {"name": "deploy", "label": "Deploy"}, {"name": "delete", "label": "Delete"}],
-            "error": [{"name": "start", "label": "Start"}, {"name": "deploy", "label": "Deploy"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "stop", "label": "Stop"}, {"name": "delete", "label": "Delete"}],
-            "deploying": [{"name": "stop", "label": "Stop"}],
-            "updating": [],
-            "compiling": [],
-            "build_error": [{"name": "deploy", "label": "Deploy"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "delete", "label": "Delete"}],
-            "timeout": [{"name": "deploy", "label": "Deploy"}],
-            "test_mode": [{"name": "stop", "label": "Stop"}],
+            "unconfigured":   [{"name": "deploy", "label": "Deploy"}, {"name": "delete", "label": "Delete"}],
+            "configuring":    [{"name": "stop", "label": "Stop"}],
+            "deployed":       [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "deploy", "label": "Deploy"}, {"name": "undeploy", "label": "Undeploy"}, {"name": "delete", "label": "Delete"}],
+            "starting":       [{"name": "stop", "label": "Stop"}],
+            "loading":        [{"name": "stop", "label": "Stop"}],
+            "running":        [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "stop", "label": "Stop"}],
+            "stopping":       [{"name": "start", "label": "Start"}],
+            "stopped":        [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "deploy", "label": "Deploy"}, {"name": "undeploy", "label": "Undeploy"}],
+            "error":          [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "deploy", "label": "Deploy"}, {"name": "undeploy", "label": "Undeploy"}, {"name": "delete", "label": "Delete"}],
+            "deploying":      [{"name": "stop", "label": "Stop"}],
+            "updating":       [],
+            "compiling":      [],
+            "build_error":    [{"name": "deploy", "label": "Deploy"}, {"name": "start", "label": "Start"}, {"name": "undeploy", "label": "Undeploy"}, {"name": "delete", "label": "Delete"}],
+            "timeout":        [{"name": "deploy", "label": "Deploy"}],
+            "test_mode":      [{"name": "stop", "label": "Stop"}],
         }
         return action_map.get(state, [])

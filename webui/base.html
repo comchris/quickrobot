@@ -228,16 +228,17 @@ window.QR_API_BASE = "/api/v1";
         var opt = options || {};
         var confirmList = opt.confirmActions || ['undeploy','delete'];
         var methodMap = opt.methodOverrides || {};
-        var classMap = opt.btnClassMap || {stop:'danger',undeploy:'danger',delete:'danger',restart:'primary',reconfigure:'primary',start:'success',deploy:'success',rebuild:'success'};
+        var classMap = opt.btnClassMap || {stop:'danger',undeploy:'danger',delete:'danger',restart:'primary',reconfig_restart:'success',reconfigure:'success',start:'success',deploy:'primary',rebuild:'primary'};
 
         // SSOT help-text table for action button hover tooltips
         var ACTION_HELP_TEXT = {
             deploy:      'Deploy instance — full staged chain (preflight, deps, source, compile, config, start)',
-            undeploy:    'Undeploy instance — stop service, remove systemd unit and files',
+            undeploy:    'Undeploy instance — stop service, remove systemd unit and files from remote node',
             start:       'Start the service using its existing configuration',
             stop:        'Stop the running service gracefully',
             restart:     'Stop and start with current config (no redeploy)',
             reconfigure: 'Update env file only — fast config change without rebuilding',
+            reconfig_restart: 'Reconfigure (env+service files) then restart — full reconfig chain with service restart',
             rebuild:     'Rebuild from source — skip deps, recompile only',
         };
 
@@ -592,7 +593,7 @@ nav .nav-section-header { padding: 12px 16px 4px; font-size: 0.75em; text-transf
 </nav>
  <div class="nav-resize-handle" id="nav-resize-handle" title="Drag to resize sidebar"></div>
  <main>
- {{ content }}
+  {{ content | safe }}
  </main>
  </div><!-- .layout-wrap -->
  <script>
@@ -782,6 +783,30 @@ nav .nav-section-header { padding: 12px 16px 4px; font-size: 0.75em; text-transf
 
 // Document-level event delegation for inst-action buttons
 (function() {
+  // Polling-based reload: check status every 3s until target state reached or timeout
+  var _pollReloadTimers = {};
+  function pollUntilTarget(instId, targetStates, callback, timeoutMs) {
+    if (_pollReloadTimers[instId]) clearInterval(_pollReloadTimers[instId]);
+    var elapsed = 0;
+    var interval = 3000;
+    _pollReloadTimers[instId] = setInterval(function() {
+      elapsed += interval;
+      qrApi('/instances/' + instId + '/status').then(function(sd) {
+        var st = (sd && sd.data && sd.data.state) || '';
+        if (targetStates.indexOf(st) !== -1) {
+          clearInterval(_pollReloadTimers[instId]);
+          delete _pollReloadTimers[instId];
+          callback();
+        } else if (elapsed >= (timeoutMs || 60000)) {
+          clearInterval(_pollReloadTimers[instId]);
+          delete _pollReloadTimers[instId];
+        }
+      }).catch(function() {
+        // Ignore poll errors — just keep trying
+      });
+    }, interval);
+  }
+
   document.addEventListener('click', function(e) {
     var btn = e.target.closest('.inst-action');
     if (!btn) return;
@@ -804,8 +829,11 @@ nav .nav-section-header { padding: 12px 16px 4px; font-size: 0.75em; text-transf
       }
     }
 
+    // Map internal action names to API endpoint paths
+    var _endpointMap = {reconfig_restart: 'reconfigure', restart_system: 'restart_system'};
+    var epAction = _endpointMap[action] || action;
     var method = action === 'delete' ? 'DELETE' : 'POST';
-    var endpoint = (action === 'delete') ? '/instances/' + instId : '/instances/' + instId + '/' + action;
+    var endpoint = (action === 'delete') ? '/instances/' + instId : '/instances/' + instId + '/' + epAction;
 
     // Show loading state: disable + spinner icon
     var originalText = btn.textContent;
@@ -824,22 +852,30 @@ nav .nav-section-header { padding: 12px 16px 4px; font-size: 0.75em; text-transf
         // Success: re-enable button and restore label
         btn.disabled = false;
         btn.textContent = originalText;
-        // For llama_server instances with model load progress row, start SSE monitoring
-        if ((action === 'restart' || action === 'start' || action === 'deploy')) {
+        // Reload strategy depends on action type
+        if (action === 'start' || action === 'reconfig_restart' || action === 'restart') {
+          // Sync actions (start/reconfig/restart) — instance enters loading/running immediately.
+          // Try SSE first for llama_server, fallback to polling after 5s.
           var mlRow = document.querySelector('tr.model-load-row[data-inst-id="' + instId + '"]');
-          if (mlRow) {
-            // List view: connect SSE model load progress
-            if (typeof mlConnectSSE === 'function') {
-              mlConnectSSE(instId);
-            }
-          } else {
-            // Detail page / other: auto-refresh after state-changing actions
-            if (action !== 'stop') {
-              setTimeout(function() { location.reload(); }, 1500);
-            }
+          if (mlRow && typeof mlConnectSSE === 'function') {
+            try { mlConnectSSE(instId); } catch(e) { /* ignore SSE failures */ }
           }
-        } else if (action === 'stop' && !mlRow) {
-          setTimeout(function() { location.reload(); }, 1500);
+          // Poll fallback: if no state change within 5s, reload anyway
+          setTimeout(function() {
+            pollUntilTarget(instId, ['running','error'], function() {}, 5000);
+            // Absolute timeout — reload if nothing happened
+            setTimeout(function() { location.reload(); }, 8000);
+          }, 3000);
+        } else if (action === 'deploy') {
+          // Async deploy — scheduler picks up task. Poll until state changes to running/error.
+          pollUntilTarget(instId, ['running','error','stopped'], function() {
+            location.reload();
+          }, 120000); // 2 min timeout for full compile
+        } else if (action === 'reconfigure' || action === 'reconfig_restart') {
+          // Sync reconfigure — already completed. Reload after delay.
+          setTimeout(function() { location.reload(); }, 3000);
+        } else if (action === 'stop') {
+          setTimeout(function() { location.reload(); }, 3000);
         }
       }
     }).catch(function(err) {

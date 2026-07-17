@@ -202,20 +202,18 @@
     <summary style="cursor:pointer;color:#aaa;font-size:0.9em;">Edit per-instance overrides</summary>
     <div id="override-editor" style="margin-top:8px;">
       <p style="color:#888;font-size:0.85em;margin-bottom:8px;">
-        Only keys shown here are actively overridden for this instance. Values from preset/engine defaults are NOT shown.
+        Add or modify per-instance overrides below. Changes take effect immediately. Keys marked ★ are already overridden.
       </p>
       <div id="override-editor-body">
         <p style="color:#666;font-size:0.85em;" id="override-empty-msg">No per-instance overrides set.</p>
       </div>
       <div id="add-override-form" style="display:flex;gap:6px;margin-top:8px;align-items:center;">
-        <select id="add-ov-key" style="width:200px;padding:3px;border:1px solid #ccc;background:#fff;color:#333;font-size:0.85em;border-radius:3px;" title="Select env/model key to override">
+        <select id="add-ov-key" style="width:300px;padding:3px;border:1px solid #ccc;background:#fff;color:#333;font-size:0.85em;border-radius:3px;" title="Select env/model key to override">
           <option value="">-- Select key --</option>
         </select>
         <input id="add-ov-val" type="text" placeholder="Value" style="width:160px;padding:3px;border:1px solid #ccc;background:#fff;color:#333;font-size:0.85em;border-radius:3px;">
         <button id="add-ov-btn" class="btn btn-success" style="padding:2px 8px;font-size:0.85em;">+ Add</button>
       </div>
-      <button id="save-overrides-btn" class="btn btn-success" style="margin-top:8px;display:none;">Save Changes</button>
-      <span id="override-save-status" style="font-size:0.8em;color:#888;margin-left:8px;display:none;"></span>
     </div>
   </details>
 </div>
@@ -230,7 +228,6 @@
   var layerSummary = document.getElementById('merge-layer-summary');
   var toggleBtn = document.getElementById('toggle-merged-view');
   var overrideBody = document.getElementById('override-editor-body');
-  var saveBtn = document.getElementById('save-overrides-btn');
   var currentData = null;
   var clientOverrides = {};
   var isTable = false;
@@ -249,19 +246,22 @@
       if (addSelect) {
         var existingOpts = addSelect.querySelectorAll('option[data-from-api="true"]');
         existingOpts.forEach(function(o) { o.remove(); });
-        // For subprocess/universal: use actual_overrides (flat dict). For llama: use env+model.
-        var allKeys = [];
-        if (d.data && d.data.actual_overrides) {
-          allKeys = Object.keys(d.data.actual_overrides).filter(function(k) { return k.indexOf('_') !== 0; });
-        } else {
-          var envKeys = d.data && d.data.env ? Object.keys(d.data.env) : [];
-          var modelKeys = d.data && d.data.model ? Object.keys(d.data.model) : [];
-          allKeys = [].concat(envKeys, modelKeys).filter(function(k) { return k.indexOf('_') !== 0; });
-        }
+        // Always show ALL env + model keys from the merged config.
+        // Mark already-overridden keys with ★ so users can see which are customized.
+        var activeOver = d.data && d.data.actual_overrides ? Object.keys(d.data.actual_overrides) : [];
+        var envKeys = d.data && d.data.env ? Object.keys(d.data.env) : [];
+        var modelKeys = d.data && d.data.model ? Object.keys(d.data.model) : [];
+        var allKeys = [].concat(envKeys, modelKeys);
+        // Deduplicate (some keys may appear in both env and model)
+        allKeys = allKeys.filter(function(k, i, a) { return k.indexOf('_') !== 0 && a.indexOf(k) === i; });
         allKeys.sort().forEach(function(k) {
           var opt = document.createElement('option');
           opt.value = k;
-          opt.textContent = k;
+          opt.textContent = activeOver.indexOf(k) >= 0 ? '★ ' + k : k;
+          if (activeOver.indexOf(k) >= 0) {
+            opt.title = 'Already overridden for this instance';
+            opt.style.fontWeight = 'bold';
+          }
           opt.setAttribute('data-from-api', 'true');
           addSelect.appendChild(opt);
         });
@@ -286,28 +286,26 @@
       }
       mergeTable.innerHTML = rows.join('');
 
-      // Override editor — show ONLY active overrides
-      var ovKeys = Object.keys(clientOverrides);
-      if (ovKeys.length === 0) {
-        overrideBody.innerHTML = '<p style="color:#666;font-size:0.85em;">No per-instance overrides set.</p>';
-        saveBtn.style.display = 'none';
-      } else {
-        var ovRowsHtml = '';
-        for (var i = 0; i < ovKeys.length; i++) {
-          var k = ovKeys[i];
-          var v = clientOverrides[k];
-          var displayVal = typeof v === 'object' ? JSON.stringify(v) : String(v);
-          ovRowsHtml +=
-             '<div class="ov-row" style="display:flex;gap:6px;margin-bottom:4px;align-items:flex-start;">' +
-             '<input class="ov-key" value="' + k + '" readonly style="width:150px;padding:3px;border:1px solid #ccc;background:#fff;color:#333;font-size:0.85em;border-radius:3px;" title="Key">' +
-             '<textarea class="ov-val" data-key="' + k + '" rows="1" style="flex:1;min-width:200px;padding:3px;border:1px solid #ccc;background:#fff;color:#333;font-size:0.85em;border-radius:3px;font-family:monospace;resize:none;" title="Value">' + escapeHtml(displayVal) + '</textarea>' +
-             '<button class="ov-save-btn btn btn-xs btn-success" style="padding:2px 6px;font-size:0.75em;white-space:nowrap;" onclick="ovSaveRow(this)" title="Save this key">OK</button>' +
-             '<button class="ov-unset-btn btn btn-xs" style="padding:2px 6px;font-size:0.75em;color:#dc3545;border-color:#dc3545;white-space:nowrap;" onclick="ovUnsetRow(this)" title="Remove override">&#10005;</button>' +
-             '</div>';
-        }
-        overrideBody.innerHTML = ovRowsHtml;
-        saveBtn.style.display = 'inline-block';
-      }
+       // Override editor — show active overrides
+       var ovKeys = Object.keys(clientOverrides);
+       if (ovKeys.length === 0) {
+         overrideBody.innerHTML = '<p style="color:#666;font-size:0.85em;">No per-instance overrides set.</p>';
+       } else {
+         var ovRowsHtml = '';
+         for (var i = 0; i < ovKeys.length; i++) {
+           var k = ovKeys[i];
+           var v = clientOverrides[k];
+           var displayVal = typeof v === 'object' ? JSON.stringify(v) : String(v);
+           ovRowsHtml +=
+              '<div class="ov-row" style="display:flex;gap:6px;margin-bottom:4px;align-items:flex-start;">' +
+              '<input class="ov-key" value="' + k + '" readonly style="width:300px;padding:3px;border:1px solid #ccc;background:#fff;color:#333;font-size:0.85em;border-radius:3px;" title="Key">' +
+              '<textarea class="ov-val" data-key="' + k + '" rows="1" style="flex:1;min-width:200px;padding:3px;border:1px solid #ccc;background:#fff;color:#333;font-size:0.85em;border-radius:3px;font-family:monospace;resize:none;" title="Value">' + escapeHtml(displayVal) + '</textarea>' +
+              '<button class="ov-save-btn btn btn-xs btn-success" style="padding:2px 6px;font-size:0.75em;white-space:nowrap;" onclick="ovSaveRow(this)" title="Save this key">OK</button>' +
+              '<button class="ov-unset-btn btn btn-xs" style="padding:2px 6px;font-size:0.75em;color:#dc3545;border-color:#dc3545;white-space:nowrap;" onclick="ovUnsetRow(this)" title="Remove override">&#10005;</button>' +
+              '</div>';
+         }
+         overrideBody.innerHTML = ovRowsHtml;
+       }
     })
     .catch(function(e) {
       layerSummary.textContent = 'Load error';
@@ -415,24 +413,6 @@
       loadMergedConfig();
     });
   };
-
-  // Global save-all button
-  if (saveBtn) {
-    saveBtn.addEventListener('click', function() {
-      var overrides = {};
-      var keyEls = overrideBody.querySelectorAll('.ov-key');
-      var valEls = overrideBody.querySelectorAll('.ov-val');
-      for (var i = 0; i < keyEls.length; i++) {
-        overrides[keyEls[i].value] = valEls[i].value;
-      }
-      qrApi('/instances/' + instId, {
-        method: 'PUT',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({config_override: JSON.stringify(overrides)})
-      }).then(function(d) { if (d.status === 'ok') loadMergedConfig(); })
-      .catch(function(e) { console.error('Save error:', e); });
-    });
-  }
 
   // Toggle view button
   if (toggleBtn) {
@@ -864,7 +844,7 @@
       qrApi('/instances/' + instId, {
          method: 'PUT',
          headers: {'Content-Type': 'application/json'},
-         body: JSON.stringify({preset_id: val, skip_build: true})
+          body: JSON.stringify({preset_id: val})
        })
       .then(function(data) {
         clearInterval(dotInterval);

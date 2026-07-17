@@ -18,11 +18,13 @@ Controls the web UI frontend server process lifecycle via direct
 subprocess management (PID-in-DB tracking, no tmux).
 """
 
+import logging
 import os
-import sys
 import subprocess
+import sys
 import time
 
+logger = logging.getLogger(__name__)
 from lib.qr_engine_ids import QR_DEFAULT_LOCALHOST, QR_FORBIDDEN_HOSTS
 
 from engine.base import BaseEngine
@@ -138,7 +140,8 @@ class QrWebuiEngine(BaseEngine):
                     s.connect(("8.8.8.8", 80))
                     hosts_to_try.append(s.getsockname()[0])
                     s.close()
-                except Exception:
+                except Exception as _e:
+                    logger.debug("socket getsockname failed for WebUI host resolution: %s", _e)
                     pass
             import time as _time
             last_err = None
@@ -246,8 +249,9 @@ class QrWebuiEngine(BaseEngine):
                     else:
                         try:
                             transition_state(db_path, instance_id, "deployed")
-                        except Exception:
-                             pass
+                        except Exception as _e:
+                            logger.debug("transition_state deployed for existing WebUI process failed: %s", _e)
+                            pass
                         webui_port = inst.get("port_assigned") or env_config["QUICKROBOT_WEBUI_PORT"]
                         return {"action": "start", "port": int(webui_port), "pid": old_pid,
                                 "status": "existing_process_alive"}
@@ -311,7 +315,8 @@ class QrWebuiEngine(BaseEngine):
                 # deployed→running is invalid (missing 'starting'); go through starting first
                 transition_state(db_path, instance_id, "starting")
                 transition_state(db_path, instance_id, "running")
-            except Exception:
+            except Exception as _e:
+                logger.debug("state transition chain for WebUI start failed: %s", _e)
                 pass
             _log_lifecycle("webui", "start", {"pid": new_pid, "api_host": api_host, "api_port": api_port})
             webui_port = inst.get("port_assigned") or env_config["QUICKROBOT_WEBUI_PORT"]
@@ -334,7 +339,8 @@ class QrWebuiEngine(BaseEngine):
             # Transition to stopping for visible state change in UI
             try:
                 transition_state(db_path, instance_id, "stopping")
-            except Exception:
+            except Exception as _e:
+                logger.debug("transition_state stopping for WebUI restart failed: %s", _e)
                 pass
 
             old_pid = inst.get("pid_last_known")
@@ -343,7 +349,8 @@ class QrWebuiEngine(BaseEngine):
             # is detected as "running" during the kill window
             try:
                 update_instance(db_path, instance_id, pid_last_known=None)
-            except Exception:
+            except Exception as _e:
+                logger.debug("update_instance pid_last_known=None for WebUI restart failed: %s", _e)
                 pass
 
             if old_pid and _get_pid_status(old_pid):
@@ -385,7 +392,8 @@ class QrWebuiEngine(BaseEngine):
                 except ConnectionRefusedError:
                     # Port is free — we can start
                     break
-                except Exception:
+                except Exception as _e:
+                    logger.debug("port-wait check failed (WebUI restart): %s", _e)
                     break
 
             # Start new process

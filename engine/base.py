@@ -19,6 +19,9 @@ Each engine controls a specific type of service deployed on remote nodes.
 """
 
 import abc
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class BaseEngine(abc.ABC):
@@ -38,21 +41,10 @@ class BaseEngine(abc.ABC):
             dict mapping current_state -> [allowed_next_states].
             Engines override this to define their own lifecycle.
             The base machine is used as fallback for unknown engines.
+            SSOT: delegates to VALID_TRANSITIONS in db.adapters.instances.
         """
-        return {
-            "unconfigured": ["configuring", "stopped", "deployed"],
-            "configuring": ["deploying", "build_error", "unconfigured", "stopping"],
-            "deploying": ["deployed", "build_error", "error", "unconfigured"],
-            "build_error": ["configuring", "error", "unconfigured"],
-            "deployed": ["starting", "running", "stopped", "error", "unconfigured"],
-            "starting": ["running", "error", "timeout", "stopping", "build_error"],
-            "running": ["stopping", "error", "test_mode"],
-            "stopping": ["stopped", "running", "starting", "deployed", "configuring", "error", "timeout"],
-            "stopped": ["starting", "running", "configuring", "stopping", "error", "test_mode", "unconfigured"],
-            "error": ["unconfigured", "configuring", "deploying", "starting", "stopping", "updating", "build_error", "compiling", "running"],
-            "timeout": ["error"],
-            "test_mode": ["running", "stopped", "error"],
-        }
+        from db.adapters.instances import VALID_TRANSITIONS  # lazy import — avoids circular dep
+        return dict(VALID_TRANSITIONS)
 
     @abc.abstractmethod
     def get_status(self, instance_id, db_path=None):
@@ -247,7 +239,8 @@ def derive_service_state(pid, db_state=None):
             proc = _psutil.Process(pid)
             if proc.status() != "zombie":
                 return "running"
-        except Exception:
+        except Exception as _e:
+            logger.debug("psutil Process status check for pid %d failed: %s", pid, _e)
             pass
     if db_state and db_state not in ("unconfigured",):
         return db_state

@@ -28,6 +28,9 @@ Usage:
                                           method="GET", timeout=60)
 """
 
+import logging
+logger = logging.getLogger(__name__)
+
 import urllib.request as _urq
 import urllib.error as _ure
 import urllib.parse as _urllib_parse
@@ -127,7 +130,8 @@ def _read_all_chunks(resp):
     while True:
         try:
             chunk = resp.read(8192)
-        except Exception:
+        except Exception as _e:
+            logger.debug("chunk read interrupted: %s", _e)
             break
         if not chunk:
             break

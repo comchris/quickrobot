@@ -197,6 +197,7 @@ from .routes_instances import (
     api_set_cli_flags,
     api_set_herd_config,
     api_set_expert_split_config,
+    api_patch_expert_split,
     api_set_draft,
     api_set_experts,
     api_set_split,
@@ -233,9 +234,9 @@ from .routes_nodes import (
     api_clear_old_ansible_actions,
     api_qr_actions,
     api_clear_old_qr_actions,
-    api_log_entries,
-    api_cleanup_log_entries,
-    api_clear_results,
+     api_log_entries,
+     api_cleanup_log_entries,
+     api_clear_results,
     api_clone_preset,
 
     api_create_model,
@@ -340,6 +341,20 @@ from .routes_nodes import (
 from . import routes_scripts
 app.register_blueprint(routes_scripts.bp)
 
+# ── PROMPTS: MCP Prompts System (MCP-PROMPTS, 2026-07-12) ─────────────
+from .routes_prompts import (
+    api_list_engine_prompts,
+    api_get_engine_prompt,
+    api_get_engine_prompt_by_db_id,
+    api_create_engine_prompt,
+    api_update_engine_prompt,
+    api_delete_engine_prompt,
+    api_engine_prompt_content,
+    api_prompt_rescan,
+    api_rescan_engine_prompts,
+    api_reset_engine_prompt_counters,
+)
+
 def register_routes(app):
     """Register all route handlers with the Flask app.
 
@@ -422,6 +437,7 @@ def register_routes(app):
     app.add_url_rule("/api/v1/instances/<int:inst_id>/gpu-override", "api_set_gpu_override", api_set_gpu_override, methods=["PUT"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/expert-split-config", "api_get_expert_split_config", api_get_expert_split_config, methods=["GET"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/expert-split-config", "api_set_expert_split_config", api_set_expert_split_config, methods=["PUT"])
+    app.add_url_rule("/api/v1/instances/<int:inst_id>/expert-split", "api_patch_expert_split", api_patch_expert_split, methods=["PATCH"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/cluster-bind", "api_cluster_bind", api_cluster_bind, methods=["PUT"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/deploy", "api_deploy_instance", api_deploy_instance, methods=["POST"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/redeploy", "api_deploy_instance", api_deploy_instance, methods=["POST"])
@@ -510,6 +526,17 @@ def register_routes(app):
     app.add_url_rule("/api/v1/playbooks/<int:playbook_id>/content", "api_playbook_content", api_playbook_content, methods=["GET"])
     app.add_url_rule("/api/v1/playbooks/rescan", "api_rescan_playbooks", api_rescan_playbooks, methods=["POST"])
     app.add_url_rule("/api/v1/playbooks/reset-counters", "api_reset_playbook_counters", api_reset_playbook_counters, methods=["POST"])
+    # MCP Prompts System routes (MCP-PROMPTS)
+    app.add_url_rule("/api/v1/prompts", "api_list_engine_prompts", api_list_engine_prompts, methods=["GET"])
+    app.add_url_rule("/api/v1/prompts", "api_create_engine_prompt", api_create_engine_prompt, methods=["POST"])
+    app.add_url_rule("/api/v1/prompts/<int:db_id>", "api_get_engine_prompt_by_db_id", api_get_engine_prompt_by_db_id, methods=["GET"])
+    app.add_url_rule("/api/v1/prompts/<string:prompt_id>", "api_get_engine_prompt", api_get_engine_prompt, methods=["GET"])
+    app.add_url_rule("/api/v1/prompts/<string:prompt_id>", "api_update_engine_prompt", api_update_engine_prompt, methods=["PUT"])
+    app.add_url_rule("/api/v1/prompts/<string:prompt_id>", "api_delete_engine_prompt", api_delete_engine_prompt, methods=["DELETE"])
+    app.add_url_rule("/api/v1/prompts/<string:prompt_id>/content", "api_engine_prompt_content", api_engine_prompt_content, methods=["GET"])
+    app.add_url_rule("/api/v1/prompts/<string:prompt_id>/rescan", "api_prompt_rescan", api_prompt_rescan, methods=["POST"])
+    app.add_url_rule("/api/v1/prompts/rescan", "api_rescan_engine_prompts", api_rescan_engine_prompts, methods=["POST"])
+    app.add_url_rule("/api/v1/prompts/reset-counters", "api_reset_engine_prompt_counters", api_reset_engine_prompt_counters, methods=["POST"])
     app.add_url_rule("/api/v1/proxy/<path:subpath>", "api_proxy_remote", api_proxy_remote, methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
     app.add_url_rule("/api/v1/rpc-bindings", "api_list_rpc_bindings", api_list_rpc_bindings, methods=["GET"])
     app.add_url_rule("/api/v1/rpccluster/llama/<int:llama_id>/bind-rpc", "api_rpccluster_bind", api_rpccluster_bind, methods=["PUT"])

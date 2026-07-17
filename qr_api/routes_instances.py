@@ -32,6 +32,8 @@ from qr_api.lib_instances import (
 from lib.lib_qr_actions import log_qr_action, log_qr_override
 from qr_api.lib_nodes import _get_node_build_state
 from db.sqlite import pool as db_pool
+import logging
+logger = logging.getLogger(__name__)
 
 
 def _health_probe_instance(inst_id, hostname, node_id=None):
@@ -153,8 +155,8 @@ def _engine_get_instance_status(db_path, instance_id):
                     running = True
                     uptime_seconds = int(__import__("time").time() - proc.create_time())
                     rss_bytes = proc.memory_info().rss
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("_engine_get_instance_status inst=%d: psutil process check failed: %s", inst["id"], _e)
         result = {
             "id": inst["id"],
             "state": "running" if running else inst.get("state", "stopped"),
@@ -203,8 +205,8 @@ def _engine_get_instance_status(db_path, instance_id):
                     running = True
                     uptime_seconds = int(__import__("time").time() - proc.create_time())
                     rss_bytes = proc.memory_info().rss
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("_engine_get_instance_status inst=%d: psutil process check failed: %s", inst["id"], _e)
         result = {
             "id": inst["id"],
             "state": "running" if running else inst.get("state", "stopped"),
@@ -281,7 +283,8 @@ def api_create_instance():
             try:
                 import json as _json_cap
                 cap = _json_cap.loads(cap)
-            except Exception:
+            except Exception as _e:
+                logger.debug("api_create_instance: capability JSON parse failed, using empty cap: %s", _e)
                 cap = {}
         max_inst = cap.get("max_instances")
         if max_inst is not None and max_inst > 0:
@@ -315,9 +318,8 @@ def api_create_instance():
             sv = sv_raw["value"] if isinstance(sv_raw, dict) and "value" in sv_raw else str(sv_raw) if sv_raw else ""
             if str(sv).lower() in ("true", "1"):
                 _skip_build = True
-        except Exception:
-            pass  # Will default below
-
+        except Exception as _e:
+            logger.debug("api_create_instance: skip_build engine_config lookup failed: %s", _e)
     # Cluster binding fields (llama_server only)
     rpc_bind_ids = body.get("rpc_bind_ids")  # explicit binding from request
     split_mode = body.get("split_mode")       # explicit split mode from request
@@ -395,8 +397,8 @@ def api_create_instance():
         if gpu_device:
             update_kwargs["gpu_device"] = gpu_device
         instance = _ui(_CONFIG["db_path"], instance["id"], **update_kwargs)
-    except Exception:
-        pass  # Port allocation is best-effort in Phase 1
+    except Exception as _e:
+        logger.debug("api_create_instance: port allocation failed (best-effort): %s", _e)
 
     # Merge configs and store
     try:
@@ -411,8 +413,8 @@ def api_create_instance():
             config_override["split"] = split_val
             update_kwargs["split"] = int(split_val)
         _ui2(_CONFIG["db_path"], instance["id"], **update_kwargs)
-    except Exception:
-        pass  # Config merge is best-effort
+    except Exception as _e:
+        logger.debug("api_create_instance: config merge failed (best-effort): %s", _e)
 
     # Populate node_hostname from node record (required for playbook limit/extra_vars)
     try:
@@ -426,8 +428,8 @@ def api_create_instance():
                 _ui_nh(_CONFIG["db_path"], instance["id"], node_hostname=nh, node_name=nn)
                 instance["node_hostname"] = nh
                 instance["node_name"] = nn
-    except Exception:
-        pass  # Non-critical — deploy will use defaults
+    except Exception as _e:
+        logger.debug("api_create_instance: node_hostname update failed (non-critical): %s", _e)
 
     # Auto-deploy if enabled and deploy_requested flag not explicitly false
     auto_deploy = _CONFIG.get("create_and_autodeploy", True)
@@ -499,8 +501,8 @@ def api_list_instances():
                     node = _gn(_CONFIG["db_path"], node_id)
                     if node and not node.get("is_active", 1):
                         continue
-                except Exception:
-                    pass  # If we can't check the node, include the instance
+                except Exception as _e:
+                    logger.debug("api_list_instances: node active check failed for nid=%s, including instance: %s", node_id, _e)
             filtered.append(inst)
         instances = filtered
     # Enrich instances with _host_inactive flag (for WebUI/MCP)
@@ -510,7 +512,8 @@ def api_list_instances():
             try:
                 node = _gn(_CONFIG["db_path"], nid)
                 inst["_host_inactive"] = bool(node and not node.get("is_active", 1))
-            except Exception:
+            except Exception as _e:
+                logger.debug("api_list_instances: node lookup for _host_inactive failed: %s", _e)
                 inst["_host_inactive"] = False
         else:
             inst["_host_inactive"] = False
@@ -588,10 +591,13 @@ def api_list_instances():
                         inst["mcp_allow_reads"] = str(rr.get("value", "true")).lower() in ("true", "1", "yes")
                         inst["mcp_allow_writes"] = str(wr.get("value", "true")).lower() in ("true", "1", "yes")
                         inst["mcp_allow_proxy"] = str(pr.get("value", "true")).lower() in ("true", "1", "yes")
-                except Exception:
+                except Exception as _e:
+                    logger.debug("api_list_instances inst=%d: MCP engine config lookup (2nd): %s", inst["id"], _e)
                     inst["mcp_allow_reads"] = True
                     inst["mcp_allow_writes"] = True
                     inst["mcp_allow_proxy"] = True
+                except Exception as _e:
+                    logger.debug("api_list_instances inst=%d: MCP engine config lookup failed: %s", inst["id"], _e)
             # Process uptime computed by shared helper (called after loop below)
             if engine_type_name == QR_ENGINE_MCP_NAME:
                 try:
@@ -611,11 +617,12 @@ def api_list_instances():
                 # MCP availability: check engine status for interpreter/package info
                 try:
                     from engine import get_engine as _ge
-                    mcp_eng = _ge("quickrobot-mcp")
+                    mcp_eng = _ge(QR_ENGINE_MCP_NAME)
                     if mcp_eng:
                         _st = mcp_eng.get_status(inst["id"], _CONFIG["db_path"])
                         inst["_mcp_available"] = bool(_st.get("mcp_available", False))
-                except Exception:
+                except Exception as _e:
+                    logger.debug("api_list_instances inst=%d: MCP availability check failed: %s", inst["id"], _e)
                     inst["_mcp_available"] = True  # default optimistic
             # Warn that system-managed engines do not accept per-instance overrides.
             # Config comes from .quickrobot.env (L1) + engine_configs table (L2).
@@ -639,8 +646,8 @@ def api_list_instances():
                     p = _psutil.Process(pid)
                     if p.is_running():
                         inst["process_age_seconds"] = int(now_ts - p.create_time())
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("api_list_instances inst=%d: process uptime check failed: %s", inst["id"], _e)
     # Debug: show engine_type_name for all instances
     for i in instances:
         if i.get('id') == 3:
@@ -664,39 +671,40 @@ def api_list_instances():
                 }
             else:
                 inst["active_jobs"] = None
-    except Exception:
+    except Exception as _e:
+        logger.debug("api_list_instances: active job query failed: %s", _e)
         for inst in instances:
             inst["active_jobs"] = None
 
     # Pre-compute available actions per instance (state + engine_type derived).
     # Actions are deterministic — no AJAX needed client-side.
     _LLAMA_ACTIONS = {
-        "unconfigured":   [{"name": "deploy", "label": "Deploy"}, {"name": "undeploy", "label": "Undeploy"}, {"name": "delete", "label": "Delete"}],
+        "unconfigured":   [{"name": "deploy", "label": "Deploy"}, {"name": "delete", "label": "Delete"}],
         "configuring":    [{"name": "stop", "label": "Stop"}],
         "deploying":      [{"name": "stop", "label": "Stop"}],
-        "deployed":       [{"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "reconfigure", "label": "Reconfigure"}, {"name": "delete", "label": "Delete"}],
+        "deployed":       [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "deploy", "label": "Deploy"}, {"name": "undeploy", "label": "Undeploy"}, {"name": "delete", "label": "Delete"}],
         "starting":       [{"name": "stop", "label": "Stop"}],
         "loading":        [{"name": "stop", "label": "Stop"}],
-        "running":        [{"name": "stop", "label": "Stop"}, {"name": "restart", "label": "Restart"}, {"name": "reconfigure", "label": "Reconfigure"}],
+        "running":        [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "stop", "label": "Stop"}],
         "stopping":       [{"name": "start", "label": "Start"}],
-        "stopped":        [{"name": "start", "label": "Start"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "reconfigure", "label": "Reconfigure"}, {"name": "deploy", "label": "Deploy"}, {"name": "delete", "label": "Delete"}],
-        "error":          [{"name": "start", "label": "Start"}, {"name": "deploy", "label": "Deploy"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "stop", "label": "Stop"}, {"name": "delete", "label": "Delete"}],
+        "stopped":        [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "deploy", "label": "Deploy"}, {"name": "undeploy", "label": "Undeploy"}],
+        "error":          [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "deploy", "label": "Deploy"}, {"name": "undeploy", "label": "Undeploy"}, {"name": "delete", "label": "Delete"}],
         "updating":       [],
         "compiling":      [],
-        "build_error":    [{"name": "deploy", "label": "Deploy"}, {"name": "start", "label": "Start"}, {"name": "delete", "label": "Delete"}],
+        "build_error":    [{"name": "deploy", "label": "Deploy"}, {"name": "start", "label": "Start"}, {"name": "undeploy", "label": "Undeploy"}, {"name": "delete", "label": "Delete"}],
         "timeout":        [{"name": "deploy", "label": "Deploy"}],
         "test_mode":      [{"name": "stop", "label": "Stop"}],
     }
     _SUBPROCESS_ACTIONS = {
         "unconfigured":   [{"name": "deploy", "label": "Deploy"}, {"name": "delete", "label": "Delete"}],
-        "configuring":    [{"name": "restart", "label": "Restart"}],
-        "deployed":       [{"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}],
+        "configuring":    [{"name": "stop", "label": "Stop"}],
+        "deployed":       [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "delete", "label": "Delete"}],
         "starting":       [{"name": "stop", "label": "Stop"}],
-        "running":        [{"name": "stop", "label": "Stop"}, {"name": "restart", "label": "Restart"}],
+        "running":        [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "stop", "label": "Stop"}],
         "stopping":       [{"name": "start", "label": "Start"}],
-        "stopped":        [{"name": "start", "label": "Start"}, {"name": "delete", "label": "Delete"}],
-        "error":          [{"name": "start", "label": "Start"}, {"name": "restart", "label": "Restart"}, {"name": "deploy", "label": "Deploy"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "stop", "label": "Stop"}],
-        "build_error":    [{"name": "deploy", "label": "Deploy"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}],
+        "stopped":        [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "deploy", "label": "Deploy"}],
+        "error":          [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "deploy", "label": "Deploy"}, {"name": "delete", "label": "Delete"}],
+        "build_error":    [{"name": "deploy", "label": "Deploy"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "delete", "label": "Delete"}],
         "timeout":        [{"name": "deploy", "label": "Deploy"}],
     }
     # System-managed engines: use restart_system endpoint instead of standard stop/start
@@ -771,7 +779,8 @@ def api_get_instance(inst_id):
                             sob = sob_raw.lower() in ("true", "1", "yes")
                         else:
                             sob = bool(int(sob_raw))
-            except Exception:
+            except Exception as _e:
+                logger.debug("api_get_instance inst=%d: restart_policy/start_on_boot config parse fallback: %s", inst_id, _e)
                 rp, sob = "no", False
             merged = {"env": cluster_result["env"], "cli_opts": [s for s in cluster_result["cli_args"].split()] if cluster_result["cli_args"] else [], "model": {}, "restart_policy": rp or "no", "start_on_boot": sob}
         except Exception as exc:
@@ -788,7 +797,8 @@ def api_get_instance(inst_id):
         from lib.lib_config_merge import _parse_config_override as _pcov
         co_raw = instance.get("config_override") or {}
         instance["active_overrides"] = _pcov(co_raw)
-    except Exception:
+    except Exception as _e:
+        logger.debug("api_get_instance inst=%d: active_overrides parse failed: %s", inst_id, _e)
         instance["active_overrides"] = {}
 
     # System-managed instances: use config_override.host (LAN IP) instead of "localhost"
@@ -799,7 +809,8 @@ def api_get_instance(inst_id):
             try:
                 import json as _jc2
                 co_raw = _jc2.loads(co_raw)
-            except Exception:
+            except Exception as _e:
+                logger.debug("api_get_instance inst=%d: config_override JSON parse failed: %s", inst_id, _e)
                 co_raw = {}
         if isinstance(co_raw, dict):
             lan_host = co_raw.get("host", "")
@@ -930,8 +941,8 @@ def api_update_instance(inst_id):
                     for k in list(new_override.keys()):
                         if k in old_config and k not in co_in:
                             del new_override[k]
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("api_update_instance inst=%d: config_override JSON parse fallback: %s", inst_id, _e)
     new_preset = body.get("preset_id", old_preset)
     new_port = body.get("port_override", body.get("port_assigned", old_port))
 
@@ -944,6 +955,16 @@ def api_update_instance(inst_id):
     if isinstance(new_port, int) and new_port > 0 and new_port != old_port:
         config_update_needed = True
         change_fields.append("port")
+
+    # Fast path: preset-only change. Skip generic merge chain (read→compare→merge→chain).
+    # Just update preset_id in DB, then trigger reconfigure. Eliminates spurious error logs
+    # from the intermediate merge_configs() call and avoids redundant DB reads/writes.
+    # Only applies when skip_build is not explicitly False (which signals full deploy).
+    explicit_no_skip = body.get("skip_build") is not None and body["skip_build"] == False
+    preset_only = (new_preset != old_preset
+                   and "config_override" not in change_fields
+                   and "port" not in change_fields
+                   and not explicit_no_skip)
 
     # Normalize start_on_boot: accept "true"/"false", 0/1, True/False → store as string
     if "start_on_boot" in body:
@@ -979,100 +1000,127 @@ def api_update_instance(inst_id):
     except Exception as exc:
         return error_response("VALIDATION_ERROR", str(exc))
 
-    # Re-merge config after update
-    try:
-        from db.adapters.instances import merge_configs
-        merged = merge_configs(_CONFIG["db_path"], inst_id)
-        _ui(_CONFIG["db_path"], inst_id, ansible_vars=merged)
-        instance["merged_config"] = merged
-    except Exception:
-        pass
-
-    # Trigger config update with proper state lifecycle if config changed
-    if config_update_needed:
-        from db.adapters.instances import get_instance as _gi, transition_state as _ts, log_action as _log
-        inst = _gi(_CONFIG["db_path"], inst_id)
-        engine_type_name = inst.get("engine_type_name", QR_ENGINE_LLAMA_RPC_NAME) if inst else QR_ENGINE_LLAMA_RPC_NAME
-        node_id = inst.get("node_id") if inst else None
+    # Fast path for preset-only changes: skip merge_configs + generic flow.
+    # The reconfigure chain reads the new preset from DB and regenerates config.
+    # Eliminates spurious error logs from intermediate merge failures.
+    if preset_only:
+        from db.adapters.instances import transition_state as _ts, log_action as _log
         current_state = instance.get("state", "")
-
-        if engine_type_name in (QR_ENGINE_LLAMA_SERVER_NAME, QR_ENGINE_LLAMA_RPC_NAME, QR_ENGINE_IPERF3_NAME):
-            # BC-1: Config-only update via RUNNER-1 staged chain
-            # Uses deploy_config_env + service_start playbooks through job/task system.
-            # Creates proper job+task records so SSE progress bar and task log work.
-            # No git clone/pull, no cmake build. Works identically regardless of running or stopped state.
-            if current_state in ("running", "stopped", "error") and config_update_needed:
-                lock = _get_deploy_lock(inst_id)
-                if not lock.acquire(blocking=False):
-                    return error_response("BUSY", f"Config update already in progress for instance {inst_id}")
-                try:
-                    from lib.lib_runner import PlaybookRunner as _PR
-                    runner = _PR(_CONFIG["db_path"])
-                    # Reconfigure chain (config_env + service_start) runs async — returns
-                    # instantly. Scheduler picks up tasks; instance transitions deploying→running.
-                    # The start stage handles stop→start internally; no separate restart needed.
-                    result = runner.chain(inst_id, job_type=QR_JOB_RECONFIGURE, actor="api", async_mode=True)
-                    if result.get("success"):
-                        # Transition to configuring immediately so WebUI sees intermediate state
-                        # (scheduler will overwrite to "deploying" when it claims the first task)
-                        _ts(_CONFIG["db_path"], inst_id, "configuring")
-                        instance["config_update_triggered"] = True
-                        instance["change_fields"] = change_fields
-                    else:
-                        _log(_CONFIG["db_path"], inst_id, "preset_change", "failed", detail={"error": result.get("message", "")})
-                except Exception as exc:
-                    try:
-                        _log(_CONFIG["db_path"], inst_id, "preset_change", "exception", detail={"error": str(exc)})
-                        _ts(_CONFIG["db_path"], inst_id, "running")
-                    except Exception:
-                        pass
-                finally:
-                    lock.release()
-        else:
-            # Standard flow: stopped/unconfigured/error/deployed → redeploy
-            was_running = current_state == "running"
-            if current_state in ("running", "stopped", "unconfigured", "error", "deployed"):
-                try:
-                    # Step 1: Stop if running, verify stopped
-                    if was_running:
-                        try:
-                            _ts(_CONFIG["db_path"], inst_id, "stopping")
-                            _log(_CONFIG["db_path"], inst_id, "stop", "received")
-                        except Exception:
-                            pass
-
-                        stop_result = _run_manage_action(inst_id, engine_type_name, node_id, "stop")
-                        if stop_result.get("success"):
-                            _log(_CONFIG["db_path"], inst_id, "stop", "success", detail={"remote": stop_result})
-                        else:
-                            _log(_CONFIG["db_path"], inst_id, "stop", "failed", detail={"remote": stop_result})
-
-                        _wait_for_stop_status(_CONFIG["db_path"], inst_id, max_wait=30)
-
-                    # Step 2: Deploy with new config
-                    deploy_result = deploy_instance(_CONFIG["db_path"], inst_id, skip_build=body.get("skip_build", False))
-                    instance["deploy_result"] = deploy_result
-                    instance["deploy_triggered"] = True
+        if current_state in ("running", "stopped", "error"):
+            lock = _get_deploy_lock(inst_id)
+            if not lock.acquire(blocking=False):
+                return error_response("BUSY", f"Config update already in progress for instance {inst_id}")
+            try:
+                from lib.lib_runner import PlaybookRunner as _PR
+                runner = _PR(_CONFIG["db_path"])
+                result = runner.chain(inst_id, job_type=QR_JOB_RECONFIGURE, actor="api", async_mode=True)
+                if result.get("success"):
+                    instance["config_update_triggered"] = True
                     instance["change_fields"] = change_fields
+                else:
+                    _log(_CONFIG["db_path"], inst_id, "preset_change", "failed",
+                         detail={"error": result.get("message", "")})
+            except Exception as exc:
+                try:
+                    _ts(_CONFIG["db_path"], inst_id, "running")
+                except Exception as _e:
+                    logger.debug("api_update_instance inst=%d: preset change exception handler fallback: %s", inst_id, _e)
+            finally:
+                lock.release()
+    else:
+        # Re-merge config after update (generic path for mixed changes)
+        try:
+            from db.adapters.instances import merge_configs
+            merged = merge_configs(_CONFIG["db_path"], inst_id)
+            _ui(_CONFIG["db_path"], inst_id, ansible_vars=merged)
+            instance["merged_config"] = merged
+        except Exception as _e:
+            logger.debug("api_update_instance inst=%d: re-merge config after update failed: %s", inst_id, _e)
 
-                    # Step 3: Restart if was previously running
-                    if was_running and engine_type_name in (QR_ENGINE_LLAMA_SERVER_NAME, QR_ENGINE_LLAMA_RPC_NAME, QR_ENGINE_IPERF3_NAME):
+        # Trigger config update with proper state lifecycle if config changed
+        if config_update_needed:
+            from db.adapters.instances import get_instance as _gi, transition_state as _ts, log_action as _log
+            inst = _gi(_CONFIG["db_path"], inst_id)
+            engine_type_name = inst.get("engine_type_name", QR_ENGINE_LLAMA_RPC_NAME) if inst else QR_ENGINE_LLAMA_RPC_NAME
+            node_id = inst.get("node_id") if inst else None
+            current_state = instance.get("state", "")
+
+            if engine_type_name in (QR_ENGINE_LLAMA_SERVER_NAME, QR_ENGINE_LLAMA_RPC_NAME, QR_ENGINE_IPERF3_NAME):
+                # BC-1: Config-only update via RUNNER-1 staged chain
+                # Uses deploy_config_env + service_start playbooks through job/task system.
+                # Creates proper job+task records so SSE progress bar and task log work.
+                # No git clone/pull, no cmake build. Works identically regardless of running or stopped state.
+                if current_state in ("running", "stopped", "error") and config_update_needed:
+                    lock = _get_deploy_lock(inst_id)
+                    if not lock.acquire(blocking=False):
+                        return error_response("BUSY", f"Config update already in progress for instance {inst_id}")
+                    try:
+                        from lib.lib_runner import PlaybookRunner as _PR
+                        runner = _PR(_CONFIG["db_path"])
+                        # Reconfigure chain (config_env + service_start) runs async — returns
+                        # instantly. Scheduler picks up tasks; instance transitions deploying→running.
+                        # The start stage handles stop→start internally; no separate restart needed.
+                        result = runner.chain(inst_id, job_type=QR_JOB_RECONFIGURE, actor="api", async_mode=True)
+                        if result.get("success"):
+                            # chain(async_mode=True) already sets initial state via STAGE_STATE_MAP
+                            # (first task stage determines display state: deploying→running).
+                            instance["config_update_triggered"] = True
+                            instance["change_fields"] = change_fields
+                        else:
+                            _log(_CONFIG["db_path"], inst_id, "preset_change", "failed", detail={"error": result.get("message", "")})
+                    except Exception as exc:
                         try:
-                            _ts(_CONFIG["db_path"], inst_id, "starting")
-                            _log(_CONFIG["db_path"], inst_id, "start", "received")
+                            _log(_CONFIG["db_path"], inst_id, "preset_change", "exception", detail={"error": str(exc)})
+                            _ts(_CONFIG["db_path"], inst_id, "running")
+                        except Exception as _e:
+                            logger.debug("api_update_instance inst=%d: reconfigure chain exception handler: %s", inst_id, _e)
+                    finally:
+                        lock.release()
+            else:
+                # Standard flow: stopped/unconfigured/error/deployed → redeploy
+                was_running = current_state == "running"
+                if current_state in ("running", "stopped", "unconfigured", "error", "deployed"):
+                    try:
+                        # Step 1: Stop if running, verify stopped
+                        if was_running:
+                            try:
+                                _ts(_CONFIG["db_path"], inst_id, "stopping")
+                                _log(_CONFIG["db_path"], inst_id, "stop", "received")
+                            except Exception as _e:
+                                logger.debug("api_update_instance inst=%d: stopping state transition before deploy: %s", inst_id, _e)
 
-                            remote_result = _run_manage_action(inst_id, engine_type_name, node_id, "start")
-                            if remote_result.get("success"):
-                                _ts(_CONFIG["db_path"], inst_id, "running")
-                                _log(_CONFIG["db_path"], inst_id, "start", "success", detail={"remote": remote_result})
+                            stop_result = _run_manage_action(inst_id, engine_type_name, node_id, "stop")
+                            if stop_result.get("success"):
+                                _log(_CONFIG["db_path"], inst_id, "stop", "success", detail={"remote": stop_result})
                             else:
-                                _log(_CONFIG["db_path"], inst_id, "start", "failed", detail={"remote": remote_result})
-                                _ts(_CONFIG["db_path"], inst_id, "error")
-                        except Exception as exc:
-                            _log(_CONFIG["db_path"], inst_id, "start", "failed", detail={"error": str(exc)})
-                except Exception as exc:
-                    instance["deploy_result"] = {"success": False, "message": str(exc)}
-                    instance["deploy_triggered"] = True
+                                _log(_CONFIG["db_path"], inst_id, "stop", "failed", detail={"remote": stop_result})
+
+                            _wait_for_stop_status(_CONFIG["db_path"], inst_id, max_wait=30)
+
+                        # Step 2: Deploy with new config
+                        deploy_result = deploy_instance(_CONFIG["db_path"], inst_id, skip_build=body.get("skip_build", False))
+                        instance["deploy_result"] = deploy_result
+                        instance["deploy_triggered"] = True
+                        instance["change_fields"] = change_fields
+
+                        # Step 3: Restart if was previously running
+                        if was_running and engine_type_name in (QR_ENGINE_LLAMA_SERVER_NAME, QR_ENGINE_LLAMA_RPC_NAME, QR_ENGINE_IPERF3_NAME):
+                            try:
+                                _ts(_CONFIG["db_path"], inst_id, "starting")
+                                _log(_CONFIG["db_path"], inst_id, "start", "received")
+
+                                remote_result = _run_manage_action(inst_id, engine_type_name, node_id, "start")
+                                if remote_result.get("success"):
+                                    _ts(_CONFIG["db_path"], inst_id, "running")
+                                    _log(_CONFIG["db_path"], inst_id, "start", "success", detail={"remote": remote_result})
+                                else:
+                                    _log(_CONFIG["db_path"], inst_id, "start", "failed", detail={"remote": remote_result})
+                                    _ts(_CONFIG["db_path"], inst_id, "error")
+                            except Exception as exc:
+                                _log(_CONFIG["db_path"], inst_id, "start", "failed", detail={"error": str(exc)})
+                    except Exception as exc:
+                        instance["deploy_result"] = {"success": False, "message": str(exc)}
+                        instance["deploy_triggered"] = True
 
     return success_single(instance)
 
@@ -1141,8 +1189,8 @@ def api_delete_instance(inst_id):
         try:
             log_action(_CONFIG["db_path"], inst_id, "undeploy", "success",
                         detail={"remote_undeploy": True, "deleted": True})
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("api_delete_instance inst=%d: post-delete logging failed (FK may be gone): %s", inst_id, _e)
 
         # Check if shared build should be cleaned up (last llama_server/llama_rpc on node)
         cleanup_done = None
@@ -1263,30 +1311,14 @@ def api_bind_rpc(inst_id):
              detail={"error": str(exc)})
         return error_response("INTERNAL_ERROR", f"Bind failed: {exc}")
 
-    # Refresh RPC states via health check — ensures DB state is accurate
-    # before any deploy/restart. Prevents deploying to stale RPC state.
-    from engine import get_engine as _get_eng
-    rpc_states = {}
-    for rid in rpc_ids:
-        try:
-            eng = _get_eng(QR_ENGINE_LLAMA_RPC_NAME) or _get_eng("llama_rpc")
-            if eng:
-                result = eng.query_status(int(rid), _CONFIG["db_path"])
-                rpc_states[rid] = {
-                    "alive": result.get("alive", False) if result else False,
-                    "error": result.get("error") if result else "no result",
-                }
-            else:
-                rpc_states[rid] = {"alive": False, "error": "llama_rpc engine not loaded"}
-        except Exception as exc:
-            rpc_states[rid] = {"alive": False, "error": str(exc)}
+    # Health check phase removed — bind/unbind are instant DB-only operations.
+    # RPC states verified at deploy/restart time.
 
     return success_single({
         "action": "bind-rpc",
         "instance_id": inst_id,
         "bound_rpc_ids": rpc_ids,
         "split_mode": split_mode,
-        "rpc_health": rpc_states,
     })
 
 
@@ -1481,8 +1513,8 @@ def api_rpccluster_summary():
             try:
                 summary = _get_summary(_CONFIG["db_path"], lsi["id"])
                 servers.append(summary)
-            except Exception:
-                pass  # Skip instances that fail to summarize
+            except Exception as _e:
+                logger.debug("api_rpccluster_summary: summary fetch failed for inst=%d: %s", lsi.get("id", "?"), _e)
         return success_single({"llama_servers": servers})
     except Exception as exc:
         return error_response("INTERNAL_ERROR", str(exc))
@@ -1525,8 +1557,8 @@ def api_rpccluster_bind(llama_id):
         summary = _get_summary(_CONFIG["db_path"], llama_id)
         data["data"][engine_key] = summary
         return jsonify(data), status_code
-    except Exception:
-        pass  # Enrichment is non-critical; bind already succeeded in DB
+    except Exception as _e:
+        logger.debug("api_rpccluster_bind: herd enrichment failed for llama_id=%d: %s", llama_id, _e)
     return result
 
 
@@ -1567,8 +1599,8 @@ def api_rpccluster_unbind(llama_id, rpc_id):
         summary = _get_summary(_CONFIG["db_path"], llama_id)
         data["data"][engine_key] = summary
         return jsonify(data), status_code
-    except Exception:
-        pass  # Enrichment is non-critical; unbind already succeeded in DB
+    except Exception as _e:
+        logger.debug("api_rpccluster_unbind: herd enrichment failed for llama_id=%d: %s", llama_id, _e)
     return result
 
 
@@ -1648,24 +1680,28 @@ def api_merged_config(inst_id):
         for key, val in result.get("env", {}).items():
             if key.startswith("_"):
                 continue  # Skip internal metadata keys
-            # Find which layer contributed this key
+            # Find which layer contributed this key — prefer highest priority layer.
+            # Layer priority: instance_override > cluster_binding > model > preset > engine_default > metadata
+            _LAYER_PRIORITY = ["instance_override", "cluster_binding", "model", "preset", "engine_default", "metadata"]
             source = "unknown"
-            for layer_name, layer_data in layers.items():
-                if isinstance(layer_data, dict):
-                    env_keys = layer_data.get("env_keys", [])
-                    if key in env_keys:
-                        source = layer_name
+            for priority_name in _LAYER_PRIORITY:
+                if priority_name in layers:
+                    layer_data = layers[priority_name]
+                    if isinstance(layer_data, dict) and key in layer_data.get("env_keys", []):
+                        source = priority_name
                         break
             env_annotated[key] = {"value": val, "source_layer": source}
 
         # Annotate model keys
         for key, val in result.get("model", {}).items():
+            # Prefer highest priority layer for model keys too
             source = "unknown"
-            for layer_name, layer_data in layers.items():
-                if isinstance(layer_data, dict):
-                    model_keys = layer_data.get("model_keys", [])
-                    if key in model_keys:
-                        source = layer_name
+            _LAYER_PRIORITY = ["instance_override", "cluster_binding", "model", "preset", "engine_default", "metadata"]
+            for priority_name in _LAYER_PRIORITY:
+                if priority_name in layers:
+                    layer_data = layers[priority_name]
+                    if isinstance(layer_data, dict) and key in layer_data.get("model_keys", []):
+                        source = priority_name
                         break
             model_annotated[key] = {"value": val, "source_layer": source}
 
@@ -1922,8 +1958,8 @@ def api_get_merged_config(inst_id):
                     "bind_count": cluster_result.get("bind_count"),
                     "cli_args": cluster_result.get("cli_args"),
                 }
-            except Exception:
-                pass  # Non-critical — don't fail the whole request
+            except Exception as _e:
+                logger.debug("api_get_merged_config inst=%d: cluster env builder fallback failed: %s", inst_id, _e)
 
         return jsonify({
             "status": "ok",
@@ -1956,7 +1992,8 @@ def api_cycle_split_mode(inst_id):
     # Since the PUT returns the merged config, extract just split_mode for legacy shape
     try:
         return success_single({"instance_id": inst_id, "split_mode": new_mode})
-    except Exception:
+    except Exception as _e:
+        logger.debug("api_cycle_split_mode inst=%d: fallback split_mode write: %s", inst_id, _e)
         from db.adapters.instances import update_instance as _ui
         _ui(_CONFIG["db_path"], inst_id, split_mode=new_mode)
         return success_single({"instance_id": inst_id, "split_mode": new_mode})
@@ -1980,7 +2017,8 @@ def api_set_split_mode(inst_id):
     result = api_set_instance_config(inst_id)
     try:
         return success_single({"instance_id": inst_id, "split_mode": new_mode})
-    except Exception:
+    except Exception as _e:
+        logger.debug("api_set_split_mode inst=%d: fallback split_mode write: %s", inst_id, _e)
         from db.adapters.instances import update_instance as _ui
         _ui(_CONFIG["db_path"], inst_id, split_mode=new_mode)
         return success_single({"instance_id": inst_id, "split_mode": new_mode})
@@ -2049,7 +2087,8 @@ def api_get_cli_flags(inst_id):
     try:
         data = json.loads(result.get_data(as_text=True)) if hasattr(result, 'get_data') else result
         return success_single({"instance_id": inst_id, "flags": data.get("data", {}).get("cli_flags", [])})
-    except Exception:
+    except Exception as _e:
+        logger.debug("api_get_cli_flags inst=%d: json parse fallback: %s", inst_id, _e)
         return result
 
 
@@ -2089,7 +2128,8 @@ def api_get_gpu_override(inst_id):
     try:
         data = json.loads(result.get_data(as_text=True)) if hasattr(result, 'get_data') else result
         return success_single({"instance_id": inst_id, "gpu_override": data.get("data", {}).get("gpu_override", "")})
-    except Exception:
+    except Exception as _e:
+        logger.debug("api_get_gpu_override inst=%d: json parse fallback: %s", inst_id, _e)
         return result
 
 
@@ -2114,7 +2154,8 @@ def api_get_expert_split_config(inst_id):
     try:
         data = json.loads(result.get_data(as_text=True)) if hasattr(result, 'get_data') else result
         return success_single({"instance_id": inst_id, "expert_split": data.get("data", {}).get("expert_split", {})})
-    except Exception:
+    except Exception as _e:
+        logger.debug("api_get_expert_split_config inst=%d: json parse fallback: %s", inst_id, _e)
         return result
 
 
@@ -2131,6 +2172,111 @@ def api_set_expert_split_config(inst_id):
         return success_single({"instance_id": inst_id, "expert_split": expert_split})
     except Exception as exc:
         return error_response("VALIDATION_ERROR", f"Failed to update expert_split: {exc}")
+
+
+def api_patch_expert_split(inst_id):
+    """PATCH /instances/<id>/expert-split — dedicated expert split update endpoint.
+
+    Atomic write to config_override.expert_split with validation and audit trail.
+    Supports per-RPC mode overrides, extra OT flags, skip_n_first offset, etc.
+    """
+    from db.adapters.instances import get_instance as _gi, update_instance as _ui
+
+    inst = _gi(_CONFIG["db_path"], inst_id)
+    if not inst:
+        return error_response("RESOURCE_NOT_FOUND", f"Instance {inst_id} not found")
+
+    # Validate instance is a llama_server cluster node
+    if inst.get("engine_type_id") != QR_ENGINE_LLAMA_SERVER:
+        return error_response("CONFLICT_ERROR", "Expert split requires a llama_server instance")
+
+    body, is_err = require_json()
+    if is_err:
+        return error_response("VALIDATION_ERROR", body.get("_error", "invalid body"))
+
+    co = _load_config_override(inst)
+
+    # Ensure expert_split dict exists
+    if "expert_split" not in co:
+        co["expert_split"] = {}
+
+    es = co["expert_split"]
+
+    # Validate and merge experts value
+    if "experts" in body:
+        ev = body["experts"]
+        try:
+            ev = int(ev)
+            if ev < 0 or ev > 1000:
+                return error_response("VALIDATION_ERROR", "experts must be between 0 and 1000")
+        except (ValueError, TypeError):
+            return error_response("VALIDATION_ERROR", "experts must be an integer 0-1000")
+        es["experts"] = ev
+
+    # Validate and merge _rpc_modes (per-RPC mode overrides)
+    if "_rpc_modes" in body:
+        rm = body["_rpc_modes"]
+        if not isinstance(rm, dict):
+            return error_response("VALIDATION_ERROR", "_rpc_modes must be a JSON object")
+        valid_modes = ("a", "b", "c", "s", "f")
+        for rpc_id, mode_cfg in rm.items():
+            if isinstance(mode_cfg, dict) and "mode" in mode_cfg:
+                if mode_cfg["mode"] not in valid_modes:
+                    return error_response("VALIDATION_ERROR",
+                        f"Invalid mode '{mode_cfg['mode']}' for RPC {rpc_id}: must be one of {valid_modes}")
+            elif isinstance(mode_cfg, str):
+                if mode_cfg not in valid_modes:
+                    return error_response("VALIDATION_ERROR",
+                        f"Invalid mode '{mode_cfg}' for RPC {rpc_id}: must be one of {valid_modes}")
+        es["_rpc_modes"] = rm
+
+    # Validate and merge _rpc_experts (per-RPC expert counts)
+    if "_rpc_experts" in body:
+        re_data = body["_rpc_experts"]
+        if not isinstance(re_data, dict):
+            return error_response("VALIDATION_ERROR", "_rpc_experts must be a JSON object")
+        for rpc_id, expert_val in re_data.items():
+            try:
+                expert_val = int(expert_val)
+                if expert_val < 0 or expert_val > 1000:
+                    return error_response("VALIDATION_ERROR", f"_rpc_experts[{rpc_id}] must be between 0 and 1000")
+            except (ValueError, TypeError):
+                return error_response("VALIDATION_ERROR", f"_rpc_experts[{rpc_id}] must be an integer 0-1000")
+        es["_rpc_experts"] = re_data
+
+    # Validate and merge skip_n_first offset
+    if "skip_n_first" in body:
+        snf = body["skip_n_first"]
+        try:
+            snf = int(snf)
+            if snf < 0:
+                return error_response("VALIDATION_ERROR", "skip_n_first must be >= 0")
+        except (ValueError, TypeError):
+            return error_response("VALIDATION_ERROR", "skip_n_first must be an integer >= 0")
+        es["skip_n_first"] = snf
+
+    # Validate and merge extra_ot_flags
+    if "extra_ot_flags" in body:
+        eflags = body["extra_ot_flags"]
+        if not isinstance(eflags, list):
+            return error_response("VALIDATION_ERROR", "extra_ot_flags must be a JSON array")
+        for flag in eflags:
+            if not isinstance(flag, str) or not flag.strip():
+                return error_response("VALIDATION_ERROR", "Each extra_ot_flag must be a non-empty string")
+        es["extra_ot_flags"] = eflags
+
+    # Save merged config_override (atomic write)
+    try:
+        _save_config_override(inst_id, co)
+    except Exception as exc:
+        return error_response("VALIDATION_ERROR", f"Failed to save expert split config: {exc}")
+
+    # Log audit trail
+    logger.info("expert_split updated for instance %d: experts=%s modes=%s",
+        inst_id, es.get("experts"), es.get("_rpc_modes"))
+
+    # Return merged result
+    return success_single({"instance_id": inst_id, "expert_split": es})
 
 
 # ============================================================
@@ -2376,8 +2522,8 @@ def api_start_instance(inst_id):
                         nd.get("hostname")) if nd else None
             if hostname:
                 health = _health_probe_instance(inst_id, hostname, node_id)
-        except Exception:
-            pass  # Non-critical — proceed without probe
+        except Exception as _e:
+            logger.debug("api_start_instance inst=%d: health probe failed, proceeding without: %s", inst_id, _e)
 
     # Route system-managed instances to subprocess-based start path
     if _csm(_CONFIG["db_path"], inst_id):
@@ -2395,20 +2541,20 @@ def api_start_instance(inst_id):
             # Already running — ensure state is running
             try:
                 transition_state(_CONFIG["db_path"], inst_id, "starting")
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("api_start_instance inst=%d: starting state transition (idempotent): %s", inst_id, _e)
             try:
                 transition_state(_CONFIG["db_path"], inst_id, "running")
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("api_start_instance inst=%d: running state transition (idempotent): %s", inst_id, _e)
             return success_single({"action": "start", "instance_id": inst_id,
                                     "state": "running", "idempotent": True})
         result = engine.execute(inst_id, "start", _CONFIG["db_path"])
         if result.get("error"):
             try:
                 transition_state(_CONFIG["db_path"], inst_id, "error")
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("api_start_instance inst=%d: error state transition on execute failure: %s", inst_id, _e)
             return error_response("DEPLOYMENT_FAILED", result["error"])
         # execute() already transitions state (starting → running)
         # Just confirm the PID is alive for safety
@@ -2419,12 +2565,12 @@ def api_start_instance(inst_id):
                 if p.status() != "zombie":
                     try:
                         transition_state(_CONFIG["db_path"], inst_id, "starting")
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        logger.debug("api_start_instance inst=%d: starting state transition (pid check): %s", inst_id, _e)
                     try:
                         transition_state(_CONFIG["db_path"], inst_id, "running")
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        logger.debug("api_start_instance inst=%d: running state transition (pid check): %s", inst_id, _e)
                 else:
                     # Zombie process — clear PID and go back to deployed
                     _ui = __import__("db.adapters.instances", fromlist=["update_instance"]).update_instance
@@ -2440,7 +2586,8 @@ def api_start_instance(inst_id):
         try:
             from lib.lib_cluster_env_builder import rpc_binding_warnings as _rbw
             rp_warnings = _rbw(_CONFIG["db_path"], inst_id)
-        except Exception:
+        except Exception as _e:
+            logger.debug("api_start_instance inst=%d: RPC binding warnings check failed: %s", inst_id, _e)
             rp_warnings = []
     else:
         rp_warnings = []
@@ -2452,9 +2599,10 @@ def api_start_instance(inst_id):
         if health["error"]:
             # Probe failed — transition to error state per DESIGN-2
             try:
-                transition_state(_CONFIG["db_path"], inst_id, "error",
-                                 state_reason=f"Health probe failed: {health['error']}")
-            except Exception:
+                 transition_state(_CONFIG["db_path"], inst_id, "error",
+                                  state_reason=f"Health probe failed: {health['error']}")
+            except Exception as _e:
+                logger.debug("api_start_instance inst=%d: error state transition (health probe fail): %s", inst_id, _e)
                 pass
             return error_response("HEALTH_CHECK_FAILED",
                                   f"Remote health probe failed: {health['error']}", 503)
@@ -2462,7 +2610,8 @@ def api_start_instance(inst_id):
             # Service confirmed running on remote — idempotent success
             try:
                 transition_state(_CONFIG["db_path"], inst_id, "running")
-            except Exception:
+            except Exception as _e:
+                logger.debug("api_start_instance inst=%d: running state transition (idempotent): %s", inst_id, _e)
                 pass
             resp = {"action": "start", "instance_id": inst_id,
                     "state": "running", "idempotent": True,
@@ -2518,7 +2667,8 @@ def api_start_instance(inst_id):
             try:
                 import json as _json
                 co_merged = _json.loads(co) or {}
-            except Exception:
+            except Exception as _e:
+                logger.debug("api_start_instance inst=%d: config_override JSON parse failed: %s", inst_id, _e)
                 co_merged = {}
         elif isinstance(co, dict):
             co_merged = co
@@ -2579,17 +2729,17 @@ def api_stop_instance(inst_id):
             return error_response("DEPLOYMENT_FAILED", "subprocess engine not loaded")
         try:
             transition_state(_CONFIG["db_path"], inst_id, "stopping")
-        except Exception:
+        except Exception as _e:
+            logger.debug("api_stop_instance inst=%d: subprocess stopping state transition: %s", inst_id, _e)
             pass
         result = engine.execute(inst_id, "stop", _CONFIG["db_path"])
         # Always transition to stopped regardless of execute() result
         # (process may already be dead with stale PID)
         try:
             transition_state(_CONFIG["db_path"], inst_id, "stopped")
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("api_stop_instance inst=%d: subprocess stopped state transition: %s", inst_id, _e)
         if result.get("error"):
-            log_action(_CONFIG["db_path"], inst_id, "stop", "failed", detail={"subprocess": result})
             return success_single({"action": "stop", "instance_id": inst_id, "state": "stopped", "note": result["error"]})
         log_action(_CONFIG["db_path"], inst_id, "stop", "success", detail={"subprocess": result})
         return success_single({"action": "stop", "instance_id": inst_id, "state": "stopped"})
@@ -2611,8 +2761,8 @@ def api_stop_instance(inst_id):
         # Ensure final state is "stopped" (not "deployed").
         try:
             transition_state(_CONFIG["db_path"], inst_id, "stopped")
-        except Exception:
-            pass  # Instance may already be stopped from raw SQL update
+        except Exception as _e:
+            logger.debug("api_stop_instance inst=%d: final stopped state transition (may be redundant): %s", inst_id, _e)
         from db.adapters.instances import update_log_status
         update_log_status(_CONFIG["db_path"], log_id, "success",
                           detail={"chain": result})
@@ -2678,8 +2828,8 @@ def api_restart_instance(inst_id):
             stop_result = engine.execute(inst_id, "stop", _CONFIG["db_path"])
             try:
                 transition_state(_CONFIG["db_path"], inst_id, "stopped")
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("api_restart_instance inst=%d: stopped state transition after subprocess stop: %s", inst_id, _e)
         # Then start (handles stopped/deployed/error states directly)
         try:
             transition_state(_CONFIG["db_path"], inst_id, "starting")
@@ -2691,8 +2841,8 @@ def api_restart_instance(inst_id):
         if start_result.get("error"):
             try:
                 transition_state(_CONFIG["db_path"], inst_id, "error")
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("api_restart_instance inst=%d: error state transition on start failure: %s", inst_id, _e)
             from db.adapters.instances import update_log_status
             update_log_status(_CONFIG["db_path"], log_id, "failed", detail={"phase": "start", "error": start_result["error"]})
             return error_response("DEPLOYMENT_FAILED", start_result["error"])
@@ -2704,11 +2854,13 @@ def api_restart_instance(inst_id):
                 if p.status() != "zombie":
                     try:
                         transition_state(_CONFIG["db_path"], inst_id, "starting")
-                    except Exception:
+                    except Exception as _e:
+                        logger.debug("api_restart_instance inst=%d: starting state transition (pid check): %s", inst_id, _e)
                         pass
                     try:
                         transition_state(_CONFIG["db_path"], inst_id, "running")
-                    except Exception:
+                    except Exception as _e:
+                        logger.debug("api_restart_instance inst=%d: running state transition (pid check): %s", inst_id, _e)
                         pass
                 else:
                     # Zombie process — clear PID
@@ -2727,8 +2879,8 @@ def api_restart_instance(inst_id):
     if result.get("success"):
         try:
             transition_state(_CONFIG["db_path"], inst_id, "running")
-        except Exception:
-            pass  # Runner chain already set final state
+        except Exception as _e:
+            logger.debug("api_restart_instance inst=%d: running state transition post-chain: %s", inst_id, _e)
         from db.adapters.instances import update_log_status
         update_log_status(_CONFIG["db_path"], log_id, "success", detail={"chain": result})
     else:
@@ -2737,7 +2889,8 @@ def api_restart_instance(inst_id):
                           detail={"chain": result})
         try:
             transition_state(_CONFIG["db_path"], inst_id, "error")
-        except Exception:
+        except Exception as _e:
+            logger.debug("api_restart_instance inst=%d: error state transition (chain failure): %s", inst_id, _e)
             pass
         return error_response("DEPLOYMENT_FAILED",
                                 f"Restart failed: {result.get('message', 'unknown')}")
@@ -2786,7 +2939,8 @@ def api_deploy_instance(inst_id):
             try:
                 from lib.lib_cluster_env_builder import rpc_binding_warnings as _rbw
                 rp_warnings = _rbw(_CONFIG["db_path"], inst_id)
-            except Exception:
+            except Exception as _e:
+                logger.debug("api_deploy_instance inst=%d: RPC binding warnings check failed: %s", inst_id, _e)
                 pass
 
         # Read skip_build from request body (Herd page sends this)
@@ -2909,7 +3063,8 @@ def api_reconfigure_instance(inst_id):
         # Success — ensure running state
         try:
             _ts(_CONFIG["db_path"], inst_id, "running")
-        except Exception:
+        except Exception as _e:
+            logger.debug("api_reconfigure_instance inst=%d: running state transition after reconfigure: %s", inst_id, _e)
             pass
 
         return success_single({"action": "reconfigure", "instance_id": inst_id,
@@ -2921,7 +3076,8 @@ def api_reconfigure_instance(inst_id):
         try:
             _ts(_CONFIG["db_path"], inst_id, "error")
             _log(_CONFIG["db_path"], inst_id, "config_change", "exception", detail={"error": str(exc)})
-        except Exception:
+        except Exception as _e:
+            logger.debug("api_reconfigure_instance inst=%d: error state transition in exception handler: %s", inst_id, _e)
             pass
         return error_response("RECONFIGURE_ERROR", str(exc))
     finally:
@@ -3177,7 +3333,8 @@ def api_run_client(inst_id):
     merged = {}
     try:
         merged = _mc(_CONFIG["db_path"], inst_id)
-    except Exception:
+    except Exception as _e:
+        logger.debug("api_run_client inst=%d: config merge failed, using defaults: %s", inst_id, _e)
         merged = {"env": {}, "cli_opts": [], "model": {}}
 
     cli_opts = merged.get("cli_opts", []) if isinstance(merged, dict) else []
@@ -3190,7 +3347,8 @@ def api_run_client(inst_id):
         try:
             import json as _json2
             co_raw = _json2.loads(co_raw)
-        except Exception:
+        except Exception as _e:
+            logger.debug("api_run_client inst=%d: config_override JSON parse failed: %s", inst_id, _e)
             co_raw = {}
 
     if is_client:
@@ -3218,8 +3376,8 @@ def api_run_client(inst_id):
                 inv_hostname = (nd.get("ansible_inventory_host") or
                                 nd.get("hostname") or
                                 nd.get("name"))
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("api_run_client inst=%d: node lookup for inventory hostname failed: %s", inst_id, _e)
     if not inv_hostname:
         return error_response("NO_HOSTNAME", f"No hostname resolved for node {node_id}")
 
@@ -3268,27 +3426,29 @@ def api_run_client(inst_id):
         # Server: just start and mark running
         try:
             transition_state(_CONFIG["db_path"], inst_id, "starting")
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("api_run_client inst=%d: starting state transition (server): %s", inst_id, _e)
         try:
             result = _run_manage_action(inst_id, engine_type_name, node_id, "start")
             if result.get("success"):
-                transition_state(_CONFIG["db_path"], inst_id, "running")
+                try:
+                    transition_state(_CONFIG["db_path"], inst_id, "running")
+                except Exception as _e:
+                    logger.debug("api_run_client inst=%d: running state transition (server): %s", inst_id, _e)
+                log_action(_CONFIG["db_path"], inst_id, "start", "success")
+                return success_single({"action": "run_client", "instance_id": inst_id,
+                                       "state": "running", "message": "Server started"})
             else:
                 log_action(_CONFIG["db_path"], inst_id, "start", "failed",
                             detail={"remote": result})
                 try:
                     transition_state(_CONFIG["db_path"], inst_id, "error")
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("api_run_client inst=%d: error state transition after server start failure: %s", inst_id, _e)
                 return error_response("DEPLOYMENT_FAILED",
-                                f"Server start failed: {result.get('error', 'unknown')}")
+                                        f"Server start failed: {result.get('error', 'unknown')}")
         except Exception as exc:
             return error_response("DEPLOYMENT_FAILED", str(exc))
-
-        log_action(_CONFIG["db_path"], inst_id, "start", "success")
-        return success_single({"action": "run_client", "instance_id": inst_id,
-                                "state": "running", "message": "Server started"})
     else:
         # Default: treat as server
         log_action(_CONFIG["db_path"], inst_id, "run_client", "success",
@@ -3519,7 +3679,8 @@ def _get_node_build_state(db_path, node_id):
                 "SELECT node_build_state FROM nodes WHERE id = ?", (node_id,)
             ).fetchone()
             return row[0] if row and row[0] else "idle"
-    except Exception:
+    except Exception as _e:
+        logger.debug("_get_node_build_state node=%d: build state query failed: %s", node_id, _e)
         return "idle"
 
 
@@ -3602,8 +3763,8 @@ def deploy_instance(db_path, instance_id, playbook=None, async_mode=False, skip_
                 if nd_state == "running":
                     return {"success": False,
                             "message": f"Node {node_name} has an active build (state=running). Deploy skipped."}
-            except Exception:
-                pass  # Non-critical — proceed even if check fails
+            except Exception as _e:
+                logger.debug("deploy_instance inst=%d: node_build_state check failed: %s", instance_id, _e)
 
     # Resolve inventory hostname (ansible_inventory_host > hostname > node_name)
     inv_hostname = None
@@ -3615,8 +3776,8 @@ def deploy_instance(db_path, instance_id, playbook=None, async_mode=False, skip_
                 inv_hostname = (nd.get("ansible_inventory_host") or
                                 nd.get("hostname") or
                                 nd.get("name"))
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("deploy_instance inst=%d: node lookup for inv_hostname failed: %s", instance_id, _e)
     if not inv_hostname:
         inv_hostname = node_name
     # --- Dynamic playbook selection ---
@@ -3629,8 +3790,8 @@ def deploy_instance(db_path, instance_id, playbook=None, async_mode=False, skip_
             transition_state(db_path, instance_id, "configuring")
             transition_state(db_path, instance_id, "deploying")
             transition_state(db_path, instance_id, "deployed")
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("deploy_instance inst=%d: subprocess state transitions failed: %s", instance_id, _e)
         _log(db_path, instance_id, "deploy", "success")
         return {"success": True, "message": "Subprocess engine deployed (local process)",
                 "task_summary": [], "duration_ms": 0}
@@ -3650,8 +3811,8 @@ def deploy_instance(db_path, instance_id, playbook=None, async_mode=False, skip_
                     inv_hostname = (nd.get("ansible_inventory_host") or
                                     nd.get("hostname") or
                                     nd.get("name"))
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("deploy_instance inst=%d: universal engine node lookup failed: %s", instance_id, _e)
 
         # Build extra_vars from config_override
         instance_name = inst.get("name", f"universal-{instance_id}")
@@ -3686,7 +3847,8 @@ def deploy_instance(db_path, instance_id, playbook=None, async_mode=False, skip_
                     ipv4 = nd.get("ipv4_address")
                     extra_vars["host"] = (ipv4.strip() if isinstance(ipv4, str) else QR_DEFAULT_LOCALHOST) if ipv4 else QR_DEFAULT_LOCALHOST
                 extra_vars["port"] = co_merged.get("deploy_port") or inst.get("port_assigned") or 0
-        except Exception:
+        except Exception as _e:
+            logger.debug("deploy_instance inst=%d: universal extra_vars build failed: %s", instance_id, _e)
             extra_vars["host"] = QR_DEFAULT_LOCALHOST
             extra_vars["port"] = 0
 
@@ -3712,8 +3874,8 @@ def deploy_instance(db_path, instance_id, playbook=None, async_mode=False, skip_
             if r["error"]:
                 try:
                     transition_state(db_path, instance_id, "error")
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("deploy_instance inst=%d: error state transition after deploy failure: %s", instance_id, _e)
                 return {"success": False,
                         "message": f"Deploy failed: {r['error']}"}
 
@@ -3722,17 +3884,17 @@ def deploy_instance(db_path, instance_id, playbook=None, async_mode=False, skip_
             if start_after:
                 try:
                     transition_state(db_path, instance_id, "starting")
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("deploy_instance inst=%d: starting state transition: %s", instance_id, _e)
                 try:
                     transition_state(db_path, instance_id, "running")
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("deploy_instance inst=%d: running state transition: %s", instance_id, _e)
             else:
                 try:
                     transition_state(db_path, instance_id, "deployed")
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("deploy_instance inst=%d: deployed state transition: %s", instance_id, _e)
 
             _log(db_path, instance_id, "deploy", "success")
             return {"success": True, "message": "Universal engine deployed successfully",
@@ -3740,8 +3902,8 @@ def deploy_instance(db_path, instance_id, playbook=None, async_mode=False, skip_
         except Exception as exc:
             try:
                 transition_state(db_path, instance_id, "error")
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("deploy_instance inst=%d: error state transition in deploy exception handler: %s", instance_id, _e)
             _log(db_path, instance_id, "deploy", "failed", detail={"error": str(exc)})
             return {"success": False, "message": f"Deploy error: {exc}"}
     else:
@@ -3784,7 +3946,8 @@ def deploy_instance(db_path, instance_id, playbook=None, async_mode=False, skip_
                 merged = _mc_fallback(db_path, instance_id)
                 env = merged.get("env", {}) if isinstance(merged, dict) else {}
                 cli_opts = list(merged.get("cli_opts", [])) if isinstance(merged, dict) else []
-            except Exception:
+            except Exception as _e:
+                logger.debug("deploy_instance inst=%d: fallback merge_configs result parse failed: %s", instance_id, _e)
                 env = {}
                 cli_opts = []
     else:
@@ -3862,8 +4025,8 @@ def deploy_instance(db_path, instance_id, playbook=None, async_mode=False, skip_
                         rpc_host = ip_v4_matches[0][0]
                     elif ip_v6_matches:
                         rpc_host = ip_v6_matches[0][0]
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("deploy_instance inst=%d: rpc_host resolution from node devices failed: %s", instance_id, _e)
     if rpc_host != "0.0.0.0" and rpc_host:
         _host_str = str(rpc_host)
         # Accept both IPv4 and IPv6 addresses
@@ -3883,7 +4046,8 @@ def deploy_instance(db_path, instance_id, playbook=None, async_mode=False, skip_
         node_git_pull_cmd = gc.get("node_git_pull_cmd", {}).get("value")
         node_build_set_cmd = gc.get("node_build_set_cmd", {}).get("value")
         node_build_run_cmd = gc.get("node_build_run_cmd", {}).get("value")
-    except Exception:
+    except Exception as _e:
+        logger.debug("deploy_instance inst=%d: engine config lookup failed, using defaults: %s", instance_id, _e)
         node_git_pull_cmd = None
         node_build_set_cmd = None
         node_build_run_cmd = None
@@ -3956,8 +4120,8 @@ def deploy_instance(db_path, instance_id, playbook=None, async_mode=False, skip_
             cluster_result = _cls_rpc(db_path, instance_id)
             extra_vars["merged_env"] = cluster_result["env"]
             extra_vars["merged_cli_opts"] = cluster_result["cli_args"] if cluster_result.get("cli_args") else ""
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("deploy_instance inst=%d: RPC cluster env builder fallback failed: %s", instance_id, _e)
     # Validate host format if non-default (accepts IPv4 + IPv6 + bracket-wrapped IPv6)
     if rpc_host != "0.0.0.0" and rpc_host:
         _host_str = str(rpc_host)
@@ -3982,7 +4146,8 @@ def deploy_instance(db_path, instance_id, playbook=None, async_mode=False, skip_
         node_build_run_cmd = gc.get("node_build_run_cmd", {}).get("value")
         node_src_dir = gc.get("node_src_dir", {}).get("value")
         node_build_dir = gc.get("node_build_dir", {}).get("value")
-    except Exception:
+    except Exception as _e:
+        logger.debug("deploy_instance inst=%d: engine config lookup (LLAMA_ARG_*) failed, using defaults: %s", instance_id, _e)
         node_git_pull_cmd = None
         node_build_set_cmd = None
         node_build_run_cmd = None
@@ -4065,8 +4230,9 @@ def deploy_instance(db_path, instance_id, playbook=None, async_mode=False, skip_
             extra_vars["rpc_bind_ids"] = bind_ids
             extra_vars["split_value"] = inst.get("split") or 100
             extra_vars["rpc_instances_by_id"] = rpc_map
-        except Exception:
+        except Exception as _e:
             # Non-critical — deploy proceeds without RPC bindings
+            logger.debug("deploy_instance inst=%d: RPC bind resolution failed: %s", instance_id, _e)
             extra_vars["rpc_bind_ids"] = []
             extra_vars["split_mode_value"] = "layer"
             extra_vars["split_value"] = 0
@@ -4078,6 +4244,7 @@ def deploy_instance(db_path, instance_id, playbook=None, async_mode=False, skip_
         _script_dir = _os.path.dirname(_os.path.abspath(__file__))
         _inv_script = _os.path.join(_script_dir, "lib", "qr_dynamic_inventory.py")
     except Exception as exc:
+        logger.debug("deploy_instance inst=%d: inventory script path resolution failed: %s", instance_id, exc)
         return {"success": False, "message": f"Inventory setup failed: {exc}"}
 
     # Preflight UUID check before deploy
@@ -4095,8 +4262,8 @@ def deploy_instance(db_path, instance_id, playbook=None, async_mode=False, skip_
             sv = sv_raw["value"] if isinstance(sv_raw, dict) and "value" in sv_raw else str(sv_raw) if sv_raw else ""
             if str(sv).lower() in ("true", "1"):
                 skip_build = True
-        except Exception:
-            pass  # Non-critical — playbook will auto-detect
+        except Exception as _e:
+            logger.debug("deploy_instance inst=%d: skip_build engine_config lookup failed, auto-detect: %s", instance_id, _e)
     if skip_build is None and engine_type_name not in (QR_ENGINE_LLAMA_SERVER_NAME, QR_ENGINE_LLAMA_RPC_NAME):
         skip_build = False
 
@@ -4109,7 +4276,8 @@ def deploy_instance(db_path, instance_id, playbook=None, async_mode=False, skip_
         try:
             from db.adapters.nodes import get_node as _gn
             nd = _gn(db_path, node_id)
-        except Exception:
+        except Exception as _e:
+            logger.debug("deploy_instance inst=%d: node lookup for sudo user failed: %s", instance_id, _e)
             nd = None
     sudo_user = (nd.get("ansible_user") if isinstance(nd, dict) and nd.get("ansible_user") else None) or DEFAULT_ANSIBLE_USER
 
@@ -4157,8 +4325,8 @@ def deploy_instance(db_path, instance_id, playbook=None, async_mode=False, skip_
             bp_raw = _gec_bp(db_path, inst.get("engine_type_id"), "binary_path")
             if isinstance(bp_raw, dict) and "value" in bp_raw:
                 _binary_path = bp_raw["value"]
-        except Exception:
-            pass  # Non-critical — fall back to hardcoded defaults below
+        except Exception as _e:
+            logger.debug("deploy_instance inst=%d: binary_path engine_config lookup failed: %s", instance_id, _e)
         if skip_build:
             # Check if prebuilt binary exists on remote node
             import subprocess as _sub_bin
@@ -4174,7 +4342,8 @@ def deploy_instance(db_path, instance_id, playbook=None, async_mode=False, skip_
                     capture_output=True, text=True, timeout=10,
                 )
                 _force_build = "NO" in (bin_check.stdout or "")
-            except Exception:
+            except Exception as _e:
+                logger.debug("deploy_instance inst=%d: binary existence check failed, forcing build: %s", instance_id, _e)
                 _force_build = True  # Can't check — assume build needed
         if _force_build or not skip_build:
             _log(db_path, instance_id, "preflight", "info",
@@ -4185,8 +4354,8 @@ def deploy_instance(db_path, instance_id, playbook=None, async_mode=False, skip_
         _log(db_path, instance_id, "deploy", "preflight_ok")
         try:
             transition_state(db_path, instance_id, "configuring")
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("deploy_instance inst=%d: async configuring state transition: %s", instance_id, _e)
         return {"success": True, "message": "Preflight passed (async mode)",
                 "status": "configuring"}
 
@@ -4198,14 +4367,14 @@ def deploy_instance(db_path, instance_id, playbook=None, async_mode=False, skip_
                 with _pool(db_path) as conn:
                     conn.execute("UPDATE nodes SET node_build_state = 'running', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                                 (node_id,))
-            except Exception:
-                pass  # Non-critical — deploy proceeds even if state update fails
+            except Exception as _e:
+                logger.debug("deploy_instance inst=%d: node build state update to 'running' failed: %s", instance_id, _e)
 
     # Transition to configuring BEFORE running the (potentially long) playbook
     try:
         transition_state(db_path, instance_id, "configuring")
-    except Exception:
-        pass  # Non-critical — deploy proceeds even if state update fails
+    except Exception as _e:
+        logger.debug("deploy_instance inst=%d: configuring state transition before playbook: %s", instance_id, _e)
 
     # Run deploy playbook
     try:
@@ -4292,8 +4461,8 @@ def deploy_instance(db_path, instance_id, playbook=None, async_mode=False, skip_
             # Transition to error state
             try:
                 transition_state(db_path, instance_id, "error")
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("deploy_instance inst=%d: error state transition on deploy failure: %s", instance_id, _e)
             # Reset node build state to idle on failure
             if engine_type_name in (QR_ENGINE_LLAMA_SERVER_NAME, QR_ENGINE_LLAMA_RPC_NAME):
                 try:
@@ -4301,8 +4470,8 @@ def deploy_instance(db_path, instance_id, playbook=None, async_mode=False, skip_
                     with _pool(db_path) as conn:
                         conn.execute("UPDATE nodes SET node_build_state = 'idle', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                                 (node_id,))
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("deploy_instance inst=%d: reset node build state to idle on failure: %s", instance_id, _e)
 
             # Find first failed task for actionable error message
             first_error = ""
@@ -4318,16 +4487,16 @@ def deploy_instance(db_path, instance_id, playbook=None, async_mode=False, skip_
         # Transition through configuring → deploying → deployed (state machine)
         try:
             transition_state(db_path, instance_id, "configuring")
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("deploy_instance inst=%d: configuring state transition post-deploy: %s", instance_id, _e)
         try:
             transition_state(db_path, instance_id, "deploying")
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("deploy_instance inst=%d: deploying state transition post-deploy: %s", instance_id, _e)
         try:
             transition_state(db_path, instance_id, "deployed")
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("deploy_instance inst=%d: deployed state transition post-deploy: %s", instance_id, _e)
 
         # llama_server/rpc post-deploy: leave in "deployed" state.
         # The health check cycle will detect the running service and transition to "running".
@@ -4339,8 +4508,8 @@ def deploy_instance(db_path, instance_id, playbook=None, async_mode=False, skip_
         if inst.get("start_after_deploy", 0):
             try:
                 transition_state(db_path, instance_id, "starting")
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("deploy_instance inst=%d: starting state transition (start_after_deploy): %s", instance_id, _e)
             # Verify service started by checking systemd status on remote
             try:
                 import subprocess as _sub3
@@ -4355,7 +4524,8 @@ def deploy_instance(db_path, instance_id, playbook=None, async_mode=False, skip_
                 if "active" in (svc_check.stdout or "").lower():
                     try:
                         transition_state(db_path, instance_id, "running")
-                    except Exception:
+                    except Exception as _e:
+                        logger.debug("deploy_instance inst=%d: running state transition post-deploy (start_after_deploy): %s", instance_id, _e)
                         pass
                 else:
                     _log(db_path, instance_id, "deploy", "warning",
@@ -4386,10 +4556,10 @@ def deploy_instance(db_path, instance_id, playbook=None, async_mode=False, skip_
                 with _pool(db_path) as conn:
                     conn.execute("UPDATE instances SET build_number=? WHERE id=?",
                                 (commit_hash, instance_id))
-        except Exception:
-            pass  # Non-critical — build number tracking failure doesn't break deploy
+        except Exception as _e:
+            logger.debug("deploy_instance inst=%d: build number tracking failed: %s", instance_id, _e)
 
-   # _execute_playbook handles all logging (starting/success/error) — single logging point
+    # _execute_playbook handles all logging (starting/success/error) — single logging point
 
         # Reset node build state to idle
         if engine_type_name in (QR_ENGINE_LLAMA_SERVER_NAME, QR_ENGINE_LLAMA_RPC_NAME):
@@ -4398,8 +4568,8 @@ def deploy_instance(db_path, instance_id, playbook=None, async_mode=False, skip_
                 with _pool(db_path) as conn:
                     conn.execute("UPDATE nodes SET node_build_state = 'idle', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                         (node_id,))
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("deploy_instance inst=%d: reset node build state to idle post-deploy: %s", instance_id, _e)
 
         return {"success": True, "message": "Deploy succeeded",
                 "task_summary": task_summary,
@@ -4551,7 +4721,8 @@ def api_instance_status(inst_id, remote=False):
                         (inst_id,),
                     )
                     _recently_completed = bool(_rc.fetchone())
-            except Exception:
+            except Exception as _e:
+                logger.debug("api_instance_status inst=%d: recently completed health check query: %s", inst_id, _e)
                 pass
 
             # State transition logic from former api_query_status()
@@ -4562,43 +4733,43 @@ def api_instance_status(inst_id, remote=False):
                     _ts(_CONFIG["db_path"], inst_id, "running")
                     new_state = "running"
                     result["new_state"] = "running"
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("health check state transition failed: inst=%d cur_state=%s → running", inst_id, cur_state, _e)
             elif result.get("alive") and not result.get("model_loading") and cur_state == "loading":
                 try:
                     _ts(_CONFIG["db_path"], inst_id, "running")
                     new_state = "running"
                     result["new_state"] = "running"
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("health check state transition failed: inst=%d cur_state=%s → running", inst_id, cur_state, _e)
             elif result.get("alive") and not result.get("model_loading") and cur_state in ("deployed", "stopped"):
                 try:
                     _ts(_CONFIG["db_path"], inst_id, "running")
                     new_state = "running"
                     result["new_state"] = "running"
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("health check state transition failed: inst=%d cur_state=%s → running", inst_id, cur_state, _e)
             elif result.get("alive") and not result.get("model_loading") and cur_state in ("updating", "build_error"):
                 try:
                     _ts(_CONFIG["db_path"], inst_id, "running")
                     new_state = "running"
                     result["new_state"] = "running"
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("health check state transition failed: inst=%d cur_state=%s → running", inst_id, cur_state, _e)
             elif result.get("alive") and not result.get("model_loading") and cur_state in ("deploying", "configuring"):
                 try:
                     _ts(_CONFIG["db_path"], inst_id, "running")
                     new_state = "running"
                     result["new_state"] = "running"
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("health check state transition failed: inst=%d cur_state=%s → running", inst_id, cur_state, _e)
             elif result.get("alive") and not result.get("model_loading") and cur_state in ("error", "build_error"):
                 try:
                     _ts(_CONFIG["db_path"], inst_id, "running")
                     new_state = "running"
                     result["new_state"] = "running"
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("health check state transition failed: inst=%d cur_state=%s → running", inst_id, cur_state, _e)
             elif not result.get("alive") and cur_state in ("running", "updating", "build_error", "stopping"):
                 if not _active_jobs and not _recently_completed:
                     _error_reason = (result.get("error", "") or f"Health check failed: {cur_state} → error")[:500]
@@ -4615,17 +4786,17 @@ def api_instance_status(inst_id, remote=False):
                                     ("crash_detect", inst_id,
                                      _json.dumps({"state_from": cur_state, "reason": _error_reason}),
                                      _dt.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")),
-                                )
-                        except Exception:
-                            pass
-                    except Exception:
-                        pass
+                                 )
+                        except Exception as _e:
+                            logger.debug("crash detect log entry insert failed: inst=%d", inst_id, _e)
+                    except Exception as _e:
+                        logger.debug("crash detect state transition failed: inst=%d cur_state=%s → error", inst_id, cur_state, _e)
 
             # Update last_state_change timestamp
             try:
                 _ui(_CONFIG["db_path"], inst_id, last_state_change=_dt.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("last_state_change update failed: inst=%d", inst_id, _e)
 
             if new_state:
                 result["new_state"] = new_state
@@ -4656,7 +4827,8 @@ def api_instance_health(inst_id):
             "reachable": health.get("alive", False),
             "latency_ms": health.get("latency_ms", 0),
         })
-    except Exception:
+    except Exception as _e:
+        logger.debug("api_instance_health: health check proxy failed, returning fallback: %s", _e)
         return result
 
 
@@ -4696,8 +4868,10 @@ def api_health_check_all():
             rows = conn.execute(
                 """SELECT i.id, i.name, i.state
                    FROM instances i
+                   JOIN nodes n ON i.node_id = n.id
                    WHERE i.system_managed = 0
                      AND i.health_check_enabled = 1
+                     AND n.is_active = 1
                      AND i.state IN (""" + ",".join("?" for _ in checked_states) + """)""",
                 list(checked_states),
             ).fetchall()
@@ -4755,7 +4929,8 @@ def api_system_instance_status(inst_id):
         try:
             import json as _j2
             config_override = _j2.loads(config_override)
-        except Exception:
+        except Exception as _e:
+            logger.debug("api_system_instance_status inst=%d: config_override JSON parse failed: %s", inst_id, _e)
             config_override = {}
 
     if engine_type == QR_ENGINE_API_NAME:
@@ -4787,7 +4962,8 @@ def api_system_instance_status(inst_id):
                             info["port"] = fallback_port
                             break
                         s2.close()
-        except Exception:
+        except Exception as _e:
+            logger.debug("api_system_instance_status inst=%d: API port check failed: %s", inst_id, _e)
             pass
         return success_single(info)
 
@@ -4811,20 +4987,22 @@ def api_system_instance_status(inst_id):
             resp = _ur.urlopen(f"http://{web_host}:{port}/", timeout=2)
             status["alive"] = True
             status["http_status"] = resp.getcode()
-        except Exception:
+        except Exception as _e:
+            logger.debug("api_system_instance_status inst=%d: WebUI HTTP health check failed: %s", inst_id, _e)
             pass
         return success_single(status)
 
     elif engine_type == QR_ENGINE_MCP_NAME:
         from engine import get_engine as _ge
-        mcp_engine = _ge("quickrobot-mcp")
+        mcp_engine = _ge(QR_ENGINE_MCP_NAME)
         if mcp_engine:
             try:
                 status_data = mcp_engine.get_status(inst_id, _CONFIG["db_path"])
-            except Exception:
-                status_data = {"engine_type": "quickrobot-mcp", "info": {}}
+            except Exception as _e:
+                logger.debug("api_system_instance_status inst=%d: MCP engine status check failed: %s", inst_id, _e)
+                status_data = {"engine_type": QR_ENGINE_MCP_NAME, "info": {}}
         else:
-            status_data = {"engine_type": "quickrobot-mcp", "info": {}}
+            status_data = {"engine_type": QR_ENGINE_MCP_NAME, "info": {}}
         return success_single(status_data)
 
     elif engine_type == QR_ENGINE_SCHEDULER_NAME:
@@ -5016,7 +5194,8 @@ def _run_iperf3_client(inst_id, engine_type_name, node_id, inv_hostname):
         # Transition to starting state while running
         try:
             transition_state(_CONFIG["db_path"], inst_id, "starting")
-        except Exception:
+        except Exception as _e:
+            logger.debug("_run_iperf3_client inst=%d: starting state transition for client: %s", inst_id, _e)
             pass
 
         # Poll until the service exits (one-shot run)
@@ -5048,7 +5227,8 @@ def _run_iperf3_client(inst_id, engine_type_name, node_id, inv_hostname):
                     exit_ok = True
                     break
 
-            except Exception:
+            except Exception as _e:
+                logger.debug("_run_iperf3_client inst=%d: status poll iteration failed, retrying: %s", inst_id, _e)
                 continue  # Poll failure, try again
 
         if not exit_ok:
@@ -5067,7 +5247,8 @@ def _run_iperf3_client(inst_id, engine_type_name, node_id, inv_hostname):
         try:
             log_proc = _sub.run(ssh_cmd, capture_output=True, text=True, timeout=15)
             client_log = (log_proc.stdout or "(no log available)").strip()
-        except Exception:
+        except Exception as _e:
+            logger.debug("_run_iperf3_client inst=%d: log retrieval failed: %s", inst_id, _e)
             client_log = "(unable to retrieve log)"
 
         # Parse iperf3 log output for throughput results
@@ -5076,8 +5257,8 @@ def _run_iperf3_client(inst_id, engine_type_name, node_id, inv_hostname):
         # Transition to deployed (client ran once and finished)
         try:
             transition_state(_CONFIG["db_path"], inst_id, "deployed")
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("_run_iperf3_client inst=%d: deployed state transition after client run: %s", inst_id, _e)
 
         log_action(_CONFIG["db_path"], inst_id, "client_run", "success",
                     detail={"sent_mbits": parsed.get("sent_mbits"),
@@ -5452,7 +5633,8 @@ def api_model_load_sse(inst_id):
                     "UPDATE instances SET state='running', last_state_change=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
                     (inst_id,),
                 )
-        except Exception:
+        except Exception as _e:
+            logger.debug("api_model_load_sse inst=%d: running state transition via SSE proxy: %s", inst_id, _e)
             pass  # Non-critical — SSE streaming must continue regardless
 
     def generate():
@@ -5469,7 +5651,8 @@ def api_model_load_sse(inst_id):
                         if isinstance(ev, dict) and ev.get("status") in ("loaded", "sleeping"):
                             with pool(_CONFIG["db_path"]) as pconn:
                                 _transition_from_loading(pconn, inst_id)
-                    except Exception:
+                    except Exception as _e:
+                        logger.debug("api_model_load_sse inst=%d: transition_from_loading call: %s", inst_id, _e)
                         pass  # Not JSON or no status field — stream normally
                     yield line + "\n"
                 else:

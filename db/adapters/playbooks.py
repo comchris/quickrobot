@@ -27,9 +27,12 @@ Functions: register_playbook, get_playbook_by_path,
 """
 
 import hashlib
+import logging
 import os
 import re
 import sys
+
+logger = logging.getLogger(__name__)
 
 # Regex to match # @version: N comment at top of playbook YAML files.
 _PLAYBOOK_VERSION_RE = re.compile(r"^\s*#\s*@version\s*:\s*(\d+)\s*$")
@@ -54,7 +57,8 @@ def _parse_playbook_version(playbook_path):
                 m = _PLAYBOOK_VERSION_RE.match(line)
                 if m:
                     return m.group(1)
-    except Exception:
+    except Exception as _e:
+        logger.debug("playbook version header parse failed (file=%s): %s", playbook_path, _e)
         pass
     return None
 
@@ -96,7 +100,8 @@ def _parse_playbook_header(filepath):
                         result["timeout"] = None
                 elif line.startswith("# @name:"):
                     result["name"] = line.split(":", 1)[1].strip()
-    except Exception:
+    except Exception as _e:
+        logger.debug("playbook header parse failed (file=%s): %s", playbook_path, _e)
         pass  # Can't read — return defaults
     return result
 

@@ -31,13 +31,15 @@ Usage:
     python3 webui_server.py --port 8041
 """
 
-import os
 import argparse
 import json
+import logging
+import os
 import socket
 import sys
 from datetime import datetime
 
+logger = logging.getLogger(__name__)
 from lib.qr_engine_ids import (
     QR_DEFAULT_LOCALHOST,
     QR_ENGINE_API_NAME, QR_ENGINE_LLAMA_SERVER, QR_ENGINE_LLAMA_RPC,
@@ -158,7 +160,8 @@ def _load_webui_timezone():
             ).fetchone()
         if row and isinstance(row["value"], str) and row["value"].strip():
             tz_name = row["value"]
-    except Exception:
+    except Exception as _e:
+        logger.debug("timezone config lookup failed: %s", _e)
         pass  # fallback stays as 'Europe/Berlin'
     g.tz_name = tz_name
 
@@ -196,7 +199,8 @@ try:
     _db_path_wui = os.path.join(os.getcwd(), "data", "quickrobot.db")
     from lib.qr_engine_registry import load_and_verify_registry as _load_reg
     _load_reg(_db_path_wui)
-except Exception:
+except Exception as _e:
+    logger.debug("engine registry load failed during WebUI init: %s", _e)
     pass  # Non-critical — will fall back gracefully
 
 
@@ -534,7 +538,8 @@ def get_app_status():
     """Fetch app-level status from main API (dev mode, version)."""
     try:
         return api_get("app/status")
-    except Exception:
+    except Exception as _e:
+        logger.debug("app status API call failed: %s", _e)
         return {}
 
 
@@ -582,7 +587,8 @@ def render_nav(active, engine_types=None):
                 try:
                     import json as _j
                     caps = _j.loads(caps)
-                except Exception:
+                except Exception as _e:
+                    logger.debug("capabilities JSON parse failed for %s: %s", et_name, _e)
                     caps = {}
             _section_key = _QR_NAV_SECTION_MAP.get(et_name, "system")
             section = section_objs[_section_key]
@@ -609,6 +615,7 @@ def render_nav(active, engine_types=None):
     if "quickrobot-api" in [e.get("name") for e in engine_types or []] or \
         "quickrobot-webui" in [e.get("name") for e in engine_types or []] or \
         "quickrobot-mcp" in [e.get("name") for e in engine_types or []]:
+         system_section["items"].append('<li><a href="/webui/prompts">Prompts</a></li>')
          system_section["items"].append('<li><a href="/webui/playbooks">Playbooks</a></li>')
 
     engines_nav_data = []
@@ -667,8 +674,9 @@ def status_badge(state):
 
 _ACTION_CLASS_MAP = {
     "stop": "danger", "undeploy": "danger", "delete": "danger",
-    "restart": "primary", "reconfigure": "primary",
-    "start": "success", "deploy": "success", "rebuild": "success",
+    "restart": "primary", "reconfig_restart": "success",
+    "reconfigure": "success",
+    "start": "success", "deploy": "primary", "rebuild": "primary",
     "restart-system": "primary",
 }
 
@@ -680,11 +688,12 @@ def action_class_map(action_name):
 
 _ACTION_HELP_TEXT = {
     "deploy": "Deploy instance — full staged chain (preflight, deps, source, compile, config, start)",
-    "undeploy": "Undeploy instance — stop service, remove systemd unit and files",
+    "undeploy": "Undeploy instance — stop service, remove systemd unit and files from remote node",
     "start": "Start the service using its existing configuration",
     "stop": "Stop the running service gracefully",
     "restart": "Stop and start with current config (no redeploy)",
     "reconfigure": "Update env file only — fast config change without rebuilding",
+    "reconfig_restart": "Reconfigure (env+service files) then restart — full reconfig chain with service restart",
     "rebuild": "Rebuild from source — skip deps, recompile only",
 }
 
@@ -1142,31 +1151,31 @@ def webui_instances():
     rpc_to_llama = {}  # rpc_id -> {id, name, hostname}
     if "error" not in ls_data:
         for ls in ls_data.get("items", []):
+            # Dropdown: only running/deployed servers
             if ls.get("state") in ("running", "deployed"):
                 llama_servers.append({
                     "id": ls["id"],
                     "name": ls["name"],
                     "node_hostname": ls.get("node_hostname", "?"),
                 })
-                # Parse rpc_bind_ids — list_instances returns raw JSON string
-                raw_rbi = ls.get("rpc_bind_ids")
-                if isinstance(raw_rbi, str):
-                    try:
-                        rbi = json.loads(raw_rbi) if raw_rbi.strip() else []
-                    except (json.JSONDecodeError, TypeError):
-                        rbi = []
-                elif isinstance(raw_rbi, list):
-                    rbi = raw_rbi
-                else:
+            # Reverse map: ALL servers — DB bindings are authoritative regardless of state
+            raw_rbi = ls.get("rpc_bind_ids")
+            if isinstance(raw_rbi, str):
+                try:
+                    rbi = json.loads(raw_rbi) if raw_rbi.strip() else []
+                except (json.JSONDecodeError, TypeError):
                     rbi = []
-                # Build reverse map: rpc_id -> llama_server
-                for rid in rbi:
-                    if isinstance(rid, int):
-                        rpc_to_llama[rid] = {
-                            "id": ls["id"],
-                            "name": ls["name"],
-                            "node_hostname": ls.get("node_hostname", "?"),
-                        }
+            elif isinstance(raw_rbi, list):
+                rbi = raw_rbi
+            else:
+                rbi = []
+            for rid in rbi:
+                if isinstance(rid, int):
+                    rpc_to_llama[rid] = {
+                        "id": ls["id"],
+                        "name": ls["name"],
+                        "node_hostname": ls.get("node_hostname", "?"),
+                    }
 
    # RPC binding state warnings for llama_server instances
     # WebUI runs as subprocess.Popen (separate process) — _CONFIG not available
@@ -1176,7 +1185,8 @@ def webui_instances():
             try:
                 from lib.lib_cluster_env_builder import rpc_binding_warnings as _rbw
                 inst["_rpc_warnings"] = _rbw(_db_path, inst["id"])
-            except Exception:
+            except Exception as _e:
+                logger.debug("RPC binding warnings for instance %d failed: %s", inst["id"], _e)
                 inst["_rpc_warnings"] = []
         else:
             inst["_rpc_warnings"] = []
@@ -2134,11 +2144,12 @@ def webui_engine_presets(engine_type):
 def webui_engine_presets_create(engine_type):
     """Create a new preset for an engine type."""
     nav, engines_nav = render_nav("engines", get_engine_types())
-    content = render_template('engine_presets_create.html', engine_type=engine_type)
+    prefill_model_id = request.args.get('model')
+    content = render_template('engine_presets_create.html', engine_type=engine_type, prefill_model_id=prefill_model_id)
     return render_template('base.html', title=f"Create Preset -- {engine_type}", engines_nav=engines_nav, **nav, content=Markup(content))
 
 
-@app.route("/webui/engine/<engine_type>/presets/<int:preset_id>", methods=["GET"])
+@app.route("/webui/engine/<engine_type>/presets/<int:preset_id>/edit", methods=["GET"])
 def webui_engine_preset_edit(engine_type, preset_id):
     """Edit an existing preset with affected instances display."""
     data = api_get(f"engine/{engine_type}/presets/{preset_id}")
@@ -2294,8 +2305,9 @@ def webui_logs():
                         break
             e["detail_str"] = detail_str or "N/A"
             log_entries.append(e)
-        except Exception:
+        except Exception as _e:
             # Malformed entry — keep safe defaults, don't crash the page
+            logger.debug("log entry parse failed: %s", _e)
             e = dict(entry)
             e.setdefault("ts", "?")
             e.setdefault("dur_str", "N/A")
@@ -2466,6 +2478,104 @@ def webui_playbook_content(pb_id):
 </script>
 '''))
 
+# ── MCP PROMPTS SYSTEM (MCP-PROMPTS, 2026-07-12) ───────────────────────
+
+@app.route("/webui/prompts")
+def webui_prompts():
+    """Prompt registry listing page."""
+    prompt_type = request.args.get("prompt_type") or ""
+    search = request.args.get("search") or ""
+    message_role = request.args.get("message_role") or ""
+
+    pb_params = {}
+    if prompt_type:
+        pb_params["prompt_type"] = prompt_type
+    if search:
+        pb_params["search"] = search
+    if message_role:
+        pb_params["message_role"] = message_role
+
+    prompts_data = api_get("prompts", pb_params)
+    prompts = prompts_data.get("items", [])
+
+    nav, engines_nav = render_nav("prompts", get_engine_types())
+    content = render_template('prompts.html',
+        prompts=prompts,
+        filter_type=prompt_type,
+        filter_search=search,
+        filter_role=message_role,
+    )
+    return render_template('base.html', title="Prompts", engines_nav=engines_nav, **nav, content=Markup(content))
+
+
+@app.route("/webui/prompts/new")
+def webui_prompts_new():
+    """Create a new prompt."""
+    nav, engines_nav = render_nav("prompts", get_engine_types())
+    return render_template('base.html', title="Create Prompt", engines_nav=engines_nav, **nav, content=Markup(render_template('prompts_new.html')))
+
+
+@app.route("/webui/prompts/<int:prompt_id>")
+@app.route("/webui/prompts/<string:prompt_id>")
+def webui_prompt_detail(prompt_id):
+    """Display a prompt's details with inline editor."""
+    try:
+        db_id = int(prompt_id)
+        data = api_get(f"prompts/{db_id}")
+    except (ValueError, TypeError):
+        data = api_get(f"prompts/{prompt_id}")
+
+    if "error" in data or data.get("status") != "ok":
+        content = f'<p style="color:#f44336;">Prompt not found: {data.get("message", data.get("error", ""))}</p>'
+        nav, engines_nav = render_nav("prompts", get_engine_types())
+        return render_template('base.html', title="Prompts — Error", engines_nav=engines_nav, **nav, content=Markup(content))
+
+    prompt = data.get("data", {})
+    content_size = len(prompt.get("content", "")) if prompt.get("content") else 0
+
+    nav, engines_nav = render_nav("prompts", get_engine_types())
+    return render_template('base.html', title=f"Prompt: {prompt.get('title', prompt.get('prompt_id', ''))}", 
+                           engines_nav=engines_nav, **nav, content=Markup(render_template('prompts_detail.html', 
+                           prompt=prompt, content_size=content_size)))
+
+
+@app.route("/webui/prompts/<string:prompt_id>", methods=["POST"])
+def webui_prompt_update(prompt_id):
+    """Update a prompt via form POST."""
+    content = request.form.get("content", "")
+    message_role = request.form.get("message_role", "user")
+
+    data = api_put(f"prompts/{prompt_id}", {"content": content, "message_role": message_role})
+    
+    if data.get("status") == "ok":
+        return webui_prompt_detail(prompt_id)
+    
+    error_html = f'<p style="color:#f44336;">Save failed: {data.get("message", "Unknown error")}</p>'
+    nav, engines_nav = render_nav("prompts", get_engine_types())
+    return render_template('base.html', title="Prompt — Error", engines_nav=engines_nav, **nav, content=Markup(error_html))
+
+
+@app.route("/webui/prompts/create", methods=["POST"])
+def webui_prompt_create():
+    """Create a new prompt via form POST."""
+    data = api_post("prompts", {
+        "prompt_id": request.form.get("prompt_id", ""),
+        "title": request.form.get("title", ""),
+        "description": request.form.get("description", ""),
+        "content": request.form.get("content", ""),
+        "message_role": request.form.get("message_role", "user"),
+        "tags": request.form.get("tags", ""),
+    })
+    
+    if data.get("status") == "ok":
+        prompt_id = data.get("data", {}).get("prompt", {}).get("prompt_id")
+        if prompt_id:
+            return webui_prompt_detail(prompt_id)
+    
+    error_html = f'<p style="color:#f44336;">Create failed: {data.get("message", "Unknown error")}</p>'
+    nav, engines_nav = render_nav("prompts", get_engine_types())
+    return render_template('base.html', title="Create Prompt — Error", engines_nav=engines_nav, **nav, content=Markup(error_html))
+
 
 @app.route("/webui/rpccluster")
 def webui_rpccluster():
@@ -2535,7 +2645,9 @@ def webui_instance_detail_v2(inst_id):
     merged_config = inst.get("merged_config") or {}
     if isinstance(merged_config, str):
         try: import json as _j; merged_config = _j.loads(merged_config)
-        except Exception: merged_config = {}
+        except Exception as _e:
+            logger.debug("merged_config JSON parse failed (instance_detail): %s", _e)
+            merged_config = {}
     # Prefer merged_config value which reflects the full override chain
     if merged_config and isinstance(merged_config, dict):
         sob_mc = merged_config.get("start_on_boot")
@@ -2570,7 +2682,8 @@ def webui_instance_detail_v2(inst_id):
         polling_local_sec = get_polling_intervals(_db_path, engine_type_id, is_local=True)
         polling_remote_sec = get_polling_intervals(_db_path, engine_type_id, is_local=False)
         polling_interval_sec = polling_local_sec if is_local else polling_remote_sec
-    except Exception:
+    except Exception as _e:
+        logger.debug("polling interval lookup failed for %s (is_local=%s): %s", engine_name, is_local, _e)
         from lib.lib_constants import POLLING_INTERVAL_LOCAL_SEC, POLLING_INTERVAL_REMOTE_SEC
         polling_interval_sec = POLLING_INTERVAL_LOCAL_SEC if is_local else POLLING_INTERVAL_REMOTE_SEC
 
@@ -2579,10 +2692,14 @@ def webui_instance_detail_v2(inst_id):
     univ_co = {}
     if is_universal:
         try: import json as _j2
-        except Exception: _j2 = None
+        except Exception as _e:
+            logger.debug("json import check for universal engine failed: %s", _e)
+            _j2 = None
         if isinstance(co_raw, str):
             try: univ_co = _j2.loads(co_raw) if _j2 else {}
-            except Exception: univ_co = {}
+            except Exception as _e:
+                logger.debug("univ_co JSON parse failed: %s", _e)
+                univ_co = {}
         elif isinstance(co_raw, dict):
             univ_co = co_raw
         else:
@@ -2715,7 +2832,9 @@ def webui_instance_detail_v2(inst_id):
     if is_system:
         local_hostname = "localhost"
         try: local_hostname = socket.gethostname()
-        except Exception: pass
+        except Exception as _e:
+            logger.debug("socket.gethostname() failed: %s", _e)
+            pass
         detail_items.append(("Node", f"{local_hostname} (local)"))
         sys_data = system_status_data.get("data", {}) if "error" not in system_status_data else {}
         # Use engine-specific fields for port/IP
@@ -2731,7 +2850,7 @@ def webui_instance_detail_v2(inst_id):
     else:
         detail_items.append(("Node", node_name))
         detail_items.append(("Port", str(actual_port)))
-    detail_items.extend([("Transport", "local" if is_system else transport), ("Created", str(created_at)), ("Last State Change", str(last_change))])
+    detail_items.extend([("Transport", "local subprocess" if is_system else transport), ("Created", str(created_at)), ("Last State Change", str(last_change))])
     if is_llama: detail_items.append(("GPU Device", inst.get("gpu_device", "") or "not set"))
     # Use STATUS-1 engine_data for system instance details (RSS, uptime) — single source of truth
     if is_system and "error" not in status_api:
@@ -2864,7 +2983,8 @@ def webui_config():
             settings = data["data"]
             if "web_ui_timezone" in settings:
                 tz_name = settings["web_ui_timezone"]
-    except Exception:
+    except Exception as _e:
+        logger.debug("timezone settings fetch failed: %s", _e)
         pass
 
     offset_hours = parse_tz_offset(tz_name)
@@ -2935,7 +3055,8 @@ def api_proxy(subpath):
         # HTML error from an unhandled exception upstream)
         try:
             raw_body = e.read()
-        except Exception:
+        except Exception as _e:
+            logger.debug("error body read failed (upstream proxy): %s", _e)
             raw_body = b""
         # Ensure Content-Type is always application/json for Firefox compatibility
         clean_headers = [("Content-Type", "application/json; charset=utf-8")]

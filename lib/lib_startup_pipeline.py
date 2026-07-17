@@ -24,6 +24,9 @@ import sys
 import socket
 import threading
 import time
+import logging
+
+logger = logging.getLogger(__name__)
 
 from qr_api import _CONFIG, _project_root  # Same mutable dict, not a copy
 from qr_api.lib_nodes import find_system_instance as _find_sys_inst
@@ -153,9 +156,11 @@ def phase1_config(args):
     _CONFIG["db_path"] = os.path.join(_project_root, "data/quickrobot.db")
 
     # Load .env config — REQUIRED for port and host resolution (no silent fallback to SSOT defaults)
+    # Store once in _CONFIG["qr_env"] so all phases can reference it without reloading.
     try:
         from lib.lib_system_engine import load_env_config as _load_env
         _env_cfg = _load_env(os.getcwd())
+        _CONFIG["qr_env"] = _env_cfg
     except FileNotFoundError as _env_exc:
         print(f"[qr] FATAL: { _env_exc }")
         print("[qr] .quickrobot.env is required for startup. "
@@ -267,7 +272,8 @@ def phase3_db_handling(args):
     """Handle DB existence check, backup, or fresh creation.
 
     New behavior (no --init flag needed):
-      No DB file: warn user, create fresh DB with base schema + seed.
+      No DB file: validate seed checksum FIRST (before touching disk),
+                 then create fresh DB with base schema + seed.
       DB file exists: backup first, then use in-place.
 
     Args:
@@ -280,7 +286,12 @@ def phase3_db_handling(args):
     db_path_exists = os.path.isfile(db_path)
 
     if not db_path_exists:
-        # Fresh database — warn user, create with base schema + seed
+        # Fresh database — validate seed checksum BEFORE creating any file
+        # This prevents stale DB husks if checksum is wrong
+        env_cfg = _CONFIG.get("qr_env", {})
+        from lib.lib_startup import pre_validate_seed_checksum as _preval
+        _preval(env_cfg)
+        
         print(f"[qr] Database not found at {db_path}")
         print(f"[qr] Creating fresh database with base schema...")
         _CONFIG["_db_was_created"] = True
@@ -402,7 +413,8 @@ def _auto_provision_system_instances():
                       flush=True)
         except Exception as exc:
             print(f"[qr] localhost inventory gather failed: {exc}", flush=True)
-    except Exception:
+    except Exception as _e:
+        logger.debug("localhost node setup failed: %s", _e)
         node_id = 1
         actual_host = "localhost"
 
@@ -423,7 +435,8 @@ def _auto_provision_system_instances():
             try:
                 et_id = _ae(db_path, name=eng_name, display_name=eng_name.replace("-", " ").title(),
                             module_path=f"engine.{eng_name}", capabilities=capabilities_str)["id"]
-            except Exception:
+            except Exception as _e:
+                logger.debug("engine_type registration failed for %s: %s", eng_name, _e)
                 continue
         else:
             et_id = et_row["id"]
@@ -435,14 +448,11 @@ def _auto_provision_system_instances():
         existing_insts = _li(db_path, engine_type_id=et_id)
         sys_managed = [i for i in existing_insts if i.get("system_managed", 0)]
 
-        # Update transport + node_hostname + restore running state on existing system-managed instances
+        # Update node_hostname + restore running state on existing system-managed instances
         from db.adapters.instances import update_instance as _ui
         changed = False
         for inst in sys_managed:
-            if inst.get("transport") != "ssh":
-                _ui(db_path, inst["id"], transport="ssh")
-                changed = True
-                print(f"Updated system-managed instance {inst['name']} transport to 'ssh'")
+            # System-managed instances run as local subprocesses (no SSH)
             # Always sync node_hostname for system instances — ensures DB is never stale
             _ui(db_path, inst["id"], node_hostname=actual_host)
             changed = True
@@ -450,7 +460,7 @@ def _auto_provision_system_instances():
             if inst.get("state") not in ("running", "starting"):
                 auto_start_val = True  # default for API/Scheduler (no .env flag)
                 # WebUI: read from .env
-                if eng_name == "quickrobot-webui":
+                if eng_name == QR_ENGINE_WEBUI_NAME:
                     qr_env = _CONFIG.get("qr_env_config", {})
                     auto_start_val = str(qr_env.get("QUICKROBOT_WEBUI_AUTOSTART", "true")).lower() in ("true", "1")
                 # MCP: read from .env (default true), DB override if explicitly set via API
@@ -460,7 +470,7 @@ def _auto_provision_system_instances():
                     db_as = _gec(db_path, et_id, "mcp_autostart") or {}
                     if db_as:
                         auto_start_val = str(db_as.get("value", "false")).lower() in ("true", "1")
-                # API (eng_name == "quickrobot-api"): always restore (no .env flag)
+                # API (eng_name == QR_ENGINE_API_NAME): always restore (no .env flag)
                 # Scheduler (eng_name == "quickrobot-scheduler"): always restore (no .env flag)
                 if not auto_start_val:
                     # Don't force engine to running state — let user start manually
@@ -503,6 +513,7 @@ def _auto_provision_system_instances():
                                    node_hostname=actual_host)
                 print(f"Auto-provisioned system-managed instance: {inst_name} (ID {inst['id']})")
             except Exception as exc:
+                logger.debug("system instance creation failed for %s: %s", inst_name, exc)
                 print(f"Warning: Failed to create system-managed instance {inst_name}: {exc}")
                 inst = None
 
@@ -511,7 +522,7 @@ def _auto_provision_system_instances():
         qr_env = _CONFIG.get("qr_env_config", {})
         webui_host = qr_env.get("QUICKROBOT_WEBUI_HOST") or _CONFIG["host"]
         mcp_api_host = qr_env.get("QUICKROBOT_MCP_HOST") or _CONFIG["host"]
-        if eng_name == "quickrobot-webui":
+        if eng_name == QR_ENGINE_WEBUI_NAME:
             _validate_system_engine_env(qr_env, "WebUI", ["QUICKROBOT_WEBUI_HOST", "QUICKROBOT_WEBUI_PORT"])
             _validate_system_engine_bind(qr_env, "WebUI")
 
@@ -590,7 +601,8 @@ def _auto_provision_system_instances():
                 conn.execute("INSERT INTO instances (id, name, engine_type_id, node_id) VALUES (100, '__temp__', ?, 1)", (QR_ENGINE_API,))
                 conn.execute("DELETE FROM instances WHERE id = 100")
                 print("[qr] Instance ID range: system=1-99, user>=100")
-    except Exception:
+    except Exception as _e:
+        logger.debug("instance_id_range_reserve failed: %s", _e)
         pass
 
 
@@ -627,13 +639,15 @@ def recover_stale_instances():
         inst_id, node_id = row
         try:
             nd = _gn(db_path, node_id)
-        except Exception:
+        except Exception as _e:
+            logger.debug("node lookup failed for node_id %d: %s", node_id, _e)
             nd = None
 
         if not nd or nd.get("status") != "active":
             try:
                 transition_state(db_path, inst_id, "error")
-            except Exception:
+            except Exception as _e:
+                logger.debug("transition error failed for instance %d: %s", inst_id, _e)
                 pass
             continue
 
@@ -646,7 +660,8 @@ def recover_stale_instances():
         try:
             transition_state(db_path, inst_id, "build_error")
             be_count += 1
-        except Exception:
+        except Exception as _e:
+            logger.debug("transition build_error failed for instance %d: %s", inst_id, _e)
             pass
 
     if be_count:
@@ -701,12 +716,14 @@ def recover_subprocess_instances(db_path):
             if state != "running":
                 try:
                     _ts(db_path, inst_id, "starting")
-                except Exception:
+                except Exception as _e:
+                    logger.debug("subprocess transition starting failed for %d: %s", inst_id, _e)
                     pass
                 try:
                     _ts(db_path, inst_id, "running")
                     print(f"[qr] Recovered subprocess {inst_id} (PID {pid} alive, restored to 'running')")
-                except Exception:
+                except Exception as _e:
+                    logger.debug("subprocess transition running failed for %d: %s", inst_id, _e)
                     pass
         else:
             # Process dead — check autostart setting
@@ -723,7 +740,8 @@ def recover_subprocess_instances(db_path):
                 try:
                     # Try "stopped" first (works for deployed/running states)
                     _ts(db_path, inst_id, "stopped")
-                except Exception:
+                except Exception as _e:
+                    logger.debug("subprocess transition stopped (autostart) failed for %d: %s", inst_id, _e)
                     pass  # State machine may not allow this from current state — execute() handles it
                 try:
                     from engine.subprocess import QrSubprocessEngine
@@ -731,13 +749,15 @@ def recover_subprocess_instances(db_path):
                     recovered += 1
                     print(f"[qr] Auto-restarted subprocess {inst_id} (PID {pid})")
                 except Exception as exc:
+                    logger.debug("subprocess auto-restart failed for %d: %s", inst_id, exc)
                     print(f"[qr] Failed to auto-restart subprocess {inst_id}: {exc}")
             else:
                 # Just mark as stopped
                 try:
                     _ts(db_path, inst_id, "stopped")
                     print(f"[qr] Subprocess {inst_id} (PID {pid}) dead, start_on_boot=false → 'stopped'")
-                except Exception:
+                except Exception as _e:
+                    logger.debug("subprocess transition stopped (dead) failed for %d: %s", inst_id, _e)
                     pass
 
     print(f"recovered_subprocess={recovered}")
@@ -806,7 +826,8 @@ def _start_system_engine(db_path, engine_name):
             try:
                 from lib.lib_system_engine import _get_pid_status
                 db_pid_alive = _get_pid_status(db_pid)
-            except Exception:
+            except Exception as _e:
+                logger.debug("DB PID status check failed for pid %d: %s", db_pid, _e)
                 pass
             if db_pid_alive:
                 preflight["issues"].insert(0, f"DB PID {db_pid} still marked as last known (alive={db_pid_alive})")
@@ -845,11 +866,12 @@ def _start_system_engine(db_path, engine_name):
             current = _gi(db_path, inst["id"])
             if current and current.get("state") == "unconfigured":
                 transition_state(db_path, inst["id"], "deployed")
-        except Exception:
+        except Exception as _e:
+            logger.debug("transition deployed (existing process) failed for instance %d: %s", inst["id"], _e)
             pass
         return
 
-    port = result.get("port") or get_port_default("quickrobot-webui")
+    port = result.get("port") or get_port_default(QR_ENGINE_WEBUI_NAME)
     pid = result.get("pid", "?")
     # Build engine-specific URL from env config (loaded above in pre-flight)
     api_host = _CONFIG.get("host", "?")
@@ -919,7 +941,8 @@ def _start_ping_thread(db_path):
                         interval = max(db_interval, 60)
                 except (ValueError, TypeError):
                     pass
-    except Exception:
+    except Exception as _e:
+        logger.debug("ping_interval DB override failed: %s", _e)
         pass  # DB read failure — keep env-based interval
 
     # First run: populate ping_state for all active hosts
@@ -941,9 +964,11 @@ def _start_ping_thread(db_path):
                     _ups(db_path, nid, "online")
                 else:
                     _ups(db_path, nid, "offline")
-            except Exception:
+            except Exception as _e:
+                logger.debug("ping check failed for %s: %s", host, _e)
                 _ups(db_path, nid, "offline")
-    except Exception:
+    except Exception as _e:
+        logger.debug("initial ping loop failed: %s", _e)
         pass  # non-critical at startup
 
     def _ping_loop():
@@ -968,9 +993,11 @@ def _start_ping_thread(db_path):
                             _ups2(db_path, nid, "online")
                         else:
                             _ups2(db_path, nid, "offline")
-                    except Exception:
+                    except Exception as _e:
+                        logger.debug("ping check (loop) failed for %s: %s", host, _e)
                         _ups2(db_path, nid, "offline")
-            except Exception:
+            except Exception as _e:
+                logger.debug("ping loop iteration failed: %s", _e)
                 pass  # non-critical
 
     global _ping_thread
@@ -982,7 +1009,8 @@ def _start_ping_thread(db_path):
     try:
         from db.adapters.nodes import update_ping_state as _ups_local
         _ups_local(db_path, 1, "online")
-    except Exception:
+    except Exception as _e:
+        logger.debug("localhost ping_state update failed: %s", _e)
         pass  # non-critical — stale ping_state is acceptable for localhost
 
 
@@ -1064,7 +1092,8 @@ def phase5_init():
             ).rowcount
             if count:
                 print(f"[qr] Purged {count} stale log entry/entries older than 24h (no instance/node)")
-    except Exception:
+    except Exception as _e:
+        logger.debug("stale_log_purge failed: %s", _e)
         pass  # Non-critical cleanup — table may not exist on fresh DB
 
   # Load engines and auto-register in DB
@@ -1078,6 +1107,7 @@ def phase5_init():
         load_engine_registry(db_path)
         print("[qr] Engine registry loaded")
     except Exception as exc:
+        logger.debug("engine_registry_load failed: %s", exc)
         print(f"[qr] WARNING: engine registry load failed: {exc}")
 
     # Seed presets now that engine_types are registered (FK constraint)
@@ -1089,6 +1119,7 @@ def phase5_init():
                 _seed_presets(conn)
                 print("[qr] Seeded default presets")
     except Exception as exc:
+         logger.debug("preset_seeding failed: %s", exc)
          print(f"[qr] WARNING: preset seeding failed: {exc}")
 
      # Seed already imported above (right after migrations).
@@ -1102,6 +1133,7 @@ def phase5_init():
         if filled:
             print(f"[qr] Backfilled {filled} playbook(s) with stable IDs")
     except Exception as exc:
+        logger.debug("playbook_id_backfill failed: %s", exc)
         print(f"[qr] WARNING: playbook ID backfill failed: {exc}")
 
     # System instances must exist for autostart to work (both dev and prod modes)
@@ -1140,6 +1172,7 @@ def phase5_init():
                         conn.execute("UPDATE engine_types SET enabled=1 WHERE id=?", (row["id"],))
 
     except Exception as exc:
+        logger.debug("engine_enabled_sync failed: %s", exc)
         print(f"[qr] WARNING: engine enabled sync failed: {exc}")
 
     # _auto_create_default_presets(db_path)  -- deactivated, presets managed manually
@@ -1226,7 +1259,8 @@ def phase5_init():
     # Start global host reachability tracking (HOST-PING) — must be before return
     try:
         _start_ping_thread(db_path)
-    except Exception:
+    except Exception as _e:
+        logger.debug("ping_thread_start failed: %s", _e)
         pass  # non-critical — ping thread is optional
 
     # Start system + subprocess engine health loop (HC-SYSTEM)
@@ -1235,6 +1269,7 @@ def phase5_init():
         from lib.lib_system_engine import start_system_health_thread
         start_system_health_thread()
     except Exception as _exc:
+        logger.debug("system_health_loop_start failed: %s", _exc)
         print(f"[qr] WARNING: system health loop failed: {_exc}")
 
     return db_path, qr_env, webui_autostart, mcp_autostart
@@ -1253,13 +1288,15 @@ def phase5_init():
     # Recover stale instances (mid-build after crash)
     try:
         recover_stale_instances()
-    except Exception:
+    except Exception as _e:
+        logger.debug("zombie_cleanup failed: %s", _e)
         pass
 
     # Recover subprocess instances with start_on_boot=true
     try:
         recover_subprocess_instances(db_path)
     except Exception as _exc:
+        logger.debug("subprocess_recovery failed: %s", _exc)
         print(f"[qr] WARNING: subprocess recovery failed: {_exc}")
 
     # Ensure system-managed instances have correct state at startup.
@@ -1270,9 +1307,11 @@ def phase5_init():
             if i.get("system_managed") and i.get("state") == "unconfigured":
                 try:
                     transition_state(db_path, i["id"], "running")
-                except Exception:
+                except Exception as _e:
+                    logger.debug("system_instance_transition failed for %d: %s", i["id"], _e)
                     pass
-    except Exception:
+    except Exception as _e:
+        logger.debug("system_instance_state_sync failed: %s", _e)
         pass
 
 
@@ -1295,12 +1334,13 @@ def phase6_cli_overrides(args):
 
 
 def phase7_verify_playbooks():
-    """Verify playbook checksums. Mode-dependent: prod=exit on mismatch,
+    """Verify playbook + prompt checksums. Mode-dependent: prod=exit on mismatch,
     dev=warn, dev-update=sync+exit.
 
     For dev-import: scans disk for new playbooks not in DB, registers them, then syncs checksums.
     For dev-update: syncs checksums from disk to DB only (no registration).
     Uses _CONFIG["playbook_root_dir"] from .env.
+    Prompts are synced in the same mode using verify_prompt_integrity().
     """
     from db.adapters.playbooks import verify_playbook_integrity as _verify_pbi, \
         register_all_core_playbooks as _register_pb
@@ -1314,12 +1354,21 @@ def phase7_verify_playbooks():
             if count:
                 print(f"[qr] Registered {count} new playbook(s) from disk (dev-import)")
         except Exception as exc:
+            logger.debug("playbook_registration failed: %s", exc)
             print(f"[qr] WARNING: playbook registration failed: {exc}")
 
     # project_root is the grandparent of playbooks/ dir
     _project_root = os.path.dirname(_CONFIG.get("playbook_root_dir", "playbooks/"))
     _verify_pbi(_CONFIG["db_path"], _project_root, mode=pb_mode,
                 exit_on_update=(pb_mode in ("dev-import", "dev-update")))
+
+    # Prompt sync — same mode as playbooks (dev-import or dev-update)
+    from db.adapters.prompts import verify_prompt_integrity as _verify_pi
+    prompt_result = _verify_pi(_CONFIG["db_path"], action="fix", mode=pb_mode)
+    if prompt_result.get("updated"):
+        print(f"[qr] Updated {prompt_result['updated']} prompt checksum(s)/size(s) in DB")
+    if prompt_result.get("version_bumped"):
+        print(f"[qr] Updated {prompt_result['version_bumped']} prompt version(s) from file headers")
 
 
 def phase5a_zombie_cleanup():
@@ -1346,7 +1395,53 @@ def phase5a_zombie_cleanup():
                     )
                 print(f"[qr] Cleaned {len(rows)} zombie log entry/entries")
     except Exception as exc:
+        logger.debug("zombie_cleanup (phase5a) failed: %s", exc)
         print(f"[qr] WARNING: zombie cleanup failed: {exc}")
+
+
+def phase5b_log_retention():
+    """Auto-cleanup old log entries + playbook_runs on startup, then VACUUM.
+
+    Reads retention from QUICKROBOT_LOG_RETENTION_DAYS env var (default 30).
+    Deletes completed/failed entries older than the threshold.
+    Also cleans orphaned playbook_runs with no matching log_entry.
+
+    Runs after zombie cleanup so that stale running jobs are preserved.
+    """
+    import os as _os
+    import datetime as _dt
+
+    try:
+        retention_days = int(_os.environ.get("QUICKROBOT_LOG_RETENTION_DAYS", "30"))
+    except (ValueError, TypeError):
+        retention_days = 30
+
+    if retention_days < 1:
+        return  # Retention disabled (< 1 day = keep nothing, skip to avoid data loss)
+
+    from db.sqlite import pool
+
+    try:
+        cutoff = (_dt.datetime.utcnow() - _dt.timedelta(days=retention_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        
+        # Delete old log entries and orphaned playbook_runs
+        with pool(_CONFIG["db_path"]) as conn:
+            deleted_logs = conn.execute(
+                "DELETE FROM log_entries WHERE status IN ('completed','failed') AND created_at < ? AND parent_id IS NULL",
+                (cutoff,),
+            ).rowcount
+            deleted_pr = conn.execute(
+                "DELETE FROM playbook_runs WHERE task_id NOT IN (SELECT id FROM log_entries)",
+            ).rowcount
+
+        if deleted_logs or deleted_pr:
+            print(f"[qr] Log retention: deleted {deleted_logs} old log entries + {deleted_pr} orphaned playbook_runs (retention={retention_days}d)")
+            # VACUUM in a separate connection (can't run inside active transaction)
+            with pool(_CONFIG["db_path"]) as conn:
+                conn.execute("VACUUM;")
+    except Exception as exc:
+        logger.debug("log_retention_cleanup failed: %s", exc)
+        print(f"[qr] WARNING: log retention cleanup failed: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -1378,6 +1473,7 @@ def run_startup():
         _CONFIG["deferred_webui_autostart"] = _webui_as
         _CONFIG["deferred_mcp_autostart"] = _mcp_as
     phase5a_zombie_cleanup()
+    phase5b_log_retention()
     phase6_cli_overrides(args)
     phase7_verify_playbooks()
     return _CONFIG
@@ -1409,7 +1505,8 @@ def deferred_start_system_engines(db_path, qr_env, webui_autostart, mcp_autostar
             db_ma = _gec_mcp(db_path, 3, "mcp_autostart") or {}
         if db_ma:
             mcp_autostart = str(db_ma.get("value", QR_MCP_DEFAULT_AUTOSTART)).lower() in ("true", "1")
-    except Exception:
+    except Exception as _e:
+        logger.debug("mcp_autostart_db_override failed: %s", _e)
         pass  # DB not ready yet, use env default
     if mcp_autostart:
         _start_system_engine(db_path, "mcp")
@@ -1421,4 +1518,5 @@ def deferred_start_system_engines(db_path, qr_env, webui_autostart, mcp_autostar
         _start_system_engine(db_path, "scheduler")
         print("[qr] [SCHEDULER] autostart enabled")
     except Exception as exc:
+        logger.debug("scheduler_start failed: %s", exc)
         print(f"[qr] [SCHEDULER] start failed: {exc}")

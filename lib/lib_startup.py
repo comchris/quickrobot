@@ -177,7 +177,7 @@ def resolve_seed_path(project_root=None):
         from qr_api import _project_root
         project_root = _project_root
     if _seed_file_path is None:
-        _seed_file_path = os.path.join(project_root, "data", "_seed", "seed_v008.sql")
+        _seed_file_path = os.path.join(project_root, "data", "_seed", "seed_v009.sql")
     return _seed_file_path
 
 
@@ -200,6 +200,11 @@ def import_seed_file(db_path):
     # Only seed on fresh DB creation, never on existing DB startup
     if not _CONFIG.get("_db_was_created", False):
         return
+
+    # Checksum already validated in phase3_db_handling before DB creation.
+    # This function is idempotent — re-validation here is a safety net.
+    env_cfg = _CONFIG.get("qr_env", {})
+    pre_validate_seed_checksum(env_cfg)
 
     # --- Init mode (fresh DB): execute seed SQL ---
     try:

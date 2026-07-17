@@ -159,6 +159,11 @@ def load_scheduler_config(db_path):
         sys.exit(1)
     config["log_level"] = str(raw).lower()
 
+    # Load health_check_logging (boolean flag for verbose HC logging)
+    row = _gec(db_path, 4, "health_check_logging")
+    raw_hc = row.get("value", "true") if row else "true"
+    config["hc_logging"] = str(raw_hc).lower() not in ("false", "0", "no")
+
     return config
 
 
@@ -253,24 +258,37 @@ def _api_health_loop(db_path):
                     update_log_level(new_config)
                     config["log_level"] = new_config["log_level"]
 
+                if new_config["hc_logging"] != config.get("hc_logging"):
+                    logger.info(
+                        "[qr-scheduler] Config synced: hc_logging %s → %s",
+                        config.get("hc_logging", "?"), new_config["hc_logging"],
+                    )
+                    config["hc_logging"] = new_config["hc_logging"]
+
             except SystemExit:
                 # Config sync failed — exit (config is critical)
                 raise
             except Exception as exc:
+                print(f"[qr-scheduler] Config sync error: {exc}", flush=True)
                 logger.warning("[qr-scheduler] Config sync error: %s", exc)
 
         except Exception as exc:
             consecutive_failures += 1
+            print(f"[qr-scheduler] API check failed ({consecutive_failures}/{max_failures}): {exc}", flush=True)
             logger.warning(
                 "[qr-scheduler] API check failed (%d/%d): %s",
                 consecutive_failures, max_failures, exc,
             )
 
             if consecutive_failures >= max_failures:
+                print("[qr-scheduler] FATAL: API unreachable. Exiting.", flush=True)
                 logger.error("[qr-scheduler] FATAL: API unreachable after %d attempts. Exiting.", max_failures)
-                sys.exit(1)
+                # Must use os._exit (not sys.exit) — sys.exit from daemon thread
+                # only kills the thread, not the process.
+                os._exit(1)
 
-        _time_module.sleep(10)
+        # Faster retry during failures (5s) vs normal interval (10s) to match WebUI/MCP timing
+        _time_module.sleep(5 if consecutive_failures > 0 else 10)
 
 
 # ── Main process lifecycle ─────────────────────────────────────────
@@ -306,7 +324,7 @@ def _process_cycle(config):
 
     # Health check cycle
     try:
-        hc_logging = True  # Always log health cycle results for visibility
+        hc_logging = config.get("hc_logging", True)
         result = health.run_health_cycle(sched.db_path, sched.runner, hc_logging=hc_logging)
         if result["queued"] > 0:
             logger.info(
@@ -433,6 +451,13 @@ def main():
     )
     health_thread.start()
     logger.info("[qr-scheduler] API health check thread started (interval=10s)")
+
+    # Boot delay — give API time to fully initialize before scheduler starts
+    # querying and scheduling health checks. Configurable via env var, default 5s.
+    boot_delay = int(os.environ.get("QUICKROBOT_SCHEDULER_BOOT_DELAY", "5"))
+    if boot_delay > 0:
+        logger.info("[qr-scheduler] Boot delay: %ds (API initializing...)", boot_delay)
+        _time_module.sleep(boot_delay)
 
     # Main poll loop
     logger.info("[qr-scheduler] Entering main poll loop (interval=%ds)", poll_interval)

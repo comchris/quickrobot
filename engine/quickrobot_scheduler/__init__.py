@@ -1,9 +1,11 @@
 # quickrobot scheduler engine package
 # Manages the background scheduler process via PID-in-DB tracking.
 
+import logging
 import os
 import sys
 
+logger = logging.getLogger(__name__)
 from engine.base import BaseEngine
 from lib.qr_engine_ids import QR_ENGINE_SCHEDULER_NAME
 
@@ -106,7 +108,8 @@ class SchedulerEngine(BaseEngine):
                     else:
                         try:
                             transition_state(db_path, instance_id, "deployed")
-                        except Exception:
+                        except Exception as _e:
+                            logger.debug("transition_state deployed for existing scheduler process failed: %s", _e)
                             pass
                         return {"action": "start", "pid": old_pid,
                                 "status": "existing_process_alive"}
@@ -157,7 +160,8 @@ class SchedulerEngine(BaseEngine):
                     transition_state(db_path, instance_id, "deployed")
                 transition_state(db_path, instance_id, "starting")
                 transition_state(db_path, instance_id, "running")
-            except Exception:
+            except Exception as _e:
+                logger.debug("state transition chain for scheduler start failed: %s", _e)
                 pass
             _log_lifecycle("scheduler", "start", {"pid": new_pid, "api_host": api_host, "api_port": api_port})
             return {"action": "start", "pid": new_pid, "status": "started"}
@@ -177,12 +181,14 @@ class SchedulerEngine(BaseEngine):
         elif command == "restart":
             try:
                 transition_state(db_path, instance_id, "stopping")
-            except Exception:
+            except Exception as _e:
+                logger.debug("transition_state stopping for scheduler restart failed: %s", _e)
                 pass
             old_pid = inst.get("pid_last_known")
             try:
                 update_instance(db_path, instance_id, pid_last_known=None)
-            except Exception:
+            except Exception as _e:
+                logger.debug("update_instance pid_last_known=None for scheduler restart failed: %s", _e)
                 pass
             if old_pid and _get_pid_status(old_pid):
                 try:

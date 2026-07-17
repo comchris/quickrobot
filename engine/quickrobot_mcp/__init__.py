@@ -21,12 +21,14 @@ The mcp package is an optional dependency — this module handles ImportError
 gracefully if the MCP server is not installed.
 """
 
-import os
-import sys
-import subprocess
 import json
+import logging
+import os
+import subprocess
+import sys
 import time
 
+logger = logging.getLogger(__name__)
 from lib.qr_engine_ids import QR_FORBIDDEN_HOSTS
 
 from engine.base import BaseEngine
@@ -94,8 +96,8 @@ class QrMcpEngine(BaseEngine):
                 row = _gec(db_path, et_id, "mcp_python_interpreter")
                 if row and row.get("value"):
                     config_val = str(row["value"]).strip()
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("mcp python interpreter config lookup failed: %s", _e)
         if config_val:
             if os.path.isfile(config_val) and os.access(config_val, os.X_OK):
                 return config_val
@@ -127,8 +129,8 @@ class QrMcpEngine(BaseEngine):
                                   os.path.expanduser("~/.local/pipx/venvs/mcp/bin/python")]:
                             if os.path.isfile(p):
                                 return p
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("pipx mcp python path check failed: %s", _e)
         return None
 
     def _check_mcp_available(self):
@@ -145,8 +147,8 @@ class QrMcpEngine(BaseEngine):
                 if result.returncode == 0:
                     self._mcp_available = True
                     return
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("mcp package check via subprocess failed: %s", _e)
         # Fallback: check system Python
         try:
             import mcp.server.fastmcp  # noqa: F401
@@ -186,8 +188,8 @@ class QrMcpEngine(BaseEngine):
                     pid = pid
                     rss_bytes = proc.memory_info().rss
                     uptime_seconds = int(__import__("time").time() - proc.create_time())
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("psutil process info read for mcp pid %d failed: %s", pid, _e)
 
         # Read flags: config_override takes priority, then engine_configs, then defaults
         allow_reads = False
@@ -201,7 +203,8 @@ class QrMcpEngine(BaseEngine):
                 if isinstance(co_flags, str):
                     try:
                         co_flags = json.loads(co_flags)
-                    except Exception:
+                    except Exception as _e:
+                        logger.debug("mcp config_override JSON parse failed: %s", _e)
                         co_flags = {}
 
                 def _flag(key, default_val=False):
@@ -217,8 +220,8 @@ class QrMcpEngine(BaseEngine):
                 allow_reads = _flag("mcp_allow_reads")
                 allow_writes = _flag("mcp_allow_writes")
                 allow_proxy = _flag("mcp_allow_proxy")
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("mcp flag resolution for instance %d failed: %s", instance_id, _e)
 
         return _bcs(self._name, instance_id,
                     service_state="running" if running else "stopped",
@@ -251,7 +254,8 @@ class QrMcpEngine(BaseEngine):
             if isinstance(co, str):
                 try:
                     co = json.loads(co)
-                except Exception:
+                except Exception as _e:
+                    logger.debug("mcp config_override JSON parse failed: %s", _e)
                     co = {}
             host = co.get("mcp_host") or os.environ.get("QUICKROBOT_MCP_HOST") or _CONFIG.get("host")
 
@@ -270,7 +274,8 @@ class QrMcpEngine(BaseEngine):
                                 start = _time.time()
                                 resp = _ur.urlopen(url, timeout=2)
                                 latency = round((_time.time() - start) * 1000, 2)
-                            except Exception:
+                            except Exception as _e:
+                                logger.debug("mcp HTTP probe failed (host=%s:%d): %s", host, port, _e)
                                 pass  # root may not serve HTML — PID check is authoritative
                         return {"alive": True, "latency_ms": latency}
                 except (_psutil.NoSuchProcess, _psutil.AccessDenied):
@@ -375,7 +380,8 @@ class QrMcpEngine(BaseEngine):
             reads_val = _flag_val("mcp_allow_reads", "false")
             writes_val = _flag_val("mcp_allow_writes", "false")
             proxy_val = _flag_val("mcp_allow_proxy", "false")
-        except Exception:
+        except Exception as _e:
+            logger.debug("mcp flags resolution from instance config failed: %s", _e)
             reads_val = env_config.get("QUICKROBOT_MCP_READ", "false")
             writes_val = env_config.get("QUICKROBOT_MCP_WRITE", "false")
             proxy_val = env_config.get("QUICKROBOT_MCP_FULLPROXY", "false")
@@ -398,7 +404,8 @@ class QrMcpEngine(BaseEngine):
                     else:
                         try:
                             transition_state(db_path, instance_id, "running")
-                        except Exception:
+                        except Exception as _e:
+                            logger.debug("transition_state to running for existing MCP process failed: %s", _e)
                             pass
                         return {"action": "start", "port": mcp_listen_port, "pid": old_pid, "status": "existing_process_alive"}
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -465,7 +472,8 @@ class QrMcpEngine(BaseEngine):
                     with open(log_path, "r") as lf:
                         lines = [l.strip() for l in lf.readlines() if l.strip()]
                         err_msg = "\n".join(lines[-5:]) if lines else "no output"
-                except Exception:
+                except Exception as _e:
+                    logger.debug("mcp log read failed for crash detection: %s", _e)
                     pass
                 _log_lifecycle("mcp", "start", {"crashed": True, "returncode": retcode, "error": err_msg})
                 return {"error": f"MCP crashed immediately (rc={retcode}): {err_msg}", "action": command}
@@ -480,7 +488,8 @@ class QrMcpEngine(BaseEngine):
                     transition_state(db_path, instance_id, "deployed")
                 transition_state(db_path, instance_id, "starting")
                 transition_state(db_path, instance_id, "running")
-            except Exception:
+            except Exception as _e:
+                logger.debug("state transition chain for MCP start failed (inst %d): %s", instance_id, _e)
                 pass
             _log_lifecycle("mcp", "start", {"pid": new_pid, "interpreter": python_exe, "reads_val": reads_val, "writes_val": writes_val, "proxy_val": proxy_val, "effective_flags": f"r={reads_effective} w={writes_val} p={proxy_val}", "api_host": api_host, "api_port": api_port, "mcp_host": mcp_listen_host, "mcp_port": mcp_listen_port})
             return {"action": "start", "port": mcp_listen_port, "pid": new_pid, "status": "started"}
@@ -496,7 +505,8 @@ class QrMcpEngine(BaseEngine):
             update_instance(db_path, instance_id, pid_last_known=None)
             try:
                 transition_state(db_path, instance_id, "stopped")
-            except Exception:
+            except Exception as _e:
+                logger.debug("transition_state to stopped for MCP failed: %s", _e)
                 pass
             _log_lifecycle("mcp", "stop", {"pid": pid})
             return {"action": "stop", "pid": pid}
@@ -506,7 +516,8 @@ class QrMcpEngine(BaseEngine):
             # Transition to stopping for visible state change in UI
             try:
                 transition_state(db_path, instance_id, "stopping")
-            except Exception:
+            except Exception as _e:
+                logger.debug("transition_state to stopping for MCP restart failed: %s", _e)
                 pass
 
             old_pid = inst.get("pid_last_known")
@@ -515,7 +526,8 @@ class QrMcpEngine(BaseEngine):
             # is detected as "running" during the kill window
             try:
                 update_instance(db_path, instance_id, pid_last_known=None)
-            except Exception:
+            except Exception as _e:
+                logger.debug("update_instance pid_last_known=None for MCP restart failed: %s", _e)
                 pass
 
             if old_pid and _get_pid_status(old_pid):
@@ -556,7 +568,8 @@ class QrMcpEngine(BaseEngine):
                 except ConnectionRefusedError:
                     # Port is free — we can start
                     break
-                except Exception:
+                except Exception as _e:
+                    logger.debug("port-wait check failed (non-fatal): %s", _e)
                     break
 
             # Start new process
@@ -579,7 +592,8 @@ class QrMcpEngine(BaseEngine):
                 return default
             val = str(row["value"]).lower()
             return val in ("true", "1", "yes")
-        except Exception:
+        except Exception as _e:
+            logger.debug("mcp flag value lookup failed (key=%s): %s", key, _e)
             return default
 
     def list_resources(self, instance_id, db_path=None):

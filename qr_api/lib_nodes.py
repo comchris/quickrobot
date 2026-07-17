@@ -5,11 +5,12 @@ Contains: _get_node_build_state, _scan_orphaned_units.
 Imported by routes_nodes.py and used by quickrobot.py root.
 """
 
+import logging
 import os
 import re as _re
 import subprocess as _sub
 
-# Internal imports — avoid circular dependency with __init__.py
+logger = logging.getLogger(__name__)
 from db.adapters.nodes import list_nodes
 from db.sqlite import pool
 
@@ -30,7 +31,8 @@ def _get_node_build_state(db_path, node_id):
                 "SELECT node_build_state FROM nodes WHERE id = ?", (node_id,)
             ).fetchone()
             return row[0] if row and row[0] else "idle"
-    except Exception:
+    except Exception as _e:
+        logger.debug("node_build_state lookup failed (node_id=%d): %s", node_id, _e)
         return "idle"
 
 

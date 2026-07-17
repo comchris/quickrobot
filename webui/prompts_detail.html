@@ -1,0 +1,147 @@
+<div style="padding:16px;">
+  <a href="/webui/prompts" style="color:#4fc3f7;text-decoration:none;">&larr; Back to prompts</a>
+
+  {% if prompt %}
+  <h2 style="margin-top:16px;">{{ prompt.title or prompt.prompt_id }}</h2>
+  
+  <!-- Prompt metadata table -->
+  <table style="margin-bottom:16px;font-size:13px;border-collapse:collapse;">
+    <tr><td style="padding:4px 12px 4px 0;color:#888;">ID</td><td>{{ prompt.id }}</td></tr>
+    <tr><td style="padding:4px 12px 12px 0;color:#888;">Prompt ID</td><td style="font-family:monospace;">{{ prompt.prompt_id }}</td></tr>
+    <tr><td style="padding:4px 12px 4px 0;color:#888;">File Path</td><td style="font-family:monospace;">{{ prompt.file_path or 'prompts/' + prompt.prompt_id + '.md' }}</td></tr>
+    <tr><td style="padding:4px 12px 4px 0;color:#888;">Role</td><td>{{ prompt.message_role or 'usermessage' }}</td></tr>
+    <tr><td style="padding:4px 12px 12px 0;color:#888;">Type</td><td>{{ prompt.prompt_type or 'Benchmark' }}</td></tr>
+    <tr><td style="padding:4px 12px 4px 0;color:#888;">Version</td><td>{{ prompt.version or '1' }}</td></tr>
+    <tr><td style="padding:4px 12px 6px 0;color:#888;">Uses</td><td>{{ prompt.usage_counter_since_update or 0 }}</td></tr>
+    <tr><td style="padding:4px 12px 6px 0;color:#888;">Errors</td><td{% if prompt.error_counter_since_update and prompt.error_counter_since_update > 0 %} style="color:#f44336;font-weight:600;"{% endif %}>
+      {{ prompt.error_counter_since_update or 0 }}
+    </td></tr>
+    <tr><td style="padding:4px 12px 4px 0;color:#888;">File Size</td><td style="font-family:monospace;">{{ formatBytes(prompt.file_size or 0) }}</td></tr>
+    <tr><td style="padding:4px 12px 4px 0;color:#888;">DB Checksum</td><td style="font-family:monospace;font-size:12px;word-break:break-all;">{{ (prompt.checksum_sha256 or '')[:64] or 'N/A' }}</td></tr>
+    <tr><td style="padding:4px 12px 4px 0;color:#888;">Checksum Now</td><td id="current-chk" style="font-family:monospace;font-size:12px;word-break:break-all;"><span style="color:#999;">computing...</span></td></tr>
+    <tr><td style="padding:4px 12px 12px 0;color:#888;">Updated</td><td>{{ prompt.updated_at or '-' }}</td></tr>
+  </table>
+
+  <!-- Inline editor -->
+  <form id="prompt-edit-form" method="POST" action="/webui/prompts/{{ prompt.id }}">
+    <label style="font-size:13px;color:#666;">Content (100,000 byte max):</label>
+    <div style="display:flex;gap:8px;margin-top:4px;">
+      <textarea id="prompt-content" name="content" rows="20" style="flex:1;font-family:monospace;font-size:13px;padding:12px;border:1px solid #ccc;border-radius:4px;background:#1e1e1e;color:#d4d4d4;resize:vertical;">{{ prompt.content or '' }}</textarea>
+      <div style="width:200px;">
+        <label style="font-size:12px;color:#666;">Metadata</label>
+        <select id="prompt-role" name="message_role" style="width:100%;margin-top:4px;margin-bottom:8px;padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:13px;">
+          {% for role in ['systemprompt', 'usermessage', 'assistant', 'skill'] %}
+          <option value="{{ role }}"{% if prompt.message_role == role %} selected{% endif %}>{{ role }}</option>
+          {% endfor %}
+        </select>
+        <select id="prompt-type" name="prompt_type" style="width:100%;margin-top:4px;margin-bottom:8px;padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:13px;">
+          {% for ptype in ['MCP', 'Benchmark', 'Magi'] %}
+          <option value="{{ ptype }}"{% if prompt.prompt_type == ptype %} selected{% endif %}>{{ ptype }}</option>
+          {% endfor %}
+        </select>
+        <button type="submit" class="btn btn-primary" style="width:100%;font-size:13px;padding:6px 10px;margin-bottom:8px;">Save</button>
+        <a href="/webui/prompts/{{ prompt.id }}" class="btn" style="width:100%;display:block;text-align:center;text-decoration:none;background:#999;color:#fff;font-size:13px;padding:6px 10px;margin-bottom:8px;">Refresh</a>
+        <button type="button" id="delete-prompt-btn" class="btn btn-danger" style="width:100%;font-size:13px;padding:6px 10px;">Delete</button>
+      </div>
+    </div>
+    
+    <!-- Byte counter -->
+    <div style="margin-top:4px;font-size:12px;color:#888;text-align:right;">
+      <span id="byte-counter">0</span> / 100,000 bytes
+    </div>
+  </form>
+
+  <script>
+  // Byte counter — updates live as user types
+  var textarea = document.getElementById('prompt-content');
+  var byteCounter = document.getElementById('byte-counter');
+  if (textarea && byteCounter) {
+    textarea.addEventListener('input', function() {
+      byteCounter.textContent = new Blob([this.value]).size.toLocaleString();
+    });
+    byteCounter.textContent = new Blob([textarea.value]).size.toLocaleString();
+  }
+
+  // Delete button
+  var deleteBtn = document.getElementById('delete-prompt-btn');
+  if (deleteBtn) {
+    deleteBtn.addEventListener('click', function() {
+      if (!confirm('Delete prompt "' + document.querySelector('h2').textContent + '"? This cannot be undone.')) return;
+      qrApi('/prompts/{{ prompt.prompt_id }}', {
+        method: 'DELETE'
+      }).then(function(data) {
+        if (data.status === 'ok') {
+          window.location.href = '/webui/prompts';
+        } else {
+          alert('Delete failed: ' + (data.message || JSON.stringify(data)));
+        }
+      }).catch(function(e) {
+        alert('Request failed: ' + e);
+      });
+    });
+  }
+
+  // Form submit — PUT to API
+  document.getElementById('prompt-edit-form').addEventListener('submit', function(e) {
+    e.preventDefault();
+    var content = document.getElementById('prompt-content').value;
+    
+    qrApi('/prompts/{{ prompt.prompt_id }}', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        content: content,
+        message_role: document.getElementById('prompt-role').value,
+        prompt_type: document.getElementById('prompt-type').value,
+      })
+    }).then(function(data) {
+      if (data.status === 'ok') {
+        window.location.reload();
+      } else {
+        alert('Save failed: ' + (data.message || JSON.stringify(data)));
+      }
+    }).catch(function(e) {
+      alert('Request failed: ' + e);
+    });
+  });
+
+  // Checksum verification — compare browser-computed hash with DB-stored hash
+  function simpleHash(str) {
+    var hash = 0;
+    for (var i = 0; i < str.length; i++) {
+      var ch = str.charCodeAt(i);
+      hash = ((hash << 5) - hash) + ch;
+      hash = hash & hash;
+    }
+    var base = Math.abs(hash).toString(16).padStart(8, "0");
+    var h1 = "", h2 = "";
+    for (var i = 0; i < str.length; i += 3) { h1 += str.charCodeAt(i % str.length).toString(16).padStart(2, "0"); }
+    for (var i = str.length - 1; i >= 0; i -= 3) { h2 += str.charCodeAt(i % str.length).toString(16).padStart(2, "0"); }
+    return (base + h1 + h2).substring(0, 64).toLowerCase();
+  }
+
+  (function() {
+    var el = document.getElementById("current-chk");
+    if (!el) return;
+    
+    // Try crypto.subtle first, fall back to simple hash
+    var contentText = document.getElementById("prompt-content").value || "";
+    
+    if (typeof crypto !== 'undefined' && !!crypto.subtle) {
+      var bytes = new TextEncoder().encode(contentText);
+      crypto.subtle.digest('SHA-256', bytes).then(function(hashBuffer) {
+        var hashArray = Array.from(new Uint8Array(hashBuffer));
+        var computed = hashArray.map(function(b) { return b.toString(16).padStart(2, '0'); }).join('');
+        el.innerHTML = '<span style="color:' + (computed === '{{ prompt.checksum_sha256 or "" }}' ? '#4caf50' : '#f44336') + ';">\u2713 ' + computed.substring(0, 16) + '...</span>';
+      });
+    } else {
+      el.textContent = simpleHash(contentText);
+    }
+  })();
+  </script>
+
+  {% else %}
+  <p style="color:#f44336;">Prompt not found</p>
+  <a href="/webui/prompts" style="color:#4fc3f7;">&larr; Back to prompts</a>
+  {% endif %}
+</div>

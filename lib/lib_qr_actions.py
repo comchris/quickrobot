@@ -23,6 +23,9 @@ Functions:
 """
 
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def log_qr_action(db_path, action_type, node_id=None, instance_id=None,
@@ -57,7 +60,8 @@ def log_qr_action(db_path, action_type, node_id=None, instance_id=None,
                   (action_type, node_id, instance_id, actor, details_json, created_at),
             )
         return True
-    except Exception:
+    except Exception as _e:
+        logger.debug("log_qr_action failed (action=%s): %s", action_type, _e)
         return False
 
 
@@ -95,10 +99,11 @@ def log_qr_override(db_path, action_type, node_id=None, instance_id=None,
                     details_json, created_at, task_stage, stage_playbook, retry_count, max_retries,
                     status)
                    VALUES (NULL, ?, NULL, ?, ?, ?, ?, ?, NULL, NULL, 0, 1, 'running')""",
-                  (action_type, node_id, instance_id, actor, details_json, created_at),
+                   (action_type, node_id, instance_id, actor, details_json, created_at),
             )
         return True
-    except Exception:
+    except Exception as _e:
+        logger.debug("log_qr_override failed (action=%s): %s", action_type, _e)
         return False
 
 
@@ -139,7 +144,8 @@ def log_qr_task(db_path, action_type, node_id=None, instance_id=None,
             task_id = cursor.lastrowid
             conn.commit()
         return task_id
-    except Exception:
+    except Exception as _e:
+        logger.debug("log_qr_task failed (action=%s): %s", action_type, _e)
         return 0
 
 
@@ -171,5 +177,6 @@ def update_qr_task(db_path, task_id, status, duration_ms=0, finished_at=None):
             )
             conn.commit()
         return True
-    except Exception:
+    except Exception as _e:
+        logger.debug("update_qr_task failed (id=%d): %s", task_id, _e)
         return False

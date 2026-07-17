@@ -612,7 +612,7 @@ function wrapActionButtons() {
     qrApi('/instances/' + id, {
       method: 'PUT',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({preset_id: preset, skip_build: true})
+      body: JSON.stringify({preset_id: preset})
     })
     .then(function(data) {
       if (data.status === 'ok') {

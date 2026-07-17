@@ -26,11 +26,15 @@ import subprocess
 import sys
 import threading as _threading
 import time
+import logging
+
+logger = logging.getLogger(__name__)
 
 from lib.qr_engine_ids import (
     QR_DEFAULT_LOCALHOST, get_port_default, get_name_by_id,
     QR_FORBIDDEN_HOSTS, QR_ENGINE_PORT_DEFAULTS, get_system_instance_id,
     QR_HEALTH_CHECK_SLEEP, QR_ENGINE_SUBPROCESS,
+    QR_WEBUI_RESTART_ADOPT, QR_MCP_RESTART_ADOPT, QR_SCHEDULER_RESTART_ADOPT,
 )
 from lib.lib_time import utcnow_str
 
@@ -213,6 +217,17 @@ def check_port_and_process_free(engine_name, port=None):
     issues = []
     import subprocess as _subp
 
+    # Skip pre-flight for engines with RESTART_ADOPT=true — the engine's
+    # execute() method will handle orphan adoption instead.
+    adopt_env = os.getenv(f"QUICKROBOT_{engine_name.upper()}_RESTART_ADOPT")
+    if adopt_env is None:
+        _adopt_map = {"webui": QR_WEBUI_RESTART_ADOPT,
+                      "mcp": QR_MCP_RESTART_ADOPT,
+                      "scheduler": QR_SCHEDULER_RESTART_ADOPT}
+        adopt_env = _adopt_map.get(engine_name, "false")
+    if adopt_env.lower() in ("true", "1"):
+        return {"free": True, "issues": []}
+
     # 1. Port check (skip for scheduler — no port)
     if port is not None and port > 0:
         try:
@@ -305,7 +320,8 @@ def _mcp_binary_exists():
                                    capture_output=True, timeout=5)
                 if result.returncode == 0:
                     return True
-            except Exception:
+            except Exception as _e:
+                logger.debug("python3 interpreter verify failed for %s: %s", path, _e)
                 pass
     return False
 
@@ -735,7 +751,8 @@ def start_system_engine(engine_name, env_config, api_host, api_port, python_exe=
     if inst_id:
         try:
             inst = get_instance(db_path, inst_id)
-        except Exception:
+        except Exception as _e:
+            logger.debug("get_instance failed for %s (id=%d): %s", engine_name, inst_id, _e)
             pass
 
     # Determine port from env config (use structured defaults for non-env values)
@@ -788,7 +805,8 @@ def start_system_engine(engine_name, env_config, api_host, api_port, python_exe=
                 print(f"[qr] {engine_name}: orphaned process (pid={old_pid}) — adopting (RESTART_ADOPT=true)")
                 try:
                     transition_state(db_path, inst_id, "deployed")
-                except Exception:
+                except Exception as _e:
+                    logger.debug("transition_state deploy failed for %s (id=%d): %s", engine_name, inst_id, _e)
                     pass
                 return {"action": "start", "port": port, "pid": old_pid,
                         "status": "existing_process_alive", "engine": engine_name}
@@ -796,13 +814,15 @@ def start_system_engine(engine_name, env_config, api_host, api_port, python_exe=
             _kill_orphaned_process(old_pid, engine_name)
             try:
                 update_instance(db_path, inst_id, pid_last_known=None)
-            except Exception:
+            except Exception as _e:
+                logger.debug("update_instance pid_clear failed for %s (id=%d): %s", engine_name, inst_id, _e)
                 pass
         else:
             # True existing child — skip
             try:
                 transition_state(db_path, inst_id, "deployed")
-            except Exception:
+            except Exception as _e:
+                logger.debug("transition_state deployed (existing child) failed for %s (id=%d): %s", engine_name, inst_id, _e)
                 pass
             return {"action": "start", "port": port, "pid": old_pid,
                     "status": "existing_process_alive", "engine": engine_name}
@@ -835,7 +855,8 @@ def start_system_engine(engine_name, env_config, api_host, api_port, python_exe=
                     exe_path = pipx_py
                 else:
                     exe_path = sys.executable
-        except Exception:
+        except Exception as _e:
+            logger.debug("pipx exe auto-detect failed, using sys.executable: %s", _e)
             exe_path = sys.executable
     else:
         exe_path = sys.executable
@@ -883,7 +904,8 @@ def start_system_engine(engine_name, env_config, api_host, api_port, python_exe=
         try:
             update_instance(db_path, inst_id, pid_last_known=new_pid)
             transition_state(db_path, inst_id, "deployed")
-        except Exception:
+        except Exception as _e:
+            logger.debug("post-spawn update+transition failed for %s (id=%d): %s", engine_name, inst_id, _e)
             pass
 
     _log_lifecycle(engine_name, "start", {"pid": new_pid, "port": port, "api_host": api_host, "api_port": api_port})
@@ -914,7 +936,8 @@ def stop_system_engine(engine_name, env_config):
     if inst_id:
         try:
             inst = get_instance(db_path, inst_id)
-        except Exception:
+        except Exception as _e:
+            logger.debug("get_instance failed for %s (id=%d): %s", engine_name, inst_id, _e)
             pass
 
     pid = inst.get("pid_last_known") if inst else None
@@ -932,7 +955,8 @@ def stop_system_engine(engine_name, env_config):
     if inst:
         try:
             update_instance(db_path, inst_id, pid_last_known=None)
-        except Exception:
+        except Exception as _e:
+            logger.debug("update_instance pid_clear on stop failed for %s (id=%d): %s", engine_name, inst_id, _e)
             pass
 
     _log_lifecycle(engine_name, "stop", {"pid": pid})
@@ -978,7 +1002,8 @@ def restart_system_engine(engine_name, env_config, api_host, api_port, timeout=N
         try:
             from db.adapters.instances import get_instance
             inst = get_instance(db_path, inst_id)
-        except Exception:
+        except Exception as _e:
+            logger.debug("get_instance failed for %s (id=%d): %s", engine_name, inst_id, _e)
             pass
 
     old_pid = inst.get("pid_last_known") if inst else None
@@ -1010,7 +1035,8 @@ def restart_system_engine(engine_name, env_config, api_host, api_port, timeout=N
             if _get_pid_status(old_pid):
                 psutil.Process(old_pid).kill()
                 time.sleep(1)
-        except Exception:
+        except Exception as _e:
+            logger.debug("force kill failed for %s (pid=%d): %s", engine_name, old_pid, _e)
             pass
 
     # Step 4-5: Start new process
@@ -1072,7 +1098,8 @@ def get_system_engine_pid(engine_name, env_config, _retried=False):
     inst = None
     try:
         inst = get_instance(db_path, inst_id)
-    except Exception:
+    except Exception as _e:
+        logger.debug("get_instance failed for %s (id=%d): %s", engine_name, inst_id, _e)
         pass
 
     pid = inst.get("pid_last_known") if inst else None
@@ -1175,7 +1202,8 @@ def build_subprocess_env(engine_name, env_config, api_host, api_port, instance_c
                     row = _gec(db_path, QR_ENGINE_MCP, db_key)
                     if row and row.get("value"):
                         return str(row["value"])
-            except Exception:
+            except Exception as _e:
+                logger.debug("MCP flag resolution failed for %s/%s: %s", engine_name, db_key, _e)
                 pass
             return env_config.get(env_key, "false")
 
@@ -1267,7 +1295,8 @@ def api_health_check_loop(api_host, api_port, max_retries=3, retry_delay=3, chec
                     _engine_name = os.path.basename(_log_path).replace(".log", "")
                     with open(_log_path, "a") as _lf:
                         _lf.write(f"{datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')} {_engine_name}: {_fatal_msg}\n")
-            except Exception:
+            except Exception as _e:
+                logger.debug("FATAL log file write failed: %s", _e)
                 pass
             print(_fatal_msg, flush=True)
             os._exit(1)
@@ -1462,7 +1491,8 @@ def _system_health_loop():
                             "UPDATE instances SET last_state_change=? WHERE id=?",
                             (now_ts, inst_id),
                         )
-                except Exception:
+                except Exception as _e:
+                    logger.debug("last_state_change update failed for instance %d: %s", inst_id, _e)
                     pass  # Non-critical — stale timestamp is acceptable
 
                 result = _system_health_check_one(
@@ -1493,7 +1523,8 @@ def _system_health_loop():
                             "UPDATE instances SET last_state_change=? WHERE id=?",
                             (now_ts, inst_id),
                         )
-                except Exception:
+                except Exception as _e:
+                    logger.debug("last_state_change update (no-pid row) failed for instance %d: %s", inst_id, _e)
                     pass
 
                 # Check if this is the scheduler engine (ID=4 by convention)
@@ -1505,7 +1536,8 @@ def _system_health_loop():
                         ("quickrobot-scheduler",),
                     ).fetchone()
                     is_scheduler = (et_row and et_row["id"] == QR_ENGINE_SCHEDULER) or engine_type_id == QR_ENGINE_SCHEDULER
-                except Exception:
+                except Exception as _e:
+                    logger.debug("scheduler engine type check failed for instance %d: %s", inst_id, _e)
                     pass
 
                 if is_scheduler:
@@ -1524,7 +1556,8 @@ def _system_health_loop():
                                     )
                                 dead_count += 1
                                 _log_system_health(engine_name, "dead_system_engine_scan", {"inst_id": inst_id})
-                            except Exception:
+                            except Exception as _e:
+                                logger.debug("dead state update failed for instance %d: %s", inst_id, _e)
                                 error_count += 1
                     except Exception as _exc:
                         _log_system_health("hc-loop", "scheduler_scan_error", {"error": str(_exc)})
@@ -1596,7 +1629,8 @@ def _log_system_health(engine_name, action, details=None):
         log_path = os.path.join(log_dir, _SYSTEM_HEALTH_LOG_NAME)
         with open(log_path, "a") as f:
             f.write(log_line + "\n")
-    except Exception:
+    except Exception as _e:
+        logger.debug("system health log write failed: %s", _e)
         pass  # Non-critical — don't let log failure break the health loop
 
     # Also print to stdout for tmux visibility (low frequency)

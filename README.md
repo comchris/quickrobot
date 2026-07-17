@@ -1,27 +1,29 @@
+WIP
 
-
-- Fully agentic backend handling for ya Llama.cpp - or anything else
-- AI²-Cluster setup for RPC + GPU + Layer- + Tensor- + Expert-split + MTP 
-- Model and Preset managment, Benchmark interface
+- Fully agentic backend handling for ya Llama.cpp lab - or anything else
+- Ape or AI-driven Cluster setup for RPC + GPU + Layer- + Tensor- + Expert-split + MTP 
+- Model and Preset handling
 - Remote Host control for agents using ansible playbooks instead of full ssh 
-- Human interface Web-UI, REST-API or MCP for agents
-- 100% Coded by local Qwen3.6-35B-A3B-Q5KM at 30 t/s 
+- Human backwards compatible Web-UI interface, REST-API or MCP for agents
+- 100% Coded by local Qwen3.6-35B-A3B-Q5KM at 30 t/s - extend it as needed - no bigger model needed
 - no npm, no aur, no dockerhub, no pipe to bash
 - open source, open weights, closed ai
 
-8k Trailer VIDEO here ;o)
+8k Trailer VIDEO goes here ;o)
 
 
+## Cluster Example: 222GB Model GLM 5.2 on the 5x 6W TDP thin clients and some other e-waste
+
+![RPCandClusterSetup](docs/pics/insane1.png)
+
+![RPCandClusterSetup](docs/pics/docs/examples/llamaCPP_cluster/Expertsplit9nodes-GLM52-Q2XXS/Expertsplit9nodes-GLM52-Q2XXS_001.png)
 
 Example Quickrobot prompt:
 
-"Start quickrobot. Add 3 nodes (Hostnames dllama1/2/3.lan). 
-On each node create an RPC instance using preset CPU-2Threads. 
+"Start quickrobot server. Add 3 nodes (Hostnames dllama1/2/3.lan). 
+On each node create an RPC instance for 4 Threads. 
 On dllama1 also create a llama_server instance using preset QR-DESIGNER... 
-Bind all 3 RPCs to the server. Reconfigure the server so it picks up the new RPC bindings and restart it. 
-Run the "Count-to-100" benchmark and report results."
-
-
+Bind all RPCs to the server. Run the "Count-to-100" benchmark and report results."
 
 ## Cluster Example: 94,5GB Model on 12GB RTX 4070ti using CUDA + Draft-MTP on 8GB Radeon using Vulkan + Experts on 2015 4c CPUs in thin clients 
 4 Nodes / 2 actual GPUs / 2G5LAN / 94,5 GB on Disk - Step-3.7-flash-Q3_K_M + Q8_0 MTP / n_ctx = 262144 (Q8/Q8) 
@@ -65,8 +67,7 @@ Model Qwen3.6-35B-A3B-MTP-Q5_K_M.gguf ~ 23GB  CTX_SIZE=262144   ~ 10t/s
 ## BUT WHY?
 
 - Scope of the project is to help upcycle e-waste Hardware: Too old to run win 11 ? Make it an AI-node and hold some Experts. 
-- Use Your old laptop with the broken screen to store Your active context window at home on Your DDR4.
-
+- Use Your old laptop with the broken screen to store Your active context window or some Experts at home on Your DDR4.
 
 ## including Human interface
 In case the agent is down:
@@ -87,14 +88,10 @@ Model and Preset based Merge chain for ENV or cli
 TODO wrapper for downloader with checksums
 
 
+
+
 ## "Get started" 
+WIP
 
 Currently llama.cpp deployment is limited to git builds per node from scratch, binary downloads will follow later. (apt)   
-
-
-WIP
-![Setup Quickrobot](docs/git/guide_controller.md)
-
-WIP
-![Setup Remote Node example LXC](docs/git/guide_node_lxc.md)
 

@@ -74,11 +74,11 @@
 
 ## Seed File — Chain-of-Trust Verification
 
-The seed file (`data/_seed/seed_v008.sql`) is a plain SQL file with `INSERT OR REPLACE` statements that populate all static seed data: engine_types, engine_configs, engine_presets, engine_models, playbook_registry (with checksum_sha256 + file_size), and benchmark_prompts. **Note:** `log_entries` table schema comes from base migration `008_base.sql`. Log entries are transient runtime data — NOT stored in the seed file.
+The seed file (`data/_seed/seed_v009.sql`) is a plain SQL file with `INSERT OR REPLACE` statements that populate all static seed data: engine_types, engine_configs, engine_presets, engine_models, playbook_registry (with checksum_sha256 + file_size), and benchmark_prompts. **Note:** `log_entries` table schema comes from base migration `009_base.sql`. Log entries are transient runtime data — NOT stored in the seed file.
 
 ### Verification Flow (fresh DB creation)
 1. **Pre-flight:** Load `.quickrobot.env`, validate required keys + seed checksum BEFORE any filesystem change → **HARD EXIT** if mismatch
-2. **Apply base schema:** `008_base.sql` creates all tables (idempotent via CREATE TABLE IF NOT EXISTS)
+2. **Apply base schema:** `009_base.sql` creates all tables (idempotent via CREATE TABLE IF NOT EXISTS)
 3. **Seed import:** `import_seed_file()` executes seed SQL via `conn.executescript()` — idempotent, ONE TIME ONLY on fresh DB creation
 4. **Engine discovery** → auto-registers engine types from `engine/` subdirectories
 5. **Auto-provision system instances** (API, WebUI, MCP)
@@ -889,7 +889,7 @@ After calling `PUT /rpccluster/llama/<id>/bind-rpc`, you MUST call `deploy` on t
 **Correct:** `PUT /instances/<id>` with `{preset_id: N, skip_build: true}` — triggers BC-1 fast path (config-only update via `deploy_config_env` + `service_start` playbooks). Writes new env file, stops service, restarts. No git clone or cmake build.
 
 ### Port Resolution
-Ports come from `.quickrobot.env`, never hardcoded in code. API port: `QUICKROBOT_API_PORT`, WebUI: `QUICKROBOT_WEBUI_PORT`, MCP: `QUICKROBOT_MCP_PORT`. Port allocation auto-increments from engine config `LLAMA_ARG_PORT` (llama_server), `base_port` (llama_rpc, iperf3).
+Ports come from `.quickrobot.env`, never hardcoded in code. API port: `QUICKROBOT_API_PORT`, WebUI: `QUICKROBOT_WEBUI_PORT`, MCP: `QUICKROBOT_MCP_PORT`. Port allocation auto-increments from engine config `base_port` (all engines: llama_server, llama_rpc, iperf3 — stored in `engine_configs` table). The allocator starts at `base_port` and assigns sequential ports. Each instance's `port_assigned` column holds the allocated port, which gets merged into the env file as `LLAMA_ARG_PORT`.
 
 ### RPC Model Loading — Node Dependent
 RPC servers load the model on-demand when first routed to by a llama-server. Fresh RPCs start with near-zero CPU until actual inference tokens reach them. Early benchmark results undercount throughput — the curve stabilizes only after all bound RPCs have loaded the model. This is per-node behavior.

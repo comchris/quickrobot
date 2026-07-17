@@ -1,4 +1,8 @@
-<h1 style="margin:0;font-size:1.3em;">Edit Preset: <span id="preset-title">Loading...</span></h1>
+<div style="display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:8px;margin-bottom:8px;">
+  <a id="prev-preset-link" href="#" class="btn btn-xs" style="text-decoration:none;display:none;">← Prev</a>
+  <h1 style="margin:0;font-size:1.3em;text-align:center;">Edit Preset: <span id="preset-title">Loading...</span></h1>
+  <a id="next-preset-link" href="#" class="btn btn-xs" style="text-decoration:none;display:none;">Next →</a>
+</div>
 <form id="preset-form" style="max-width:600px;">
   <div style="margin-bottom:12px;">
     <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Preset Name</label>
@@ -20,10 +24,27 @@
     </select>
   </div>
 
+  <!-- Context Size Preset -->
+  <div style="margin-bottom:12px;">
+    <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Context Size (LLAMA_ARG_CTX_SIZE)</label>
+    <select id="ctx-preset" style="width:100%;max-width:300px;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+      <option value="">-- Custom --</option>
+      <option value="4096">4K (4096)</option>
+      <option value="8192">8K (8192)</option>
+      <option value="32768">32K (32768)</option>
+      <option value="65536">64K (65536)</option>
+      <option value="131072">128K (131072)</option>
+      <option value="262144">256K (262144)</option>
+    </select>
+    <input type="text" id="ctx-custom" placeholder="Custom value" style="width:100%;max-width:300px;padding:6px 10px;border:1px solid #ccc;border-radius:4px;margin-top:4px;display:none;">
+    <small style="color:#888;font-size:0.8em;" id="ctx-hint"></small>
+  </div>
+
   <!-- Model Selection -->
   <div style="margin-bottom:12px;">
     <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Linked Model</label>
-    <select id="model-select" style="width:100%;max-width:700px;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+    <input type="text" id="model-search" placeholder="Search models by name, quantization, or path..." style="width:100%;max-width:700px;padding:6px 10px;border:1px solid #ccc;border-radius:4px;margin-bottom:4px;">
+    <select id="model-select" style="width:100%;max-width:700px;padding:6px 10px;border:1px solid #ccc;border-radius:4px;" size="8">
       <option value="">-- No linked model --</option>
     </select>
     <div id="model-info" style="margin-top:8px;font-size:0.85em;color:#666;display:none;">
@@ -69,8 +90,11 @@
     </div>
   </details>
 
-  <button type="submit" class="btn btn-success" id="preset-save-btn">Save Preset</button>
-  <a href="/webui/engine/{{ engine_type }}/presets" class="btn btn-primary" style="text-decoration:none;">Cancel</a>
+  <div style="display:flex;gap:6px;margin-bottom:12px;">
+    <button type="submit" class="btn btn-success" id="preset-save-btn">Save Preset</button>
+    <button type="button" class="btn btn-xs" id="preset-clone-btn">Clone This Preset</button>
+    <a href="/webui/engine/{{ engine_type }}/presets" class="btn" style="text-decoration:none;">Cancel</a>
+  </div>
 </form>
 
 {% if affected_instances %}
@@ -163,6 +187,86 @@
   var presetConfigOutput = document.getElementById('preset-config-output');
   var mergeChainBody = document.getElementById('merge-chain-body');
 
+  // --- ctx_size preset dropdown ---
+  var ctxPreset = document.getElementById('ctx-preset');
+  var ctxCustom = document.getElementById('ctx-custom');
+  var ctxHint = document.getElementById('ctx-hint');
+  var _currentCtxSize = '';
+  if (ctxPreset) {
+    ctxPreset.addEventListener('change', function() {
+      if (this.value === '') {
+        ctxCustom.style.display = 'block';
+        ctxCustom.value = _currentCtxSize;
+        ctxHint.textContent = '';
+      } else {
+        ctxCustom.style.display = 'none';
+        ctxHint.textContent = 'Set LLAMA_ARG_CTX_SIZE=' + this.value;
+        // Update or add the ctx_size env var
+        if (this.value) {
+          currentEnv['LLAMA_ARG_CTX_SIZE'] = this.value;
+          renderConfigTable();
+        }
+      }
+    });
+  }
+
+  if (ctxCustom) {
+    ctxCustom.addEventListener('input', function() {
+      _currentCtxSize = this.value;
+      if (this.value) {
+        currentEnv['LLAMA_ARG_CTX_SIZE'] = this.value;
+        renderConfigTable();
+      } else if (currentEnv['LLAMA_ARG_CTX_SIZE']) {
+        delete currentEnv['LLAMA_ARG_CTX_SIZE'];
+        renderConfigTable();
+      }
+    });
+  }
+
+  // --- Prev/Next preset navigation ---
+  var prevLink = document.getElementById('prev-preset-link');
+  var nextLink = document.getElementById('next-preset-link');
+  var _presetsList = [];  // populated by loadPreset
+
+  function updateNavLinks() {
+    if (!_presetsList.length) return;
+    var idx = _presetsList.findIndex(function(p) { return p.id === presetId; });
+    if (idx > 0) {
+      prevLink.href = '/webui/engine/' + engineType + '/presets/' + _presetsList[idx - 1].id + '/edit';
+      prevLink.style.display = 'inline-block';
+    } else {
+      prevLink.style.display = 'none';
+    }
+    if (idx >= 0 && idx < _presetsList.length - 1) {
+      nextLink.href = '/webui/engine/' + engineType + '/presets/' + _presetsList[idx + 1].id + '/edit';
+      nextLink.style.display = 'inline-block';
+    } else {
+      nextLink.style.display = 'none';
+    }
+  }
+
+  // --- Clone button ---
+  var cloneBtn = document.getElementById('preset-clone-btn');
+  if (cloneBtn) {
+    cloneBtn.addEventListener('click', function() {
+      var newName = prompt('Clone preset to new name:', currentName + ' (copy)');
+      if (!newName) return;
+      qrApi('/engine/' + engineType + '/presets/' + presetId + '/clone', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: newName})
+      }).then(function(data) {
+        if (data.status === 'ok') {
+          var newId = data.data && data.data.id;
+          alert('Preset cloned as "' + newName + '" (ID ' + (newId || '?') + ')');
+          if (newId) window.location.href = '/webui/engine/' + engineType + '/presets/' + newId + '/edit';
+        } else {
+          alert('Clone failed: ' + (data.message || 'Unknown'));
+        }
+      }).catch(function(e) { alert('Clone request failed: ' + e); });
+    });
+  }
+
   // HTML escaping helpers
   function escapeHtml(s) {
     var div = document.createElement('div');
@@ -219,7 +323,45 @@
         gpuSelect.value = currentGpuDevice;
         loadStatus.textContent = currentName + ' (ID #' + p.id + ') — ' + engineType;
 
-        // Populate model select — sort by name, display as "ID - Name"
+        // Set ctx_size dropdown from current env var
+        _currentCtxSize = currentEnv['LLAMA_ARG_CTX_SIZE'] || '';
+        if (_currentCtxSize) {
+          var presetFound = false;
+          var knownValues = ['4096','8192','32768','65536','131072','262144'];
+          for (var ci = 0; ci < knownValues.length; ci++) {
+            if (_currentCtxSize === knownValues[ci]) {
+              ctxPreset.value = _currentCtxSize;
+              presetFound = true;
+              break;
+            }
+          }
+          if (!presetFound) {
+            ctxPreset.value = '';  // Custom
+            ctxCustom.style.display = 'block';
+            ctxCustom.value = _currentCtxSize;
+            ctxHint.textContent = 'Custom: LLAMA_ARG_CTX_SIZE=' + _currentCtxSize;
+          } else {
+            ctxHint.textContent = 'Set LLAMA_ARG_CTX_SIZE=' + _currentCtxSize;
+          }
+        }
+
+        // Fetch presets list for prev/next navigation
+        qrApi('/engine/' + engineType + '/presets')
+          .then(function(pd) {
+            _presetsList = (pd.items || []).sort(function(a, b) { return a.id - b.id; });
+            updateNavLinks();
+          })
+          .catch(function() {});
+
+        // Helper: truncate model_path to 3 layers (e.g., "unsloth/folder/model.gguf")
+        function shortModelPath(p) {
+          if (!p) return '';
+          // Strip leading slashes, split by '/', take last 3 parts
+          var parts = p.replace(/^\/+/, '').split('/');
+          return parts.length > 3 ? parts.slice(-3).join('/') : p;
+        }
+
+        // Populate model select — sort by name, display as "ID - Path/Name (Quantization)"
         qrApi('/engine/' + engineType + '/models?include_inactive=false')
           .then(function(md) {
             var items = md.items || [];
@@ -231,7 +373,8 @@
               var tags = [];
               if (m.mmproj_path) tags.push('(+ mmproj)');
               if (m.draft_model_path) tags.push('(+ draft)');
-              opt.textContent = m.id + ' — ' + m.name + q + (tags.length ? ' ' + tags.join(' ') : '');
+              var sp = shortModelPath(m.model_path);
+              opt.textContent = m.id + ' — ' + (sp || m.name) + q + (tags.length ? ' ' + tags.join(' ') : '');
               modelSelect.appendChild(opt);
             });
             if (currentModelId) modelSelect.value = currentModelId;
@@ -516,6 +659,25 @@
 
   // Model selection
   modelSelect.addEventListener('change', selectModelInfo);
+
+  // Model search filter
+  var modelSearch = document.getElementById('model-search');
+  if (modelSearch) {
+    modelSearch.addEventListener('input', function() {
+      var q = this.value.toLowerCase().trim();
+      var opts = modelSelect.querySelectorAll('option');
+      var visibleCount = 0;
+      for (var i = 0; i < opts.length; i++) {
+        var txt = (opts[i].textContent || '').toLowerCase();
+        if (!q || txt.indexOf(q) >= 0) {
+          opts[i].style.display = '';
+          visibleCount++;
+        } else {
+          opts[i].style.display = 'none';
+        }
+      }
+    });
+  }
 
   // Form submission — build config_template from current state
   document.querySelector('#preset-form').addEventListener('submit', function(e) {

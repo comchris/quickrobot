@@ -18,8 +18,11 @@ Provides a simple connection factory that ensures WAL journal mode
 and a 5-second busy timeout on every connection.
 """
 
+import logging
 import os
 import sqlite3
+
+logger = logging.getLogger(__name__)
 
 
 def get_connection(db_path):
@@ -56,7 +59,8 @@ def close_connection(conn):
     if conn:
         try:
             conn.close()
-        except Exception:
+        except Exception as _e:
+            logger.debug("pool conn.close failed: %s", _e)
             pass
 
 

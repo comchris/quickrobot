@@ -1,6 +1,6 @@
 # @name: Start Service
 # @playbook_id: service_start
-# @version: 3
+# @version: 5
 # @timeout: 120
 # start.yml — Stop, start, and verify service is running.
 # Different health check strategy per engine type:
@@ -46,9 +46,36 @@
       register: _svc_active
       changed_when: false
 
+    - name: Capture crash logs on failed start
+      ansible.builtin.shell: |
+        journalctl -u "{{ unit_name }}" --no-pager -n 50 --output cat 2>&1 || echo "journalctl unavailable"
+      register: _crash_logs
+      changed_when: false
+      failed_when: false
+
+    - name: Verify draft model path (llama_server only)
+      ansible.builtin.stat:
+        path: "{{ LLAMA_ARG_SPEC_DRAFT_MODEL | default('', true) }}"
+      register: _draft_stat
+      when: engine_type == 'llama_server' and (LLAMA_ARG_SPEC_DRAFT_MODEL | default('', true) | length > 0)
+
+    - name: Report draft model status
+      ansible.builtin.debug:
+        msg: "draft_model: path={{ LLAMA_ARG_SPEC_DRAFT_MODEL | default('N/A', true) }}, exists={{ _draft_stat.stat.exists | default(false) }}"
+      when: engine_type == 'llama_server' and (LLAMA_ARG_SPEC_DRAFT_MODEL | default('', true) | length > 0)
+
+    - name: Warn if draft model file missing
+      ansible.builtin.debug:
+        msg: "WARNING: draft_model_path '{{ LLAMA_ARG_SPEC_DRAFT_MODEL }}' does not exist on remote node — service may fail to load speculative decoding"
+      when:
+        - engine_type == 'llama_server'
+        - (LLAMA_ARG_SPEC_DRAFT_MODEL | default('', true) | length > 0)
+        - (_draft_stat.stat.exists | default(false)) == false
+      failed_when: false
+
     - name: Fail if service died within initial check period
       fail:
-        msg: "Service {{ unit_name }} started but died — check logs (journalctl -u {{ unit_name }})"
+        msg: "Service {{ unit_name }} started but died — logs in task output (journalctl -u {{ unit_name }})"
       when: _svc_active.stdout != "active"
 
     - name: Report start status

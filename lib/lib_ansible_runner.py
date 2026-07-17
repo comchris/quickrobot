@@ -70,9 +70,8 @@ def _parse_playbook_timeout(playbook_path, default=QUICKROBOT_PLAYBOOK_TIMEOUT):
                     val = int(m.group(1))
                     if val > 0:
                         return val
-    except Exception:
-        logging.warning("Failed to read playbook timeout from %s", playbook_path)
-        pass
+    except Exception as exc:
+        logging.warning("Failed to read playbook timeout from %s: %s", playbook_path, exc)
     return default
 
 
@@ -143,17 +142,12 @@ def run_playbook(playbook_path, inventory_path=None, limit=None, extra_vars=None
     ]
     if limit:
         cmd.extend(["--limit", str(limit)])
-        # For localhost (ansible_connection=local), run as root since the ansible user
-        # may not have sudoers configured on the local machine. Check via node_id from
-        # extra_vars (set by _build_extra_vars) for robustness — falls back to string
-        # match "localhost" for legacy callers that don't pass node_id.
-        _target_node = (extra_vars or {}).get("node_id")
-        _is_localhost = _target_node == 1 if _target_node is not None else (limit == "localhost")
-        if _is_localhost:
-            # Use sudo -E to preserve environment variables (ANSIBLE_STDOUT_CALLBACK etc.)
-            # Without -E, sudo resets the env and ansible loses its JSON output config.
-            cmd.insert(0, "sudo")
-            cmd.insert(1, "-E")
+        # NOTE: Removed sudo -E wrapping for localhost (2026-07-14).
+        # Previously: ansible-playbook was wrapped with `sudo -E` for node_id=1,
+        # causing ALL tasks to run as root (cmake, git, shell commands all owned by root).
+        # Now: ansible-playbook runs natively — playbooks use their own `become` settings
+        # where needed (preflight_check.yml has become:yes, source_llama has become_user).
+        # Remote nodes unaffected — they use SSH + become via ansible_become_method.
 
     try:
         result = subprocess.run(
@@ -427,9 +421,8 @@ def validate_node(db_path, node_id):
                             entry = entry.strip()
                             if entry and "pid=" in entry:
                                 result["orphan_processes"].append(entry)
-            except Exception:
-                logging.warning("Failed to parse stale QR service string")
-                pass
+            except Exception as exc:
+                logging.warning("Failed to parse stale QR service string: %s", exc)
             return result
 
         def _parse_ips(raw):
@@ -563,8 +556,8 @@ def validate_node(db_path, node_id):
                       fs_free_gb,
                       node_id),
                 )
-        except Exception:
-            pass  # Non-critical — discovery data is best-effort
+        except Exception as exc:
+            logger.debug("validate_node: available_devices discovery failed for %s: %s", hostname, exc)
 
         log_ansible_action(db_path, "validate_node", node_id, None,
                            "node/validate.yml", {"node": hostname}, result)
@@ -639,9 +632,8 @@ def get_instance_logs(db_path, instance_id, lines=100):
                                {"stdout": logs, "returncode": result.returncode})
             return {"instance_name": instance_name, "node_name": node_name,
                     "logs": logs, "error": None}
-        except Exception:
-            logging.warning("Local journalctl failed for instance %s", instance_name)
-            pass
+        except Exception as exc:
+            logging.warning("Local journalctl failed for instance %s: %s", instance_name, exc)
 
     # Remote execution: need _execute_playbook from quickrobot
     from qr_api import _execute_playbook as _ep
@@ -722,8 +714,8 @@ def scan_models(playbook_id="scan_models_remote", engine_type_id=None, limit=Non
                 (engine_type_id,),
             ).fetchall()
             existing_data = {r["model_path"]: {"id": r["id"], "last_modified": r["last_modified"]} for r in rows}
-    except Exception:
-        pass  # Non-critical — proceed even if DB read fails
+    except Exception as exc:
+        logger.debug("scan_models_for_engine: existing model DB query failed: %s", exc)
 
     # Initialize counters outside try so they're always defined (for error path at bottom)
     new_count = 0
@@ -870,8 +862,8 @@ def scan_models(playbook_id="scan_models_remote", engine_type_id=None, limit=Non
                                     # Update last_modified in DB
                                     try:
                                         _um(db_path, row_id, last_modified=lm_iso)
-                                    except Exception:
-                                        logging.warning("Failed to update last_modified for model %s", fname)
+                                    except Exception as exc:
+                                        logging.warning("Failed to update last_modified for model %s: %s", fname, exc)
                                 # Check draft cross-ref validity
                                 _check_draft_refs_for_model(db_path, fp)
                                 continue
@@ -922,8 +914,8 @@ def scan_models(playbook_id="scan_models_remote", engine_type_id=None, limit=Non
                                     modified_model_ids.append(row_id)
                                     try:
                                         _um(db_path, row_id, last_modified=lm_iso)
-                                    except Exception:
-                                        logging.warning("Failed to update last_modified for model %s", fname)
+                                    except Exception as exc:
+                                        logging.warning("Failed to update last_modified for model %s: %s", fname, exc)
                                 _check_draft_refs_for_model(db_path, fp)
                                 continue
 
@@ -970,9 +962,8 @@ def scan_models(playbook_id="scan_models_remote", engine_type_id=None, limit=Non
                     if model is not None and model.get("_new"):
                         new_count += 1
                         new_model_ids.append(model.get("id"))
-                except Exception:
-                    logging.warning("Failed to insert single-shard model %s", fname)
-                    pass
+                except Exception as exc:
+                    logging.warning("Failed to insert single-shard model %s: %s", fname, exc)
             else:
                 def shard_sort_key(item):
                     fname = item[0]
@@ -990,8 +981,8 @@ def scan_models(playbook_id="scan_models_remote", engine_type_id=None, limit=Non
                     if model is not None and model.get("_new"):
                         new_count += 1
                         new_model_ids.append(model.get("id"))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logging.warning("Failed to insert shard model group: %s", exc)
 
       # Insert individual files
         for fname, fp, file_size, quant, mmproj_path, lm_iso in _individual_files:
@@ -1003,9 +994,8 @@ def scan_models(playbook_id="scan_models_remote", engine_type_id=None, limit=Non
                 if model is not None and model.get("_new"):
                     new_count += 1
                     new_model_ids.append(model.get("id"))
-            except Exception:
-                logging.warning("Failed to insert individual model %s", fname)
-                pass
+            except Exception as exc:
+                logging.warning("Failed to insert individual model %s: %s", fname, exc)
 
         # Detect missing models: DB entries not found on any scanned host
         if engine_type_id is not None and db_path and _all_discovered_paths:
@@ -1080,7 +1070,7 @@ def _check_draft_refs_for_model(db_path, model_path):
 
 
 def log_ansible_action(db_path, action_type, node_id, instance_id, playbook,
-                         params, result):
+                         params, result, parent_id=None, task_id=None):
     """Log an ansible playbook execution to the ansible_actions table.
 
     Always writes a minimal heartbeat record so every playbook run is visible
@@ -1097,6 +1087,9 @@ def log_ansible_action(db_path, action_type, node_id, instance_id, playbook,
         playbook: Playbook filename or path identifier.
         params: Dict of extra vars used (will be JSON-encoded).
         result: Parsed result dict from run_playbook() (changed, failed, results).
+        parent_id: Parent job id in log_entries (or None).
+        task_id: If provided, UPDATE existing task row instead of INSERT.
+                 Used by RUNNER-1 chain to merge ansible output into task rows.
 
     Returns:
          True if logged successfully, False otherwise.
@@ -1112,8 +1105,8 @@ def log_ansible_action(db_path, action_type, node_id, instance_id, playbook,
             _current = _qr._CONFIG.get("ansible_log_level", "errors")
         _level_order = {"errors": 0, "warnings": 1, "all": 2}
         _level_passes = _level_order.get(_current, 0) >= _level_order.get(_required, 2)
-    except Exception:
-        pass  # Gate is non-critical; default to level_passes=False (minimal logging)
+    except Exception as exc:
+        logger.debug("_should_log_playbook_action: log level comparison failed: %s", exc)
 
     import os as _os
     from datetime import datetime, timezone as _tz
@@ -1233,6 +1226,19 @@ def log_ansible_action(db_path, action_type, node_id, instance_id, playbook,
                     })
             return tasks
 
+        # Extract crash logs from service_start playbook (journalctl capture on fail)
+        def _extract_crash_logs(result_data):
+            """Extract journalctl output captured by service_start.yml crash diagnostic task."""
+            for play in result_data.get("plays", []):
+                for task in play.get("tasks", []):
+                    task_name = task.get("task", {}).get("name", "")
+                    if "Capture crash logs" in task_name or "journalctl" in task_name:
+                        for entry in task.get("results", []):
+                            stdout = entry.get("stdout", "") or ""
+                            if isinstance(stdout, str) and stdout.strip():
+                                return stdout.strip()[:2000]
+            return ""
+
         # Extract top-level error message from result dict (health checks, timeouts, etc.)
         def _extract_error_message(result_data):
             """Extract the most relevant error/reason from parsed Ansible result."""
@@ -1246,13 +1252,21 @@ def log_ansible_action(db_path, action_type, node_id, instance_id, playbook,
                             if isinstance(msg, dict):
                                 msg = json.dumps(msg)
                             if isinstance(msg, str) and msg.strip():
+                                # Append crash logs if available (service_start playbook)
+                                logs = _extract_crash_logs(result_data)
+                                if logs:
+                                    return f"{msg[:300]} | logs: {logs}"[:500]
                                 return msg[:500]
                             # Fallback: check stderr (cmake/git often write here)
                             err = entry.get("stderr", "") or ""
                             if isinstance(err, str) and err.strip():
                                 return err[:500]
                 # Fallback to result-level error
-                return result_data.get("error", "Action failed")[:500]
+                error = result_data.get("error", "Action failed")[:500]
+                logs = _extract_crash_logs(result_data)
+                if logs:
+                    return f"{error} | logs: {logs}"[:500]
+                return error
             # Health check / success case — look for "alive: false" or similar
             if result_data.get("alive") is False:
                 return result_data.get("error", "Service not responding")[:500]
@@ -1332,17 +1346,32 @@ def log_ansible_action(db_path, action_type, node_id, instance_id, playbook,
             if _error_reason:
                 details_dict["reason"] = _error_reason
             details_str = json.dumps(details_dict)
-            conn.execute(
-                 """INSERT INTO log_entries
-                    (parent_id, job_type, engine_type_name, instance_id, node_id, status, actor,
-                     error_message, created_at, started_at, finished_at, duration_ms,
-                     task_stage, stage_playbook, retry_count, max_retries,
-                     details_json, results_json, playbook_registry_id, playbook_version)
-                    VALUES (NULL, ?, NULL, ?, ?, ?, 'system',
-                            ?, ?, ?, ?, ?,
-                            ?, ?, 0, 1,
-                            ?, ?, ?, ?)""",
-                    (action_type, instance_id, node_id,
+
+            if task_id:
+                # UPDATE existing RUNNER-1 task row — merge ansible output into task record
+                # Do NOT overwrite task_stage or stage_playbook; only update results, status, timing
+                conn.execute(
+                    """UPDATE log_entries SET
+                       results_json=?, status=?, duration_ms=?, finished_at=?,
+                       error_message=?, details_json=?
+                     WHERE id=? AND parent_id IS NULL""",
+                    (json.dumps(results_data) if results_data else "",
+                     status_str, duration_ms if duration_ms and duration_ms > 0 else 0,
+                     finished_at, _error_reason or None, details_str, task_id),
+                )
+            else:
+                # INSERT new row (legacy paths without RUNNER-1 task context)
+                conn.execute(
+                    """INSERT INTO log_entries
+                       (parent_id, job_type, engine_type_name, instance_id, node_id, status, actor,
+                        error_message, created_at, started_at, finished_at, duration_ms,
+                        task_stage, stage_playbook, retry_count, max_retries,
+                        details_json, results_json, playbook_registry_id, playbook_version)
+                       VALUES (?, ?, NULL, ?, ?, ?, 'system',
+                               ?, ?, ?, ?, ?,
+                               ?, ?, 0, 1,
+                               ?, ?, ?, ?)""",
+                    (parent_id, action_type, instance_id, node_id,
                      status_str, _error_reason or None,
                      created_at, started_at, finished_at,
                      duration_ms if duration_ms and duration_ms > 0 else 0,
@@ -1350,7 +1379,7 @@ def log_ansible_action(db_path, action_type, node_id, instance_id, playbook,
                      details_str,
                      json.dumps(results_data) if results_data else "",
                      pb_registry_id, pb_version),
-            )
+                )
         return True
 
     except Exception as _e:

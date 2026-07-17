@@ -1,4 +1,8 @@
-<h1 style="margin:0;font-size:1.3em;">Edit Model: {{ model.name | default(model_id) }} (ID #{{ model.id | default(model_id) }})</h1>
+<div style="display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:8px;margin-bottom:8px;">
+  <a id="prev-model-link" href="#" class="btn btn-xs" style="text-decoration:none;display:none;">← Prev</a>
+  <h1 style="margin:0;font-size:1.3em;text-align:center;">Edit Model: {{ model.name | default(model_id) }} (ID #{{ model.id | default(model_id) }})</h1>
+  <a id="next-model-link" href="#" class="btn btn-xs" style="text-decoration:none;display:none;">Next →</a>
+</div>
 <form id="model-form" style="max-width:600px;">
   <div style="margin-bottom:12px;">
     <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Model Name</label>
@@ -227,5 +231,38 @@ alert('Error: ' + (data.message || 'Unknown'));
 }
 }).catch(function(e) { alert('Request failed: ' + e); });
   });
+
+  // --- Prev/Next model navigation ---
+  var _modelList = [];
+  var _currentModelId = {{ model_id }};
+
+  function updateModelNavLinks() {
+    var prevLink = document.getElementById('prev-model-link');
+    var nextLink = document.getElementById('next-model-link');
+    if (!prevLink || !nextLink) return;
+    var idx = _modelList.findIndex(function(m) { return m.id === _currentModelId; });
+    if (idx > 0) {
+      prevLink.href = '/webui/models/' + _modelList[idx - 1].id + '/edit';
+      prevLink.style.display = 'inline-block';
+    } else {
+      prevLink.style.display = 'none';
+    }
+    if (idx >= 0 && idx < _modelList.length - 1) {
+      nextLink.href = '/webui/models/' + _modelList[idx + 1].id + '/edit';
+      nextLink.style.display = 'inline-block';
+    } else {
+      nextLink.style.display = 'none';
+    }
+  }
+
+  // Fetch model list for navigation
+  qrApi('/models?include_inactive=true')
+    .then(function(data) {
+      if (data.status === 'ok' && data.items) {
+        _modelList = data.items.sort(function(a, b) { return a.id - b.id; });
+        updateModelNavLinks();
+      }
+    })
+    .catch(function() {});
 })();
 </script>

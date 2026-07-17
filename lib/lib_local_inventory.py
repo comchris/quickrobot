@@ -24,18 +24,31 @@ Output dict keys match validate.yml task output:
     fs_free_gb (float), available_devices (list)
 """
 
+import logging
 import subprocess as _subp
 
+from lib.lib_constants import QUICKROBOT_LOCAL_CMD_TIMEOUT
 
-def _run(cmd, default="", shell=True, timeout=10):
-    """Run a shell command and return trimmed stdout or default on failure."""
+logger = logging.getLogger(__name__)
+
+
+def _run(cmd, default="", shell=True, timeout=QUICKROBOT_LOCAL_CMD_TIMEOUT):
+    """Run a shell command and return trimmed stdout or default on failure.
+
+    Args:
+        cmd: Shell command string to execute.
+        default: Return value on failure (default: empty string).
+        shell: Pass command through shell (default: True).
+        timeout: Max seconds for command execution (default: 10s from config).
+    """
     try:
         r = _subp.run(
             cmd, capture_output=True, text=True, shell=shell, timeout=timeout,
         )
         out = (r.stdout or "").strip()
         return out if out else default
-    except Exception:
+    except Exception as _e:
+        logger.debug("_run failed for '%s': %s", cmd, _e)
         return default
 
 
@@ -143,6 +156,7 @@ def gather_local_hostname():
         import socket
         try:
             name = socket.gethostname()
-        except Exception:
+        except Exception as _e:
+            logger.debug("socket.gethostname failed: %s", _e)
             name = "localhost"
     return name

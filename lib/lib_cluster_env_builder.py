@@ -120,15 +120,20 @@ def _compute_tensor_split(server_split_raw, rpc_splits, has_explicit_device=Fals
 def _generate_expert_split_flags(inst, rpc_bindings, expert_config):
     """Generate -ot CLI flags from per-RPC expert-split configuration.
 
-    For each RPC with experts > 0, generates a -ot flag in the format:
-      -ot "PREFIX(indices).SUFFIX=RPC0[hostname:port]"
+    For each RPC with experts > 0, generates -ot flags based on mode:
+      A (stride)  — 1 flag per RPC, interleaved expert indices
+      B (block)   — 1 flag per RPC, contiguous index blocks
+      C (load-dist) — 1 flag per RPC, greedy distance-maximization
+      S (staggered) — 3 flags per RPC (up/gate/down), staggered indices
+      F (freeform) — uses stored index_pattern as literal -ot string
 
     CRITICAL: The "RPC0" in the -ot flag is a FIXED LITERAL, not a positional index.
     llama.cpp's -ot syntax uses RPC0 as the protocol role name for all entries.
     The actual target differentiation is done solely by hostname:port inside [].
     Do NOT use RPC1, RPC2, etc. — every entry must be RPC0[hostname:port].
 
-    The index pattern is generated based on mode (stride/block/freeform).
+    extra_ot_flags from expert_config are appended after mode-generated flags,
+    enabling manual -ot entries for attention layers or arbitrary device targeting.
 
     Args:
         inst: Instance dict from DB.
@@ -154,6 +159,8 @@ def _generate_expert_split_flags(inst, rpc_bindings, expert_config):
 
     flags = []
     total_experts = sum(int(b.get("experts") or 0) for b in rpc_bindings if int(b.get("experts") or 0) > 0)
+    # Count RPCs with experts for use by Mode S (round-robin sub-layer distribution).
+    # Cache here to avoid recomputing inside the per-RPC loop below.
     count_with_experts = len([r for r in rpc_bindings if int(r.get("experts") or 0) > 0])
 
     # Pre-compute expert-split indices for all RPCs (needed for modes that require global pool)
@@ -230,6 +237,40 @@ def _generate_expert_split_flags(inst, rpc_bindings, expert_config):
             # Uses pre-computed allocation which distributes indices across
             # the expert pool with distance-maximization for clean stride.
             indices = _expert_allocation.get(rpc_id, [])
+        elif rpc_mode == "s":
+            # Mode S (staggered): round-robin FFN sub-layer distribution across RPCs.
+            # Each RPC generates 3 -ot flags, one per FFN sub-layer (up/gate/down).
+            # Indices follow stride pattern with rotation based on RPC position:
+            #   up    → (idx - rpc_idx) % 3 == 0
+            #   gate  → (idx - rpc_idx - 2) % 3 == 0
+            #   down  → (idx - rpc_idx - 1) % 3 == 0
+            # This ensures each block's FFN layers are spread across different RPCs.
+
+            sub_layer_types = ["up", "gate", "down"]
+
+            for sl_idx, sub_type in enumerate(sub_layer_types):
+                # Determine which residue class this RPC handles for this sub-layer.
+                # up: target (rpc_idx % 3), gate: target ((rpc_idx + 2) % 3), down: target ((rpc_idx + 1) % 3)
+                target_mod = (sub_layer_types.index(sub_type) + idx) % count_with_experts if count_with_experts > 0 else 0
+
+                # Generate indices from the full expert pool with stride 3.
+                # Each sub-layer gets every Nth expert where N = total RPCs, starting at target_mod.
+                indices = [i for i in range(total_experts) if i % count_with_experts == target_mod] if count_with_experts > 0 else []
+
+                if skip_n_first > 0:
+                    indices = [x + skip_n_first for x in indices]
+
+                # Deduplicate and sort
+                indices = sorted(set(s for s in indices if s >= 0))
+                if not indices:
+                    continue
+
+                pattern_str = "|".join(str(x) for x in indices)
+                rpc_host = b.get("hostname", "")
+                rpc_port = b.get("port_assigned", "")
+                flag = f'-ot "{prefix}({pattern_str}).ffn_{sub_type}_exps.*=RPC0[{rpc_host}:{rpc_port}]"'
+                flags.append(flag)
+            continue  # Mode S handles its own flag generation above
 
         # Apply skip_n_first offset to indices (not applied to Mode F freeform patterns)
         if skip_n_first > 0 and rpc_mode != "f":
@@ -248,6 +289,12 @@ def _generate_expert_split_flags(inst, rpc_bindings, expert_config):
             pattern_str = "|".join(str(x) for x in indices)
             flag = f'-ot "{prefix}({pattern_str}).{suffix}=RPC0[{rpc_host}:{rpc_port}]"'
         flags.append(flag)
+
+    # Append extra_ot_flags if present (from config_override.expert_split.extra_ot_flags)
+    if expert_config.get("extra_ot_flags"):
+        for ef in expert_config["extra_ot_flags"]:
+            if isinstance(ef, str) and ef.strip():
+                flags.append(ef.strip())
 
     return flags
 
@@ -431,6 +478,16 @@ def build_llama_server_env(db_path, instance_id):
                     if alias in override_raw and override_raw[alias] is not None:
                         ov_env["qr_cluster_gpu_override"] = override_raw[alias]
             elif supports_models and has_flat:
+                # Build/engine config keys go into env — these are used directly by playbooks,
+                # not as model inference parameters. Without this, per-instance overrides for
+                # build keys (e.g., git_clone_url, node_build_run_cmd) would land in model
+                # section and fail to override the engine_default value from Layer 1.
+                _BUILD_KEYS = {
+                    "binary_path", "git_clone_url", "model_root_path", "node_build_dir",
+                    "node_build_install_depends", "node_build_run_cmd", "node_build_set_cmd",
+                    "node_git_pull_cmd", "node_src_dir", "restart_policy", "skip_build",
+                    "start_on_boot", "base_port",
+                }
                 # NOTE: qr_cluster_gpu_override goes into env — it's a GPU device name, not a file path.
                 # If it lands in model, _resolve_model_paths() post-cleanup will strip it out
                 # because "none" doesn't end with .gguf/.bin/.model.
@@ -440,7 +497,7 @@ def build_llama_server_env(db_path, instance_id):
                     # Normalize gpu_override/device aliases to canonical name for env
                     if k in ("gpu_override", "device"):
                         k = "qr_cluster_gpu_override"
-                    if k.startswith("LLAMA_ARG_") or k == "qr_cluster_gpu_override":
+                    if k.startswith("LLAMA_ARG_") or k == "qr_cluster_gpu_override" or k in _BUILD_KEYS:
                         ov_env[k] = v
                     else:
                         wrapped = _wrap_flat_as_model({k: v})
@@ -618,6 +675,13 @@ def build_llama_server_env(db_path, instance_id):
             if isinstance(nxt, str) and not nxt.startswith("-"):
                 _pairs.append((part, nxt))
                 i += 2
+            elif " " in part:
+                # Combined format flag: "--flag value" → split into (key, value).
+                # Handles mixed-format presets where some cli_opts are combined
+                # (single array element) while others are separate (two elements).
+                idx = part.index(" ")
+                _pairs.append((part[:idx], part[idx+1:]))
+                i += 1
             else:
                 _pairs.append((part, None))
                 i += 1
@@ -678,6 +742,11 @@ def build_llama_server_env(db_path, instance_id):
 
     # Get final merged result
     final_merged, _ = chain.get_merged()
+
+    # Override LLAMA_ARG_PORT from instance port_assigned so the env file
+    # reflects the actual allocated port instead of the engine_configs default.
+    if port:
+        final_merged["env"]["LLAMA_ARG_PORT"] = str(port)
 
     return {
         "env": final_merged["env"],
@@ -830,13 +899,20 @@ def build_rpc_server_env(db_path, instance_id):
                     if alias in override_raw and override_raw[alias] is not None:
                         ov_env["qr_cluster_gpu_override"] = override_raw[alias]
             elif has_flat:
+                # Build/engine config keys go into env — same exception list as llama_server builder.
+                _BUILD_KEYS = {
+                    "binary_path", "git_clone_url", "model_root_path", "node_build_dir",
+                    "node_build_install_depends", "node_build_run_cmd", "node_build_set_cmd",
+                    "node_git_pull_cmd", "node_src_dir", "restart_policy", "skip_build",
+                    "start_on_boot", "base_port",
+                }
                 ov_env = {}
                 ov_model = {}
                 for k, v in override_raw.items():
                     # Normalize gpu_override/device aliases to canonical name for env
                     if k in ("gpu_override", "device"):
                         k = "qr_cluster_gpu_override"
-                    if k.startswith("LLAMA_ARG_") or k == "qr_cluster_gpu_override":
+                    if k.startswith("LLAMA_ARG_") or k == "qr_cluster_gpu_override" or k in _BUILD_KEYS:
                         ov_env[k] = v
                     else:
                         wrapped = _wrap_flat_as_model({k: v})

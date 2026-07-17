@@ -127,7 +127,7 @@ for (var i = 0; i < items.length; i++) {
   }
 
        rows += '<td>' + p.id + '</td>' +
-               '<td><a class="row-link" href="/webui/iperf3/presets/' + p.id + '">' + p.name + '</a></td>' +
+               '<td><a class="row-link" href="/webui/iperf3/presets/' + p.id + '/edit">' + p.name + '</a></td>' +
                '<td class="age-cell" data-sort="' + (p.created_at || '') + '">' + (p.created_at || '-') + '</td>' +
                '<td>' + (p.category || '-') + '</td>' +
                '<td>' + tplCell + '</td>' +

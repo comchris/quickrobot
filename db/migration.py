@@ -12,26 +12,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""quickrobot (v0.08) — Migration runner with idempotent tracking.
+"""quickrobot (v0.09) — Migration runner with idempotent tracking.
 
-Base schema (008_base.sql) is the definitive schema definition — always
+Base schema (009_base.sql) is the definitive schema definition — always
 applied on startup, idempotent via CREATE TABLE IF NOT EXISTS.
 
+Consolidated from: 008_base.sql + migrations 009-012 (prompts system).
 Incremental migration files are tracked in applied_migrations table and
 only run when first encountered. No wildcard glob: filenames are explicit
 constants, not discovered at runtime.
 """
 
+import logging
 import os
+
+logger = logging.getLogger(__name__)
 
 
 # Explicit schema and migration file names — no wildcard discovery
-BASE_SCHEMA_FILE = "008_base.sql"
+BASE_SCHEMA_FILE = "009_base.sql"
 
 # Incremental migration files (applied only once, tracked in DB)
-# Add entries here when schema changes require migration.
+# Previous migrations 009-012 consolidated into 009_base.sql.
+# Add entries here when future schema changes require migration.
 INCREMENTAL_MIGRATIONS = [
-    # All previous migrations (007–013) consolidated into 008_base.sql
     # Add new entries here when future schema changes require migration.
 ]
 
@@ -42,7 +46,7 @@ def _ensure_migration_table(conn):
         CREATE TABLE IF NOT EXISTS applied_migrations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL UNIQUE,
-            applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now'))
+            applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         )
     """)
     conn.commit()
@@ -114,7 +118,8 @@ def run_migrations(db_path, migrations_dir="db/migrations"):
     # Check which incremental migrations are already recorded
     try:
         applied = get_applied_migrations(conn)
-    except Exception:
+    except Exception as _e:
+        logger.debug("applied migrations list failed, starting fresh: %s", _e)
         applied = set()
 
     applied_count = 0

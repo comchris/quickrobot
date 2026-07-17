@@ -1,10 +1,13 @@
--- db/migrations/008_base.sql
--- Consolidated base schema for quickrobot v0.08 (unified logging + health checks).
--- Created: 2026-07-10 by Design Agent
--- Replaces: 007_base.sql + 008_unified_logs.sql + 008b_bg_health_checks.sql
--- Changes from 007:
+-- db/migrations/009_base.sql
+-- Consolidated base schema for quickrobot v0.09
+-- Created: 2026-07-16 by Design Agent
+-- Merged from: 008_base.sql + migrations 009-012
+-- Includes: engine_prompts table with file-based storage pattern, skills registration
+-- Changes from 008:
 --   - Unified logging: log_entries replaces (jobs, tasks, ansible_actions, qr_actions, instance_logs)
 --   - BG health checks: scheduler_config table + health_check_enabled column on instances
+--   - Prompts: engine_prompts table with file-based storage (mirrors playbook_registry pattern)
+--   - Skills: SKILL.md + SKILL_MCP.md registered as system prompts
 
 PRAGMA foreign_keys = OFF;
 
@@ -290,39 +293,39 @@ CREATE TABLE engine_job_types (
 
 CREATE TABLE log_entries (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-    
+
     -- Hierarchy: NULL = job-header row, set for task sub-rows
     parent_id           INTEGER REFERENCES log_entries(id),
-    
+
     -- Identity
     job_type            TEXT,
     engine_type_name    TEXT,
-    
+
     -- Target references
     instance_id         INTEGER REFERENCES instances(id),
     node_id             INTEGER REFERENCES nodes(id),
-    
+
     -- Execution state
     status              TEXT NOT NULL DEFAULT 'running',
     actor               TEXT DEFAULT 'api',
     error_message       TEXT,
-    
+
     -- Timing
     created_at          TEXT NOT NULL,
     started_at          TEXT,
     finished_at         TEXT,
     duration_ms         INTEGER DEFAULT 0,
-    
+
     -- Task-level detail (NULL for job-header rows)
     task_stage          TEXT,
     stage_playbook      TEXT,
     retry_count         INTEGER DEFAULT 0,
     max_retries         INTEGER DEFAULT 1,
-    
+
     -- Rich output
     details_json        TEXT,
     results_json        TEXT,
-    
+
     -- Audit
     playbook_registry_id INTEGER,
     playbook_version    TEXT
@@ -390,6 +393,42 @@ CREATE TABLE playbook_runs (
 );
 
 -- =============================================================================
+-- PROMPTS / SKILLS — file-based storage (mirrors playbook_registry pattern)
+-- =============================================================================
+
+CREATE TABLE engine_prompts (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    prompt_id               TEXT    NOT NULL UNIQUE,
+    title                   TEXT    NOT NULL,
+    description             TEXT,
+    file_path               TEXT    DEFAULT NULL,
+    message_role            TEXT    DEFAULT 'usermessage'
+                                CHECK(message_role IN ('systemprompt', 'usermessage', 'assistant', 'skill')),
+    file_type               TEXT    DEFAULT 'custom'
+                                CHECK(file_type IN ('core', 'custom')),
+    prompt_type             TEXT    DEFAULT 'MCP'
+                                CHECK(prompt_type IN ('MCP', 'Benchmark', 'Magi')),
+    file_size               INTEGER DEFAULT 0,
+    checksum_sha256         TEXT,
+    version                 INTEGER DEFAULT 1,
+    tags                    TEXT    DEFAULT '',
+    arguments               TEXT    DEFAULT '[]',
+    usage_counter_since_update INTEGER DEFAULT 0,
+    error_counter_since_update   INTEGER DEFAULT 0,
+    created_at              TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at              TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Audit table for prompt version history
+CREATE TABLE IF NOT EXISTS prompt_versions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    prompt_id       TEXT    NOT NULL REFERENCES engine_prompts(prompt_id),
+    version         INTEGER NOT NULL,
+    content_snapshot_sha256 TEXT NOT NULL,
+    changed_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+-- =============================================================================
 -- INDEXES
 -- =============================================================================
 
@@ -423,3 +462,45 @@ CREATE INDEX idx_config_levels_instance ON config_levels(instance_id);
 CREATE INDEX idx_config_levels_level ON config_levels(level);
 CREATE INDEX idx_nodes_hostname ON nodes(hostname);
 CREATE INDEX idx_playbook_runs_task ON playbook_runs(task_id);
+
+-- Prompt indexes (from migrations 009-010)
+CREATE INDEX IF NOT EXISTS idx_prompts_prompt_id ON engine_prompts(prompt_id);
+CREATE INDEX IF NOT EXISTS idx_prompts_tags ON engine_prompts(tags);
+CREATE INDEX IF NOT EXISTS idx_prompts_message_role ON engine_prompts(message_role);
+CREATE INDEX IF NOT EXISTS idx_prompts_prompt_type ON engine_prompts(prompt_type);
+CREATE INDEX IF NOT EXISTS idx_prompt_versions_prompt_id ON prompt_versions(prompt_id);
+
+-- =============================================================================
+-- PROMPT SKILLS REGISTRATION (from migration 012)
+-- System-level skill files served as MCP resources
+-- =============================================================================
+
+INSERT OR REPLACE INTO engine_prompts (prompt_id, title, description, file_path, message_role, file_type, prompt_type, file_size, checksum_sha256, version, tags, arguments, usage_counter_since_update, error_counter_since_update, created_at, updated_at)
+VALUES (
+    'skill',
+    'Quickrobot API Usage Skill',
+    'Full API reference: endpoints, lifecycle, gotchas, benchmarks, cluster RPC',
+    'prompts/skill.md',
+    'systemprompt',
+    'core',
+    'MCP',
+    52492,
+    'e2cc15d777fa76ff980d238abd75eaf9375a06a198a55c2a61a3360a6428c28b',
+    1, '', '[]', 0, 0,
+    datetime('now'), datetime('now')
+);
+
+INSERT OR REPLACE INTO engine_prompts (prompt_id, title, description, file_path, message_role, file_type, prompt_type, file_size, checksum_sha256, version, tags, arguments, usage_counter_since_update, error_counter_since_update, created_at, updated_at)
+VALUES (
+    'skill_mcp',
+    'Quickrobot MCP Server Skill',
+    'MCP tool reference: categories, workflows, permissions, job/task system',
+    'prompts/skill_mcp.md',
+    'systemprompt',
+    'core',
+    'MCP',
+    12432,
+    '4525d09e1c0747233e398e9a51780004b013ba4d458992478144cb35151e2038',
+    1, '', '[]', 0, 0,
+    datetime('now'), datetime('now')
+);

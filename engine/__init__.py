@@ -21,7 +21,10 @@ list. Each engine package exports a CAPABILITIES dict at module level.
 
 import importlib
 import inspect
+import logging
 import os
+
+logger = logging.getLogger(__name__)
 
 
 # Global list of discovered engine classes
@@ -131,7 +134,8 @@ def _is_engine_enabled(engine_name, capabilities):
                 try:
                     from qr_api import _CONFIG
                     qr_env = _CONFIG.get("qr_env_config", {}) if isinstance(_CONFIG, dict) else {}
-                except Exception:
+                except Exception as _e:
+                    logger.debug("qr_env_config lookup failed for engine %s: %s", _canonical, _e)
                     pass
 
                 for key in (key_underscore, key_hyphen):
@@ -140,7 +144,8 @@ def _is_engine_enabled(engine_name, capabilities):
                         return str(val).lower() != "false"
                 break  # Found matching engine — check complete
 
-    except Exception:
+    except Exception as _e:
+        logger.debug("engine enable check failed for %s: %s", eng_name, _e)
         pass  # Any error → default to enabled
 
     return True  # No key set → enabled by default
@@ -239,7 +244,8 @@ def _auto_register_engines(db_path):
                         for key, val_desc in cap["config_defaults"].items():
                             value, desc = val_desc if isinstance(val_desc, tuple) else (val_desc, "")
                             _sec(db_path, fixed_id, key, value, desc)
-                    except Exception:
+                    except Exception as _e:
+                        logger.debug("config_defaults seeding for %s failed: %s", fixed_id, _e)
                         pass  # Non-critical — config seeding won't block engine registration
                 # Seed engine_job_types from CAPABILITIES["supported_jobs"]
                 if "supported_jobs" in cap and fixed_id:
@@ -253,7 +259,8 @@ def _auto_register_engines(db_path):
                                        VALUES (?, ?, ?, ?, 1, 1)""",
                                     (eng_name, job_type, job_type.title(), f"{job_type.title()} via {eng_name}"),
                                 )
-                    except Exception:
+                    except Exception as _e:
+                        logger.debug("engine_job_types seeding for %s failed: %s", eng_name, _e)
                         pass
             except Exception as exc:
                 print(f"Warning: failed to register engine '{eng_name}': {exc}")

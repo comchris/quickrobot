@@ -78,8 +78,8 @@ def delete_script(script_id):
 
     with pool(_CONFIG["db_path"]) as conn:
         conn.execute(
-            "UPDATE scripts SET status='cancelled', finished_at=strftime('%Y-%m-%dT%H:%M:%S','now'), "
-            "updated_at=strftime('%Y-%m-%dT%H:%M:%S','now') WHERE id=? AND status IN ('queued', 'running')",
+            "UPDATE scripts SET status='cancelled', finished_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'), "
+            "updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=? AND status IN ('queued', 'running')",
             (script_id,),
         )
 
@@ -113,8 +113,8 @@ def run_script(script_id):
             })
 
         conn.execute(
-            "UPDATE scripts SET status='running', started_at=strftime('%Y-%m-%dT%H:%M:%S','now'), "
-            "updated_at=strftime('%Y-%m-%dT%H:%M:%S','now') WHERE id=?", (script_id,)
+            "UPDATE scripts SET status='running', started_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'), "
+            "updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?", (script_id,)
         )
         conn.commit()
 

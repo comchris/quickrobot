@@ -17,6 +17,8 @@
 Functions: relative_age — convert ISO timestamp to relative age string.
 """
 
+import logging
+logger = logging.getLogger(__name__)
 
 def relative_age(iso_timestamp):
     """Convert an ISO 8601 timestamp to a relative age string.
@@ -66,5 +68,6 @@ def relative_age(iso_timestamp):
         else:
             weeks = total_seconds // 604800
             return f"{weeks}w ago"
-    except Exception:
+    except Exception as _e:
+        logger.debug("format_time_delta failed: %s", _e)
         return "unknown"

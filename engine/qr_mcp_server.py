@@ -41,11 +41,14 @@ _sys_path_0 = _sys.path[0] if _sys.path[0] else _os.getcwd()
 if _sys_path_0.endswith("/engine") or _sys_path_0.endswith("engine"):
     del _sys.path[0]
 
+import asyncio
 import json
+import logging
 import os
 import sys
-import asyncio
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 
@@ -124,7 +127,8 @@ def _api_call(method, path, body=None, timeout=None):
     Args:
         method: HTTP method (GET, POST, PUT, DELETE, PATCH)
         path: API path (relative to /api/v1)
-        body: JSON body for POST/PUT/PATCH
+        body: JSON object (dict) or pre-encoded JSON string for POST/PUT/PATCH.
+              If already a string, passed as raw data (no double-encoding).
         timeout: Request timeout in seconds. Defaults per method:
                  GET=30s | POST=60s | PUT=60s | DELETE=30s | PATCH=30s
                  Pass a lower value for fire-and-forget operations.
@@ -146,16 +150,23 @@ def _api_call(method, path, body=None, timeout=None):
     req_timeout = timeout if timeout is not None else _default_timeouts.get(method.upper(), 30)
 
     try:
+        # If body is already a JSON string, pass as raw data to avoid double-encoding.
+        # If body is a dict, let requests json= handle the encoding.
+        if isinstance(body, str):
+            _body_kw = {"data": body}
+        else:
+            _body_kw = {"json": body} if body else {}
+
         if method == "GET":
             r = _requests.get(url, headers=headers, timeout=req_timeout)
         elif method == "POST":
-            r = _requests.post(url, json=body, headers=headers, timeout=req_timeout)
+            r = _requests.post(url, headers=headers, timeout=req_timeout, **_body_kw)
         elif method == "PUT":
-            r = _requests.put(url, json=body, headers=headers, timeout=req_timeout)
+            r = _requests.put(url, headers=headers, timeout=req_timeout, **_body_kw)
         elif method == "DELETE":
             r = _requests.delete(url, headers=headers, timeout=req_timeout)
         elif method == "PATCH":
-            r = _requests.patch(url, json=body, headers=headers, timeout=req_timeout)
+            r = _requests.patch(url, headers=headers, timeout=req_timeout, **_body_kw)
         else:
             return json.dumps({"error": f"Unknown method: {method}"})
         if r.status_code >= 400:
@@ -198,7 +209,8 @@ if ALLOW_READS:
             id_set = set(str(i) for i in ids)
             filtered = [i for i in all_items if str(i.get("id", "")) in id_set]
             return json.dumps({"status": "ok", "total": len(filtered), "items": filtered})
-        except Exception:
+        except Exception as _e:
+            logger.debug("list_instances compact JSON parse failed: %s", _e)
             return raw
 
     @mcp.tool()
@@ -303,7 +315,8 @@ if ALLOW_READS:
                     "host_inactive": inst.get("_host_inactive", False),
                 })
             return json.dumps({"status": "ok", "total": len(compact), "items": compact})
-        except Exception:
+        except Exception as _e:
+            logger.debug("list_instances compact JSON parse failed: %s", _e)
             return raw
 
     @mcp.tool()
@@ -327,7 +340,8 @@ if ALLOW_READS:
                     "ping_state": node.get("ping_state"),
                 })
             return json.dumps({"status": "ok", "total": len(compact), "items": compact})
-        except Exception:
+        except Exception as _e:
+            logger.debug("list_nodes compact JSON parse failed: %s", _e)
             return raw
 
     @mcp.tool()
@@ -357,7 +371,8 @@ if ALLOW_READS:
                     "gpu_device": preset.get("gpu_device"),
                 })
             return json.dumps({"status": "ok", "total": len(compact), "items": compact})
-        except Exception:
+        except Exception as _e:
+            logger.debug("list_presets compact JSON parse failed: %s", _e)
             return raw
 
     @mcp.tool()
@@ -389,7 +404,8 @@ if ALLOW_READS:
                     "discovered": model.get("discovered", False),
                 })
             return json.dumps({"status": "ok", "total": len(compact), "items": compact})
-        except Exception:
+        except Exception as _e:
+            logger.debug("list_models compact JSON parse failed: %s", _e)
             return raw
 
     @mcp.tool()
@@ -440,7 +456,8 @@ if ALLOW_READS:
                     if rid not in seen_run_ids:
                         seen_run_ids.add(rid)
                         all_results.append(r)
-            except Exception:
+            except Exception as _e:
+                logger.debug("benchmark results dedup failed: %s", _e)
                 pass
         return json.dumps({"status": "ok", "total": len(all_results), "items": all_results})
 
@@ -502,7 +519,7 @@ if ALLOW_WRITES:
             body["config_override"] = config_override
         if skip_build is not None:
             body["skip_build"] = skip_build
-        return _api_call("POST", "/instances", body, timeout=3)
+        return _api_call("POST", "/instances", body, timeout=5)
 
     @mcp.tool()
     def deploy_instance(
@@ -532,7 +549,7 @@ if ALLOW_WRITES:
             body["start_after_deploy"] = True
         if skip_build is not None:
             body["skip_build"] = skip_build
-        return _api_call("POST", f"/instances/{instance_id}/deploy", body or None, timeout=3)
+        return _api_call("POST", f"/instances/{instance_id}/deploy", body or None, timeout=5)
 
     @mcp.tool()
     def start_instance(instance_id: int) -> str:
@@ -601,7 +618,7 @@ if ALLOW_WRITES:
         body = {"preset_id": preset_id}
         if not skip_build:
             body["skip_build"] = False
-        return _api_call("PUT", f"/instances/{instance_id}", body, timeout=3)
+        return _api_call("PUT", f"/instances/{instance_id}", body, timeout=5)
 
     @mcp.tool()
     def delete_instance(instance_id: int, force: bool = False) -> str:
@@ -614,8 +631,8 @@ if ALLOW_WRITES:
         """
         path = f"/instances/{instance_id}"
         if force:
-            return _api_call("POST", f"{path}/force-delete", timeout=3)
-        return _api_call("DELETE", path, timeout=3)
+            return _api_call("POST", f"{path}/force-delete", timeout=30)
+        return _api_call("DELETE", path, timeout=30)
 
     @mcp.tool()
     def create_node(
@@ -652,7 +669,7 @@ if ALLOW_WRITES:
             body["ipv4_address"] = ipv4_address
         if model_base_path is not None:
             body["model_base_path"] = model_base_path
-        return _api_call("POST", "/nodes", body, timeout=3)
+        return _api_call("POST", "/nodes", body, timeout=30)
 
     @mcp.tool()
     def delete_node(node_id: int, stop_running: bool = False) -> str:
@@ -671,8 +688,8 @@ if ALLOW_WRITES:
         """
         path = f"/nodes/{node_id}"
         if stop_running:
-            return _api_call("DELETE", f"{path}?stop_running=true", timeout=3)
-        return _api_call("DELETE", path, timeout=3)
+            return _api_call("DELETE", f"{path}?stop_running=true", timeout=30)
+        return _api_call("DELETE", path, timeout=30)
 
     @mcp.tool()
     def discover_node(node_id: int) -> str:
@@ -711,7 +728,7 @@ if ALLOW_WRITES:
         Pure DB update — bindings take effect on next deploy/restart from the
         herd page buttons (not automatically on this call).
 
-        Uses 10s timeout — fast DB update + RPC health check.
+        Fast (sub-1s) DB-only operation. RPC states verified at deploy/restart time.
 
         Args:
             instance_id: llama-server instance ID to bind to
@@ -757,12 +774,12 @@ if ALLOW_WRITES:
             # Engine-agnostic scan — requires node_id
             if node_id is None:
                 return json.dumps({"error": "node_id required when engine_type is empty (agnostic mode)"})
-            return _api_call("POST", "/models/scan", {"node": node_id}, timeout=3)
+            return _api_call("POST", "/models/scan", {"node": node_id}, timeout=15)
         # Engine-specific scan via playbook
         params = f"?engine_type={_et}"
         if node_id is not None:
             params += f"&node_id={node_id}"
-        return _api_call("POST", f"/engine/{_et}/models/scan{params}", timeout=3)
+        return _api_call("POST", f"/engine/{_et}/models/scan{params}", timeout=15)
 
 
 # ============================================================================
@@ -803,32 +820,32 @@ if ALLOW_PROXY:
 
 
 # ============================================================================
-# GLOBAL RESOURCES (always available in every mode, independent of read/write/proxy)
+# GLOBAL RESOURCES — Dynamic registration from engine_prompts table
+# SKILL.md and SKILL_MCP.md are no longer hardcoded; they are registered
+# dynamically from the DB at startup via _register_skill_resources().
+# See migration 012_skills_to_prompts.sql for DB entries.
 # ============================================================================
-
-@mcp.resource("file://SKILL.md")
-def get_skill_md() -> str:
-    """Quickrobot full API usage skill — endpoints, lifecycle, gotchas, benchmarks."""
-    try:
-        return Path("SKILL.md").read_text(encoding="utf-8")
-    except FileNotFoundError:
-        print("[mcp] SKILL.md not found at project root", file=sys.stderr)
-        return "# SKILL.md not found"
-
-
-@mcp.resource("file://SKILL_MCP.md")
-def get_skill_mcp_md() -> str:
-    """Quickrobot MCP server skill — tool categories, workflows, permissions."""
-    try:
-        return Path("SKILL_MCP.md").read_text(encoding="utf-8")
-    except FileNotFoundError:
-        print("[mcp] SKILL_MCP.md not found at project root", file=sys.stderr)
-        return "# SKILL_MCP.md not found"
 
 
 # ============================================================================
 # Main
 if __name__ == "__main__":
+    # Register MCP prompts (MCP-PROMPTS, 2026-07-12)
+    try:
+        from engine.qr_mcp_prompts import register_prompts as _register_prompts
+        _register_prompts(mcp)
+        print("[mcp] Prompts registered", flush=True)
+    except Exception as exc:
+        print(f"[mcp] Prompt registration skipped: {exc}", flush=True)
+
+    # Register skill resources from DB (SKILLS-MIGRATION, 2026-07-13)
+    try:
+        from engine.qr_mcp_prompts import register_skill_resources as _register_skill_resources
+        _register_skill_resources(mcp)
+        print("[mcp] Skill resources registered from DB", flush=True)
+    except Exception as exc:
+        print(f"[mcp] Skill resource registration skipped: {exc}", flush=True)
+
     # Root guard — refuse to run as root (non-interactive HTTP server)
     if _os.getuid() == 0:
         print("this robot won't run as root", file=_sys.stderr)
@@ -944,74 +961,10 @@ if __name__ == "__main__":
     )
     print(f"[mcp] Health check thread started (interval=10s, kill=10s)", flush=True)
 
-    # MCP server — dual transport: SSE (llama.cpp UI) + StreamableHTTP (opencode).
-    from starlette.applications import Starlette as _Starlette
-    from starlette.routing import Route as _Route, Mount as _Mount
-    from starlette.middleware.cors import CORSMiddleware as _CORSMiddleware
-    import uvicorn as _uvicorn
-
-    # Configure FastMCP for dual transport (json=False = SSE event format)
-    mcp.settings.json_response = False
-
-    # Create both transports using the SAME FastMCP instance.
-    # sse_app() has routes: /sse (Route), /messages (Mount)
-    # streamable_app() has route: /mcp (Route)
-    sse_app = mcp.sse_app()
-    streamable_app = mcp.streamable_http_app()
-
-    # Extract ALL route objects from both apps (Route and Mount).
-    # This merges the complete routing structure of both transports into one app.
-    all_routes: list[_Route | _Mount] = []
-    for r in sse_app.routes:
-        all_routes.append(r)
-    for r in streamable_app.routes:
-        all_routes.append(r)
-
-    http_app = _Starlette(routes=all_routes)
-
-    # Accept header normalization — browsers send Accept: */* by default,
-    # FastMCP rejects with 406. Ensure both application/json AND text/event-stream.
-    class _AcceptHeaderMiddleware:
-        def __init__(self, app):
-            self.app = app
-        async def __call__(self, scope, receive, send):
-            if scope.get("type") == "http":
-                headers = scope.get("headers")
-                accept_idx = next((i for i, (k, _) in enumerate(headers) if k == b"accept"), -1)
-                needs_fix = False
-                if accept_idx == -1:
-                    needs_fix = True
-                else:
-                    accept_val = headers[accept_idx][1].decode(errors="replace").lower()
-                    has_json = "application/json" in accept_val
-                    has_sse = "text/event-stream" in accept_val
-                    needs_fix = not (has_json and has_sse)
-                if needs_fix:
-                    if accept_idx >= 0:
-                        headers[accept_idx] = (b"accept", b"application/json, text/event-stream")
-                    else:
-                        headers.append((b"accept", b"application/json, text/event-stream"))
-            await self.app(scope, receive, send)
-
-    # Build middleware chain: Accept -> CORS -> dual-transport app
-    cors_app = _CORSMiddleware(
-        http_app,
-        allow_origins=cors_origins,
-        allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["*"],
-        allow_credentials=True,
-    )
-    http_app = _AcceptHeaderMiddleware(cors_app)
-
-    print(f"[mcp] CORS + Accept middleware chain built (sse + streamable_http)", flush=True)
-
-    print(f"[mcp] Dual transport: GET /sse=SSE(llama.cpp), POST /mcp=StreamableHTTP(opencode)", flush=True)
-    config = _uvicorn.Config(
-        http_app,
-        host=host,
-        port=port_val,
-        log_level="info",
-    )
-    server = _uvicorn.Server(config)
-    import anyio as _anyio
-    _anyio.run(server.serve)
+    # MCP server — SSE transport only (reverted from broken dual transport, 2026-07-14).
+    # The dual transport (sse_app + streamable_http mounted on custom Starlette)
+    # broke session management: initialize returns 202 "Accepted" but subsequent
+    # messages to the same session get "Could not find session".
+    # FastMCP.run(transport="sse") uses host/port from constructor, not run() args.
+    print(f"[mcp] Transport: SSE only (llama.cpp UI). Reverted 2026-07-14.", flush=True)
+    mcp.run(transport="sse")

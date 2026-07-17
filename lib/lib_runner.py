@@ -222,7 +222,8 @@ class PlaybookRunner:
                     ).fetchone()
                     pb_reg_id = registry_entry[0] if registry_entry else None
                     pb_ver = registry_entry[1] if registry_entry else None
-                except Exception:
+                except Exception as _e:
+                    logger.debug("playbook_registry lookup failed for %s: %s", s["playbook"], _e)
                     pb_reg_id = None
                     pb_ver = None
                 # Pre-compute SSOT extra_vars at creation time — avoids re-fetching
@@ -230,7 +231,8 @@ class PlaybookRunner:
                 try:
                     computed_vars = self._build_extra_vars(inst, s["stage"])
                     details_payload = {"playbook": s["playbook"], "extra_vars": computed_vars}
-                except Exception:
+                except Exception as _e:
+                    logger.debug("extra_vars build failed for stage %s: %s", s["stage"], _e)
                     details_payload = {"playbook": s["playbook"]}
                 cur = conn.execute(
                     """INSERT INTO log_entries
@@ -291,7 +293,8 @@ class PlaybookRunner:
                 ).fetchone()
                 hpb_reg_id = hpb[0] if hpb else None
                 hpb_ver = hpb[1] if hpb else None
-            except Exception:
+            except Exception as _e:
+                logger.debug("playbook_registry lookup for health_probe failed: %s", _e)
                 hpb_reg_id = None
                 hpb_ver = None
             conn.execute(
@@ -652,7 +655,8 @@ class PlaybookRunner:
                     (task_id, output_json),
                 )
                 conn.commit()
-        except Exception:
+        except Exception as _e:
+            logger.debug("playbook_runs save failed for task %d: %s", task_id, _e)
             pass
 
         # Update playbook_registry counters + log ansible_actions for runner chain
@@ -666,7 +670,8 @@ class PlaybookRunner:
                     increment_usage_counter(self.db_path, playbook_id)
                 else:
                     increment_error_counter(self.db_path, playbook_id)
-        except Exception:
+        except Exception as _e:
+            logger.debug("playbook counter update failed for %s: %s", playbook_id, _e)
             pass  # Non-critical — counters shouldn't break job lifecycle
 
         # Log to ansible_actions for WebUI Ansible Logs tab integration
@@ -704,6 +709,7 @@ class PlaybookRunner:
             _log_aa(
                 self.db_path, action_type, node_id, instance_id,
                 playbook_id or "", extra_vars or {}, result,
+                parent_id=job_id, task_id=task_id,
             )
         except Exception as _log_exc:
             logger.warning("[qr-runner] ansible_actions logging failed for task %d (%s): %s",
@@ -980,6 +986,34 @@ class PlaybookRunner:
             "WHERE id=? AND parent_id IS NULL", (job_id,)
         )
 
+        # HC-LOG-CLEANUP: When health_check_logging=false, remove successful health_check
+        # log entries from DB to prevent table bloat. Includes parent + all children
+        # (health_check task, ansible_execute sub-tasks, playbook_runs).
+        if job_type == QR_JOB_HEALTH_CHECK:
+            try:
+                hc_row = conn.execute(
+                    "SELECT value FROM engine_configs WHERE engine_type_id=4 AND key='health_check_logging'",
+                ).fetchone()
+                hc_off = hc_row and str(hc_row["value"]).lower() not in ("false", "0", "no")
+                if not hc_off:
+                    child_count = conn.execute(
+                        "SELECT COUNT(*) FROM log_entries WHERE parent_id=?", (job_id,),
+                    ).fetchone()[0]
+                    # Delete playbook_runs for these tasks
+                    conn.execute(
+                        "DELETE FROM playbook_runs WHERE task_id IN (SELECT id FROM log_entries WHERE parent_id=?)",
+                        (job_id,),
+                    )
+                    # Delete all child entries AND the parent job row
+                    conn.execute("DELETE FROM log_entries WHERE parent_id=?", (job_id,))
+                    conn.execute("DELETE FROM log_entries WHERE id=? AND parent_id IS NULL", (job_id,))
+                    logger.debug(
+                        "[qr-runner] HC-LOG-CLEANUP: removed job %d + %d child(ren) from log_entries",
+                        job_id, child_count,
+                    )
+            except Exception as exc:
+                logger.warning("[qr-runner] HC log cleanup failed for job %d: %s", job_id, exc)
+
         # Extract build_number from source stage output (deploy + rebuild)
         if job_type in (QR_JOB_DEPLOY, QR_JOB_REBUILD):
             try:
@@ -995,7 +1029,8 @@ class PlaybookRunner:
                             "UPDATE instances SET build_number=? WHERE id=?",
                             (bm.group(1), instance_id),
                         )
-            except Exception:
+            except Exception as _e:
+                logger.debug("build_number update failed for instance %d: %s", instance_id, _e)
                 pass  # Non-critical
 
     # ── Sync Chain (API Route Integration) ─────────────────────────
@@ -1046,7 +1081,8 @@ class PlaybookRunner:
             try:
                 from lib.lib_cluster_env_builder import rpc_binding_warnings as _rbw
                 rpc_warnings = _rbw(self.db_path, instance_id)
-            except Exception:
+            except Exception as _e:
+                logger.debug("rpc_binding_warnings failed for instance %d: %s", instance_id, _e)
                 pass
 
         result["warnings"] = rpc_warnings
@@ -1068,7 +1104,8 @@ class PlaybookRunner:
                 ):
                     unit_key = f"qr-{row['id']}-{row['engine_type_name']}"
                     self._current_uuid_map[unit_key] = row["instance_uuid"]
-        except Exception:
+        except Exception as _e:
+            logger.debug("uuid_preflight failed for instance %d: %s", instance_id, _e)
             pass  # Non-critical — proceed regardless
 
         # RUNNER-EIO-1: Verify scheduler is alive before pipeline work.
@@ -1092,7 +1129,8 @@ class PlaybookRunner:
                     print(f"[qr] Warning: stale scheduler restart failed: {_re}")
         except ImportError:
             pass  # psutil not available — skip check
-        except Exception:
+        except Exception as _e:
+            logger.debug("scheduler_alive_check failed: %s", _e)
             pass  # Non-critical — proceed regardless
 
         # Async mode: create job + tasks, update instance state, return immediately.
@@ -1246,22 +1284,22 @@ class PlaybookRunner:
                               le.status, le.error_message, le.started_at, le.finished_at,
                               le.retry_count, le.max_retries, le.created_at,
                               0 AS priority, i.node_id
-                       FROM log_entries le
-                       JOIN log_entries j ON le.parent_id = j.id
-                       JOIN instances i ON le.instance_id = i.id
-                       WHERE le.status = 'queued'
-                         AND NOT EXISTS (
-                             SELECT 1 FROM log_entries le2
-                             JOIN log_entries j2 ON le2.parent_id = j2.id
-                             JOIN instances i2 ON le2.instance_id = i2.id
-                             WHERE le2.status = 'running'
-                               AND i2.node_id = i.node_id
-                         )
-                       ORDER BY i.node_id ASC, le.created_at ASC
-                       LIMIT 1"""
+                        FROM log_entries le
+                        JOIN log_entries j ON le.parent_id = j.id
+                        JOIN instances i ON le.instance_id = i.id
+                        WHERE le.status = 'queued'
+                          AND NOT EXISTS (
+                              SELECT 1 FROM log_entries le2
+                              JOIN log_entries j2 ON le2.parent_id = j2.id
+                              WHERE le2.parent_id = j.id
+                                AND le2.status = 'running'
+                          )
+                        ORDER BY i.node_id ASC, le.created_at ASC
+                        LIMIT 1"""
                 ).fetchone()
                 return dict(row) if row else None
-            except Exception:
+            except Exception as _e:
+                logger.debug("playbook_runs insert failed, rolling back: %s", _e)
                 conn.rollback()
                 raise
 
@@ -1667,7 +1705,8 @@ class PlaybookRunner:
                     (instance.get("engine_type_id", 0),),
                 ).fetchall():
                     ec_rows[row["key"]] = row["value"] or ""
-        except Exception:
+        except Exception as _e:
+            logger.debug("engine_configs lookup failed for instance %d: %s", instance.get("id"), _e)
             pass
 
         # Resolve remote node user from node record (PRIO-1-A1)
@@ -1681,7 +1720,8 @@ class PlaybookRunner:
                 ).fetchone()
                 if row and row["ansible_user"]:
                     remote_user = row["ansible_user"]
-        except Exception:
+        except Exception as _e:
+            logger.debug("ansible_user lookup failed for node %d: %s", instance.get("node_id"), _e)
             pass
 
         # Service config — read from config_override (top-level or nested env) first, fall back to DB column
@@ -1718,25 +1758,41 @@ class PlaybookRunner:
             "start_on_boot": sob_bool,
             "restart_policy": config_override.get("restart_policy") or (config_override.get("env", {}) or {}).get("restart_policy") or "no",
             "start_after_deploy": instance.get("start_after_deploy", 0) != 0,
-            # Device / GPU
-            "device": instance.get("gpu_device") or ec_rows.get("qr_cluster_gpu_override", ""),
+            # Device / GPU — merged_env includes Layer 5 (per-instance override)
+            "device": instance.get("gpu_device") or (merged_env or {}).get("qr_cluster_gpu_override", "") or ec_rows.get("qr_cluster_gpu_override", ""),
             # Remote node user — resolved from node record (PRIO-1-A1)
             "remote_node_user": remote_user,
             "user": remote_user,       # alias for universal engine compatibility
             "ansible_user": remote_user, # alias for preflight/validate playbooks
             "model_path": instance.get("model_path", ""),
-            # Build source paths + cmake commands + git pull (engine_configs)
-            "node_src_dir": ec_rows.get("node_src_dir", "/opt/quickrobot/llama.cpp"),
-            "node_build_dir": ec_rows.get("node_build_dir", "/opt/quickrobot/llama.cpp/build"),
-            "node_build_set_cmd": ec_rows.get("node_build_set_cmd"),
-            "node_build_run_cmd": ec_rows.get("node_build_run_cmd"),
-            "node_git_pull_cmd": ec_rows.get("node_git_pull_cmd", "git pull origin main"),
-            "git_clone_url": ec_rows.get("git_clone_url", "https://github.com/ggml-org/llama.cpp.git"),
+            # Build source paths + cmake commands + git pull
+            # Use merged_env (Layer 1-5 merge including per-instance overrides) as primary source,
+            # fall back to ec_rows (engine_configs defaults) for keys not overridden at Layer 5.
+            "node_src_dir": (merged_env or {}).get("node_src_dir") or ec_rows.get("node_src_dir", "/opt/quickrobot/llama.cpp"),
+            "node_build_dir": (merged_env or {}).get("node_build_dir") or ec_rows.get("node_build_dir", "/opt/quickrobot/llama.cpp/build"),
+            "node_build_set_cmd": (merged_env or {}).get("node_build_set_cmd") or ec_rows.get("node_build_set_cmd"),
+            "node_build_run_cmd": (merged_env or {}).get("node_build_run_cmd") or ec_rows.get("node_build_run_cmd"),
+            "node_git_pull_cmd": (merged_env or {}).get("node_git_pull_cmd") or ec_rows.get("node_git_pull_cmd", "git pull origin main"),
+            "git_clone_url": (merged_env or {}).get("git_clone_url") or ec_rows.get("git_clone_url", "https://github.com/ggml-org/llama.cpp.git"),
             # Binary path — used in service templates for ExecStart
-            "binary_path": ec_rows.get("binary_path", ""),
+            "binary_path": (merged_env or {}).get("binary_path") or ec_rows.get("binary_path", ""),
             # Additional apt dependencies from engine_configs (install_deps stage)
-            "node_build_install_depends": ec_rows.get("node_build_install_depends"),
+            "node_build_install_depends": (merged_env or {}).get("node_build_install_depends") or ec_rows.get("node_build_install_depends"),
         }
+
+        # For non-cluster-engine types (iperf3, universal, subprocess) where
+        # merged_env is None: fall back to config_override for known build keys.
+        # This mirrors the _BUILD_KEYS routing fix in lib_cluster_env_builder.py
+        # so flat overrides work uniformly across all engine types.
+        _CFG_OV_BUILD_KEYS = {
+            "binary_path", "git_clone_url", "model_root_path", "node_build_dir",
+            "node_build_install_depends", "node_build_run_cmd", "node_build_set_cmd",
+            "node_git_pull_cmd", "node_src_dir", "restart_policy", "skip_build",
+            "start_on_boot", "base_port",
+        }
+        for _k in _CFG_OV_BUILD_KEYS:
+            if _k not in extra and _k in config_override:
+                extra[_k] = config_override[_k]
 
         # RPC health check stages override inventory_host, unit_name, rpc_id
         extra.update(rpc_vars)
@@ -1779,8 +1835,8 @@ class PlaybookRunner:
                 pb_timeout = header.get("timeout")
                 if pb_timeout and pb_timeout > 0:
                     return pb_timeout
-            except Exception:
-                pass  # Non-critical — fall through to SSOT defaults
+            except Exception as _e:
+                logger.debug("playbook header timeout parse failed: %s", _e)
 
         # Layer 2: SSOT constant fallback based on stage
         if stage == QR_STAGE_COMPILE:

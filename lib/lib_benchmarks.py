@@ -23,11 +23,14 @@ Module-level config:
 """
 
 import json
+import logging
 import time
 import threading
 import urllib.request as _urq
 import urllib.error as _ure
 from lib.qr_engine_ids import QR_DEFAULT_LOCALHOST
+
+logger = logging.getLogger(__name__)
 
 # Global configurable max timeout per benchmark run (seconds)
 BENCHMARK_MAX_TIMEOUT = 600
@@ -545,7 +548,8 @@ def _benchmark_thread(db_path, run_id, instance_id, prompt_id,
                             elif isinstance(val, str):
                                 output = val
                             break
-        except Exception:
+        except Exception as _e:
+            logger.debug("benchmark output extraction failed: %s", _e)
             output = str(data) if data else ""
 
         # Compute total duration
@@ -575,7 +579,8 @@ def _benchmark_thread(db_path, run_id, instance_id, prompt_id,
         # HTTP error — capture status code and body
         try:
             err_body = exc.read().decode("utf-8", errors="replace")
-        except Exception:
+        except Exception as _e:
+            logger.debug("HTTP error body read failed: %s", _e)
             err_body = str(exc)
         output = f"HTTP {exc.code}: {err_body[:2000]}"
         _write_failure(db_path, run_id, output, started_at, _time.time())
@@ -650,8 +655,8 @@ def _resolve_model_name(db_path, instance_id, node_hostname, port):
                 ).fetchone()
                 if mrow:
                     return mrow["name"]
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.debug("model name resolution failed for node=%s: %s", node_hostname, _e)
     return None
 
 
@@ -676,7 +681,8 @@ def _check_model_availability(node_hostname, port):
             if name:
                 models.append(name)
         return models
-    except Exception:
+    except Exception as _e:
+        logger.debug("model availability check failed for node=%s: %s", node_hostname, _e)
         return []
 
 

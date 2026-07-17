@@ -143,7 +143,7 @@
 </div>
 
 <table>
-<thead><tr><th class="sortable" data-col="0">ID</th><th class="sortable" data-col="1">Started</th><th class="sortable" data-col="2">Action</th><th class="sortable" data-col="3">Host</th><th class="sortable" data-col="4">Instance</th><th class="sortable" data-col="5" style="min-width:100px;">Status</th><th>Duration</th><th>Details</th></tr></thead>
+<thead><tr><th class="sortable" data-col="0">ID</th><th class="sortable" data-col="1">Started</th><th class="sortable" data-col="2">Action</th><th class="sortable" data-col="3">Host</th><th class="sortable" data-col="4">Instance</th><th class="sortable" data-col="5" style="min-width:100px;">Status</th><th class="sortable" data-col="6">Duration</th><th>Details</th></tr></thead>
 <tbody>
 {% for entry in qr_entries %}
 <tr class="{% if entry.status == 'running' %}task-running{% elif entry.status == 'stuck' %}task-stuck{% elif entry.status == 'failed' %}task-failed{% endif %}">

@@ -150,8 +150,8 @@ def override_system_instance_states(instances, config):
                     else:
                         # PID died — keep DB state (error/stopped), no uptime
                         pass
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("psutil process check failed for webui/mcp pid=%s: %s", pid, _e)
             # Fallback: if no valid PID or process_age_seconds, use API start time as estimate
             if not inst.get("process_age_seconds"):
                 inst["process_age_seconds"] = int(now_ts - start_time)
@@ -179,10 +179,10 @@ def override_system_instance_states(instances, config):
                                 else:
                                     # Recovery failed — keep error state
                                     pass
-                            except Exception:
-                                pass  # Non-fatal — health check will retry next cycle
-                except Exception:
-                    pass
+                            except Exception as _e:
+                                logger.debug("scheduler auto-recovery failed for inst=%d: %s", inst["id"], _e)
+                except Exception as _e:
+                    logger.debug("psutil scheduler check failed pid=%s: %s", pid, _e)
             else:
                 # No PID stored (cleared after death or never set) — scan process table
                 # for running scheduler processes to detect alive/dead state.
@@ -196,8 +196,8 @@ def override_system_instance_states(instances, config):
                         # No scheduler process found — mark error to reflect dead state
                         if inst.get("state") != "error":
                             inst["state"] = "error"
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("stale scheduler detection failed: %s", _e)
 
     return instances
 
@@ -278,8 +278,8 @@ def _track_playbook_usage(ref):
             pb = get_playbook_by_path(db_path, ref)
         if pb and pb.get("id"):
             increment_usage_counter(db_path, pb["id"])
-    except Exception:
-        pass  # Non-critical — don't break playbook flow
+    except Exception as _e:
+        logger.debug("_track_playbook_usage failed for ref=%s: %s", ref, _e)
 
 
 def _track_playbook_error(ref):
@@ -301,8 +301,8 @@ def _track_playbook_error(ref):
             pb = get_playbook_by_path(db_path, ref)
         if pb and pb.get("id"):
             increment_error_counter(db_path, pb["id"])
-    except Exception:
-        pass  # Non-critical — don't break playbook flow
+    except Exception as _e:
+        logger.debug("_track_playbook_error failed for ref=%s: %s", ref, _e)
 
 
 def _execute_playbook(resolver_ref, resolver_type="playbook_id", limit=None, extra_vars=None,
@@ -321,7 +321,7 @@ def _execute_playbook(resolver_ref, resolver_type="playbook_id", limit=None, ext
                        "file_path" (resolve by file existence check).
         limit: Host limit for playbook execution (e.g., 'dllama6.lan').
         extra_vars: Dict of extra variables to pass to the playbook.
-        timeout: Max seconds for playbook execution (default 3600).
+        timeout: Max seconds for playbook execution (default from config).
         inventory_data: Optional inventory data for ansible.
         node_id: Foreign key to nodes table (for ansible_actions logging).
         instance_id: Foreign key to instances table (for ansible_actions logging).
@@ -437,22 +437,23 @@ def _execute_playbook(resolver_ref, resolver_type="playbook_id", limit=None, ext
             checksum_status = "missing"
 
     # Resolve per-playbook timeout from YAML header comment (# @timeout: N)
-    _effective_timeout = timeout  # caller-provided (default 3600)
-    if playbook_path and timeout == 3600:
+    _default_timeout = timeout or QUICKROBOT_PLAYBOOK_TIMEOUT
+    _effective_timeout = _default_timeout
+    if playbook_path and _default_timeout == QUICKROBOT_PLAYBOOK_TIMEOUT:
         try:
-            _effective_timeout = _ppt(playbook_path, default=timeout)
+            _effective_timeout = _ppt(playbook_path, default=_default_timeout)
             from lib.lib_constants import QUICKROBOT_DEBUG_LEVEL
-            if QUICKROBOT_DEBUG_LEVEL >= 10 and _effective_timeout != 3600:
+            if QUICKROBOT_DEBUG_LEVEL >= 10 and _effective_timeout != _default_timeout:
                 print(f"[qr] playbook timeout override: {playbook_path} -> {_effective_timeout}s", flush=True)
-        except Exception:
-            pass  # Non-critical — fall back to caller timeout
+        except Exception as _e:
+            logger.debug("playbook timeout parse failed for %s: %s", playbook_path, _e)
 
     # Increment usage counter BEFORE execution
     try:
         ref_for_tracking = playbook_id or rel_path
         _track_playbook_usage(ref_for_tracking)
-    except Exception:
-        pass  # Non-critical
+    except Exception as _e:
+        logger.debug("_track_playbook_usage failed for ref=%s: %s", ref_for_tracking, _e)
 
     # Log starting action to ansible_actions (audit trail)
     if node_id is not None or instance_id is not None:
@@ -469,10 +470,10 @@ def _execute_playbook(resolver_ref, resolver_type="playbook_id", limit=None, ext
         try:
             from lib.lib_qr_actions import log_qr_task as _lqt
             _qr_task_id = _lqt(db_path, action_type, node_id=node_id,
-                               instance_id=instance_id,
-                               playbook_registry_id=pb_record.get("id") if pb_record else None)
-        except Exception:
-            pass  # Non-critical — task tracking failure shouldn't break execution
+                                instance_id=instance_id,
+                                playbook_registry_id=pb_record.get("id") if pb_record else None)
+        except Exception as _e:
+            logger.debug("log_qr_task failed for action=%s: %s", action_type, _e)
 
     # Execute the playbook
     try:
@@ -498,8 +499,8 @@ def _execute_playbook(resolver_ref, resolver_type="playbook_id", limit=None, ext
             try:
                 from lib.lib_qr_actions import update_qr_task as _uqt
                 _uqt(db_path, _qr_task_id, "completed" if not failed else "failed")
-            except Exception:
-                pass  # Non-critical
+            except Exception as _e:
+                logger.debug("update_qr_task failed for id=%d: %s", _qr_task_id, _e)
         return {"success": not failed, "failed": failed,
                 "playbook_id": playbook_id, "file_path": playbook_path,
                 "rel_path": rel_path, "checksum_status": checksum_status,
@@ -519,8 +520,8 @@ def _execute_playbook(resolver_ref, resolver_type="playbook_id", limit=None, ext
             try:
                 from lib.lib_qr_actions import update_qr_task as _uqt
                 _uqt(db_path, _qr_task_id, "failed", finished_at=None)
-            except Exception:
-                pass  # Non-critical
+            except Exception as _e:
+                logger.debug("update_qr_task (error path) failed for id=%d: %s", _qr_task_id, _e)
         return {"success": False, "failed": True,
                 "playbook_id": playbook_id, "file_path": playbook_path,
                 "rel_path": rel_path, "checksum_status": checksum_status,
@@ -549,8 +550,8 @@ def _get_keep_shared_build():
             if row and row[0]:
                 co = json.loads(row[0])
                 return bool(co.get("clean_build_on_last_instance", True))
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.debug("_get_keep_shared_build config lookup failed: %s", _e)
     return False
 
 
@@ -587,7 +588,8 @@ def _start_async_build(db_path, instance_id):
     # Resolve node hostname
     try:
         nd = get_node(db_path, node_id)
-    except Exception:
+    except Exception as _e:
+        logger.debug("node lookup failed in async build: inst=%d", instance_id, _e)
         nd = None
     if not nd:
         return {"success": False, "message": f"Node for instance {instance_id} not found"}
@@ -603,7 +605,8 @@ def _start_async_build(db_path, instance_id):
                     "SELECT node_build_state FROM nodes WHERE id = ?", (node_id,)
                 ).fetchone()
                 nd_state_val = nd_row[0] if nd_row else "idle"
-        except Exception:
+        except Exception as _e:
+            logger.debug("node build state query failed: node_id=%d", node_id, _e)
             nd_state_val = "idle"
 
         if nd_state_val == "running":
@@ -614,7 +617,8 @@ def _start_async_build(db_path, instance_id):
                         (node_id,) + tuple(BUILD_STATES) + (instance_id,),
                     ).fetchone()
                     other_name = f"#{other[0]} ({other[1]})" if other else "unknown"
-            except Exception:
+            except Exception as _e:
+                logger.debug("other instance query failed during build lock: node_id=%d", node_id, _e)
                 other_name = "unknown"
             from qr_api.lib_responses import error_response
             return error_response("NODE_BUSY", f"Node {hostname} building (instance {other_name})")
@@ -624,20 +628,20 @@ def _start_async_build(db_path, instance_id):
             with _pool(db_path) as conn3:
                 conn3.execute("UPDATE nodes SET node_build_state = 'running', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                                 (node_id,))
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("node build state update failed: node_id=%d", node_id, _e)
 
     # Transition state (SM-2 fix: use updating for running instances)
     if current_state == "running":
         try:
             _ts2(db_path, instance_id, "updating")
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("async build state transition to updating failed: inst=%d", instance_id, _e)
     else:
         try:
             _ts2(db_path, instance_id, "configuring")
-        except Exception:
-           pass
+        except Exception as _e:
+           logger.debug("async build state transition to configuring failed: inst=%d", instance_id, _e)
 
     def _build_task():
         """Background thread: run deploy playbook with timeout."""
@@ -653,7 +657,8 @@ def _start_async_build(db_path, instance_id):
                 def _gc_val(key, default=None):
                     entry = gc.get(key) or {}
                     return entry.get("value") or default
-            except Exception:
+            except Exception as _e:
+                logger.debug("engine config lookup failed during build: inst=%d", instance_id, _e)
                 gc = {}
 
             # Resolve restart_policy: instance-level > engine config > merged env > default 'no'
@@ -710,8 +715,8 @@ def _start_async_build(db_path, instance_id):
                 _log(db_path, instance_id, "async_build", "playbook_error", {"error": r["error"]})
                 try:
                     _ts2(db_path, instance_id, "build_error")
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("async build error state transition failed: inst=%d", instance_id, _e)
                 return
 
             result = r.get("result") or {}
@@ -721,8 +726,8 @@ def _start_async_build(db_path, instance_id):
                         {"error": str(result)})
                 try:
                     _ts2(db_path, instance_id, "build_error")
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("async build error state transition failed (failed result): inst=%d", instance_id, _e)
                 return
 
             # Extract commit hash from playbook results
@@ -747,50 +752,50 @@ def _start_async_build(db_path, instance_id):
                     with _pool(db_path) as conn4:
                         conn4.execute("UPDATE instances SET build_number=? WHERE id=?",
                                 (new_build, instance_id))
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("build number update failed: inst=%d", instance_id, _e)
 
             # Post-deploy state transitions (SM-2 fix)
             if current_state == "running":
                 try:
                     _ts2(db_path, instance_id, "deployed")
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("async build deployed transition failed (was running): inst=%d", instance_id, _e)
             else:
                 try:
                     _ts2(db_path, instance_id, "deploying")
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("async build deploying transition failed: inst=%d", instance_id, _e)
                 try:
                     _ts2(db_path, instance_id, "deployed")
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("async build deployed transition failed: inst=%d", instance_id, _e)
 
             # RPC engine has special start path
             if engine_type_name == QR_ENGINE_LLAMA_RPC_NAME:
                 try:
                     _ts2(db_path, instance_id, "starting")
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("async build RPC starting transition failed: inst=%d", instance_id, _e)
                 rpc_remote = _run_manage_action(instance_id, engine_type_name, node_id, "start")
                 if rpc_remote.get("success"):
                     try:
                         _ts2(db_path, instance_id, "running")
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        logger.debug("async build RPC running transition failed: inst=%d", instance_id, _e)
                 else:
                     _log(db_path, instance_id, "async_build", "failed_start",
                             {"rpc": rpc_remote})
                     try:
                         _ts2(db_path, instance_id, "build_error")
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        logger.debug("async build error transition (failed RPC start): inst=%d", instance_id, _e)
             elif inst.get("start_after_deploy", 0):
                 # Verify service started
                 try:
                     _ts2(db_path, instance_id, "starting")
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("async build starting transition failed (start_after_deploy): inst=%d", instance_id, _e)
                 port = inst.get("port_assigned", 0)
                 svc_ok = False
                 if engine_type_name == QR_ENGINE_LLAMA_SERVER_NAME and port:
@@ -799,8 +804,8 @@ def _start_async_build(db_path, instance_id):
                         with _urllib.urlopen(req, timeout=10) as resp:
                             if resp.status == 200:
                                 svc_ok = True
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        logger.debug("health check failed for inst=%d: %s", instance_id, _e)
                 else:
                     import subprocess as _sub3
                     unit_name = f"qr-{instance_id}-{engine_type_name}"
@@ -814,8 +819,8 @@ def _start_async_build(db_path, instance_id):
                         )
                         if "active" in (svc_check.stdout or "").lower():
                             svc_ok = True
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        logger.debug("ansible service check failed for inst=%d: %s", instance_id, _e)
                 if svc_ok:
                     _ts2(db_path, instance_id, "running")
                 else:
@@ -830,14 +835,14 @@ def _start_async_build(db_path, instance_id):
                     {"node": hostname, "timeout": 1800})
             try:
                 _ts2(db_path, instance_id, "build_error")
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("async build timeout error transition failed: inst=%d", instance_id, _e)
         except Exception as exc:
             _log(db_path, instance_id, "async_build", "exception", {"error": str(exc)})
             try:
                 _ts2(db_path, instance_id, "build_error")
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("async build exception error transition failed: inst=%d", instance_id, _e)
         finally:
             # Always reset node build state on completion
             try:
@@ -845,8 +850,8 @@ def _start_async_build(db_path, instance_id):
                     with _pool(db_path) as conn5:
                         conn5.execute("UPDATE nodes SET node_build_state = 'idle', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                                 (node_id,))
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("node build state reset failed on completion: node_id=%d", node_id, _e)
 
     # Start background thread
     t = threading.Thread(target=_build_task, daemon=True,
@@ -883,18 +888,18 @@ def _wait_for_stop_status(db_path, inst_id, max_wait=30):
                     try:
                         _ts2(db_path, inst_id, "stopped")
                         _log_action(db_path, inst_id, "stop", "success")
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        logger.debug("stop poll state transition failed: inst=%d", inst_id, _e)
                     return True
-        except Exception:
-            pass  # Best-effort polling
+        except Exception as _e:
+            logger.debug("stop poll iteration failed for inst=%d: %s", inst_id, _e)
         _time.sleep(2)
     # Timeout — force transition to stopped anyway
     try:
         _ts2(db_path, inst_id, "stopped")
         _log_action(db_path, inst_id, "stop", "success", detail={"timeout": True})
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.debug("stop timeout forced transition failed: inst=%d", inst_id, _e)
     return False
 
 
@@ -927,8 +932,8 @@ def _stop_system_managed(inst_id, engine_type_name, log_action_fn):
 
     try:
         _ts2(config["db_path"], inst_id, "stopping")
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.debug("stop state transition to stopping failed: inst=%d", inst_id, _e)
     try:
         if engine_type_name == QR_ENGINE_WEBUI_NAME:
             from engine.quickrobot_webui import QrWebuiEngine
@@ -938,23 +943,23 @@ def _stop_system_managed(inst_id, engine_type_name, log_action_fn):
                             detail={"system_managed": True, "engine": engine_type_name})
             try:
                 _ts2(config["db_path"], inst_id, "stopped")
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("stop state transition to stopped failed: inst=%d (webui)", inst_id, _e)
             try:
                 log_ansible_action(config["db_path"], "stop_instance", node_id, inst_id,
                         "webui (quickrobot-webui)", {"action": "stop", "engine_type": engine_type_name,
                                 "system_managed": True},
                         {"changed": True, "failed": False, "results": result})
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("stop log_ansible_action failed: inst=%d (webui)", inst_id, _e)
             return _success_single({"action": "stop", "instance_id": inst_id,
                                 "state": "stopped", "system_managed": True})
 
         elif engine_type_name == QR_ENGINE_API_NAME:
             try:
                 _ts2(config["db_path"], inst_id, "stopped")
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("stop state transition to stopped failed: inst=%d (api)", inst_id, _e)
             log_action_fn(config["db_path"], inst_id, "stop", "success",
                             detail={"system_managed": True, "engine": engine_type_name,
                                 "message": "Local service — state transition only"})
@@ -963,8 +968,8 @@ def _stop_system_managed(inst_id, engine_type_name, log_action_fn):
                         "local (quickrobot-api)", {"action": "stop", "engine_type": engine_type_name,
                                 "system_managed": True},
                         {"changed": False, "failed": False, "results": {"local_service": True}})
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("stop ansible log failed for inst=%d: %s", inst_id, _e)
             return _success_single({"action": "stop", "instance_id": inst_id,
                                 "state": "stopped", "system_managed": True,
                                 "message": "Local service — state transition only"})
@@ -977,17 +982,17 @@ def _stop_system_managed(inst_id, engine_type_name, log_action_fn):
                             detail={"system_managed": True, "engine": engine_type_name})
             try:
                 _ts2(config["db_path"], inst_id, "stopped")
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("stop state transition to stopped failed: inst=%d (mcp)", inst_id, _e)
             try:
                 log_ansible_action(config["db_path"], "stop_instance", node_id, inst_id,
                         "mcp (quickrobot-mcp)", {"action": "stop", "engine_type": engine_type_name,
                                 "system_managed": True},
                         {"changed": True, "failed": False, "results": result})
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("stop log_ansible_action failed: inst=%d (mcp)", inst_id, _e)
             return _success_single({"action": "stop", "instance_id": inst_id,
-                                 "state": "stopped", "system_managed": True})
+                                  "state": "stopped", "system_managed": True})
 
         elif engine_type_name == QR_ENGINE_SCHEDULER_NAME:
             from engine.quickrobot_scheduler import SchedulerEngine
@@ -998,15 +1003,15 @@ def _stop_system_managed(inst_id, engine_type_name, log_action_fn):
                             detail={"system_managed": True, "engine": engine_type_name})
             try:
                 _ts2(config["db_path"], inst_id, "stopped")
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("stop state transition to stopped failed: inst=%d (scheduler)", inst_id, _e)
             try:
                 log_ansible_action(config["db_path"], "stop_instance", node_id, inst_id,
                         "scheduler (quickrobot-scheduler)", {"action": "stop", "engine_type": engine_type_name,
                                 "system_managed": True},
                         {"changed": True, "failed": False, "results": result})
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("stop log_ansible_action failed: inst=%d (scheduler)", inst_id, _e)
             return _success_single({"action": "stop", "instance_id": inst_id,
                                 "state": "stopped", "system_managed": True})
 
@@ -1056,15 +1061,15 @@ def _restart_system_managed(inst_id, engine_type_name, log_action_fn):
                     _ts2(config["db_path"], inst_id, "starting")
                     _time.sleep(0.2)
                     _ts2(config["db_path"], inst_id, "running")
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("restart state transition failed: inst=%d (webui)", inst_id, _e)
                 try:
                     log_ansible_action(config["db_path"], "restart_instance", node_id, inst_id,
                             "webui (quickrobot-webui)", {"action": "restart", "engine_type": engine_type_name,
                                     "system_managed": True},
                             {"changed": True, "failed": False, "results": result})
-                except Exception:
-                    pass  # non-critical
+                except Exception as _e:
+                    logger.debug("restart log_ansible_action failed: inst=%d (webui)", inst_id, _e)
                 old_pid = result.get("old_pid")
                 pid_changed = result.get("pid_changed", True)
                 return _success_single({"action": "restart", "instance_id": inst_id,
@@ -1079,15 +1084,15 @@ def _restart_system_managed(inst_id, engine_type_name, log_action_fn):
                             "webui (quickrobot-webui)", {"action": "restart", "engine_type": engine_type_name,
                                     "system_managed": True},
                             {"changed": False, "failed": True, "results": {"error": str(exc)}})
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("restart error log failed: inst=%d (webui)", inst_id, _e)
             return _error_response("DEPLOYMENT_FAILED", f"Web UI restart failed: {exc}")
 
         elif engine_type_name == QR_ENGINE_API_NAME:
             try:
                 _ts2(config["db_path"], inst_id, "running")
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("restart state transition failed: inst=%d (api)", inst_id, _e)
             _update_log(config["db_path"], log_entry_id, "success",
                         detail={"system_managed": True, "engine": engine_type_name,
                                 "message": "quickrobot service reloads on next request"})
@@ -1096,8 +1101,8 @@ def _restart_system_managed(inst_id, engine_type_name, log_action_fn):
                         "local (quickrobot-api)", {"action": "restart", "engine_type": engine_type_name,
                                     "system_managed": True},
                             {"changed": False, "failed": False, "results": {"reloads_on_next_request": True}})
-            except Exception:
-                pass  # non-critical
+            except Exception as _e:
+                logger.debug("restart log_ansible_action failed: inst=%d (api)", inst_id, _e)
             return _success_single({"action": "restart", "instance_id": inst_id,
                                 "state": "running", "system_managed": True,
                                 "message": "quickrobot service will reload on next request"})
@@ -1117,15 +1122,15 @@ def _restart_system_managed(inst_id, engine_type_name, log_action_fn):
                 _ts2(config["db_path"], inst_id, "starting")
                 _time.sleep(0.2)
                 _ts2(config["db_path"], inst_id, "running")
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("restart state transition failed: inst=%d (mcp)", inst_id, _e)
             try:
                 log_ansible_action(config["db_path"], "restart_instance", node_id, inst_id,
                         "mcp (quickrobot-mcp)", {"action": "restart", "engine_type": engine_type_name,
                             "system_managed": True},
                         {"changed": True, "failed": False, "results": result})
-            except Exception:
-                pass  # non-critical
+            except Exception as _e:
+                logger.debug("restart log_ansible_action failed: inst=%d (mcp)", inst_id, _e)
             old_pid = result.get("old_pid")
             pid_changed = result.get("pid_changed", True)
             return _success_single({"action": "restart", "instance_id": inst_id,
@@ -1150,15 +1155,15 @@ def _restart_system_managed(inst_id, engine_type_name, log_action_fn):
                 _ts2(config["db_path"], inst_id, "starting")
                 _time.sleep(0.2)
                 _ts2(config["db_path"], inst_id, "running")
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("restart state transition failed: inst=%d (scheduler)", inst_id, _e)
             try:
                 log_ansible_action(config["db_path"], "restart_instance", node_id, inst_id,
                         "scheduler (quickrobot-scheduler)", {"action": "restart", "engine_type": engine_type_name,
                                 "system_managed": True},
                         {"changed": True, "failed": False, "results": result})
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("restart log_ansible_action failed: inst=%d (scheduler)", inst_id, _e)
             old_pid = result.get("old_pid")
             pid_changed = result.get("pid_changed", True)
             dead_verified = result.get("dead_verified")
@@ -1216,23 +1221,23 @@ def _start_system_managed(inst_id, engine_type_name, log_action_fn):
                         detail={"system_managed": True, "engine": engine_type_name})
             try:
                 _ts2(config["db_path"], inst_id, "running")
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("start state transition failed: inst=%d (webui)", inst_id, _e)
             try:
                 log_ansible_action(config["db_path"], "start_instance", node_id, inst_id,
                         "webui (quickrobot-webui)", {"action": "start", "engine_type": engine_type_name,
                             "system_managed": True},
                         {"changed": True, "failed": False, "results": result})
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("start log_ansible_action failed: inst=%d (webui)", inst_id, _e)
             return _success_single({"action": "start", "instance_id": inst_id,
                                 "state": "running", "system_managed": True})
 
         elif engine_type_name == QR_ENGINE_API_NAME:
             try:
                 _ts2(config["db_path"], inst_id, "running")
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("start state transition failed: inst=%d (api)", inst_id, _e)
             _update_log(config["db_path"], log_entry_id, "success",
                         detail={"system_managed": True, "engine": engine_type_name,
                             "message": "Already running (API server itself)"})
@@ -1241,8 +1246,8 @@ def _start_system_managed(inst_id, engine_type_name, log_action_fn):
                         "local (quickrobot-api)", {"action": "start", "engine_type": engine_type_name,
                                 "system_managed": True},
                         {"changed": False, "failed": False, "results": {"already_running": True}})
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("start log_ansible_action failed: inst=%d (api)", inst_id, _e)
             return _success_single({"action": "start", "instance_id": inst_id,
                                 "state": "running", "system_managed": True,
                                 "message": "Already running (API server itself)"})
@@ -1262,15 +1267,15 @@ def _start_system_managed(inst_id, engine_type_name, log_action_fn):
                         detail={"system_managed": True, "engine": engine_type_name})
             try:
                 _ts2(config["db_path"], inst_id, "running")
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("start state transition failed: inst=%d (mcp)", inst_id, _e)
             try:
                 log_ansible_action(config["db_path"], "start_instance", node_id, inst_id,
                         "mcp (quickrobot-mcp)", {"action": "start", "engine_type": engine_type_name,
                             "system_managed": True},
                         {"changed": True, "failed": False, "results": result})
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("start log_ansible_action failed: inst=%d (mcp)", inst_id, _e)
             return _success_single({"action": "start", "instance_id": inst_id,
                                 "state": "running", "system_managed": True})
 
@@ -1289,15 +1294,15 @@ def _start_system_managed(inst_id, engine_type_name, log_action_fn):
                         detail={"system_managed": True, "engine": engine_type_name})
             try:
                 _ts2(config["db_path"], inst_id, "running")
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("start state transition failed: inst=%d (scheduler)", inst_id, _e)
             try:
                 log_ansible_action(config["db_path"], "start_instance", node_id, inst_id,
                         "scheduler (quickrobot-scheduler)", {"action": "start", "engine_type": engine_type_name,
                                 "system_managed": True},
                         {"changed": True, "failed": False, "results": result})
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("start log_ansible_action failed: inst=%d (scheduler)", inst_id, _e)
             return _success_single({"action": "start", "instance_id": inst_id,
                                 "state": "running", "system_managed": True})
 
@@ -1359,8 +1364,8 @@ def _run_manage_action(inst_id, engine_type_name, node_id, action):
     try:
         log_ansible_action(config["db_path"], f"{action}_instance", node_id, inst_id,
                             "manage_instance.yml", {"action": action, "engine_type": engine_type_name}, result)
-    except Exception:
-        pass  # Non-critical — logging failure doesn't break manage action
+    except Exception as _e:
+        logger.debug("manage_instance ansible log failed (action=%s): %s", action, _e)
 
     # Extract service status from playbook results for better error reporting
     svc_status = None
@@ -1418,8 +1423,8 @@ def _run_iperf3_client(inst_id, engine_type_name, node_id, inv_hostname):
         # Transition to starting state while running
         try:
             _ts2(config["db_path"], inst_id, "starting")
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("iperf3 client state transition failed for inst=%d: %s", inst_id, _e)
 
         # Poll until the service exits (one-shot run)
         start_wait = _time.time()
@@ -1449,7 +1454,8 @@ def _run_iperf3_client(inst_id, engine_type_name, node_id, inv_hostname):
                     exit_ok = True
                     break
 
-            except Exception:
+            except Exception as _e:
+                logger.debug("iperf3 status check failed for inst=%d: %s", inst_id, _e)
                 continue  # Poll failure, try again
 
         if not exit_ok:
@@ -1468,7 +1474,8 @@ def _run_iperf3_client(inst_id, engine_type_name, node_id, inv_hostname):
         try:
             log_proc = _sub.run(ssh_cmd, capture_output=True, text=True, timeout=15)
             client_log = (log_proc.stdout or "(no log available)").strip()
-        except Exception:
+        except Exception as _e:
+            logger.debug("iperf3 ssh log retrieval failed for inst=%d: %s", inst_id, _e)
             client_log = "(unable to retrieve log)"
 
         # Parse iperf3 log output for throughput results
@@ -1477,8 +1484,8 @@ def _run_iperf3_client(inst_id, engine_type_name, node_id, inv_hostname):
         # Transition to deployed (client ran once and finished)
         try:
             _ts2(config["db_path"], inst_id, "deployed")
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("iperf3 client deployed transition failed for inst=%d: %s", inst_id, _e)
 
         _log(config["db_path"], inst_id, "client_run", "success",
                     detail={"sent_mbits": parsed.get("sent_mbits"),
@@ -1740,7 +1747,8 @@ def _get_node_build_state(db_path, node_id):
                 "SELECT node_build_state FROM nodes WHERE id = ?", (node_id,)
             ).fetchone()
             return row[0] if row and row[0] else "idle"
-    except Exception:
+    except Exception as _e:
+        logger.debug("get_node_build_state failed for node_id=%d: %s", node_id, _e)
         return "idle"
 
 

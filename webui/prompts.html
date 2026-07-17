@@ -1,0 +1,227 @@
+<!-- Single row header with controls and filters -->
+<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
+  <h1 style="margin:0;font-size:1.3em;">Prompts</h1>
+  <span id="prompt-count" style="display:inline-block;padding:2px 8px;background:#555;color:#fff;border-radius:10px;font-size:0.75em;font-weight:normal;"></span>
+  <form method="get" action="/webui/prompts" id="filter-form" style="display:flex;gap:8px;align-items:center;margin:0;">
+    <label style="font-size:0.85em;color:#666;">Type:</label>
+    <select name="prompt_type" id="filter-prompt-type" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+      <option value="">All</option>
+      <option value="MCP" {% if filter_type == 'MCP' %}selected="selected"{% endif %}>MCP</option>
+      <option value="Benchmark" {% if filter_type == 'Benchmark' %}selected="selected"{% endif %}>Benchmark</option>
+      <option value="Magi" {% if filter_type == 'Magi' %}selected="selected"{% endif %}>Magi</option>
+    </select>
+
+    <label style="font-size:0.85em;color:#666;">Role:</label>
+    <select name="message_role" id="filter-role" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+      <option value="">All</option>
+      <option value="systemprompt" {% if filter_role == 'systemprompt' %}selected="selected"{% endif %}>systemprompt</option>
+      <option value="usermessage" {% if filter_role == 'usermessage' %}selected="selected"{% endif %}>usermessage</option>
+      <option value="assistant" {% if filter_role == 'assistant' %}selected="selected"{% endif %}>assistant</option>
+      <option value="skill" {% if filter_role == 'skill' %}selected="selected"{% endif %}>skill</option>
+    </select>
+
+    <label style="font-size:0.85em;color:#666;">Search:</label>
+    <input type="text" name="search" id="filter-search" value="{{ filter_search }}" placeholder="Filter by ID, title, description..." style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;width:200px;" />
+
+    <button type="button" id="apply-refresh-btn" class="btn btn-primary" style="padding:4px 10px;font-size:0.85em;">Apply &amp; Refresh</button>
+    <button type="button" id="check-all-btn" class="btn btn-success" style="padding:4px 10px;font-size:0.85em;" title="Compute SHA-256 for all listed prompts and flag mismatches">&#9881; Check All</button>
+    {% if filter_type or filter_search or filter_role %}
+    <a href="/webui/prompts" class="btn" style="padding:4px 10px;font-size:0.85em;text-decoration:none;background:#999;color:#fff;">Clear</a>
+    {% endif %}
+  </form>
+  <div style="display:flex;gap:6px;align-items:center;margin-left:auto;">
+    <button id="create-new-btn" class="btn btn-primary" style="font-size:0.85em;padding:4px 10px;" onclick="window.location.href='/webui/prompts/new'">+ New</button>
+    <button id="reset-counters-btn" class="btn btn-danger" style="font-size:0.85em;padding:4px 10px;">Reset Counts</button>
+    <span id="reset-status" style="font-size:0.8em;color:#666;"></span>
+  </div>
+</div>
+
+<table>
+<thead><tr>
+  <th class="sortable" data-col="0">ID</th>
+  <th class="sortable" data-col="1">Prompt ID</th>
+  <th class="sortable" data-col="2">Title</th>
+  <th class="sortable" data-col="3">Role</th>
+  <th class="sortable" data-col="4">Type</th>
+  <th class="sortable" data-col="5">Ver</th>
+  <th class="sortable" data-col="6">Use</th>
+  <th class="sortable" data-col="7">Err</th>
+  <th class="sortable" data-col="8">Age</th>
+  <th class="sortable" data-col="9">Status</th>
+  <th class="sortable" data-col="10">Size</th>
+  <th class="sortable" data-col="11">File Path</th>
+</tr></thead>
+<tbody id="prompt-table-body">
+{% for prompt in prompts %}
+<tr data-prompt-id="{{ prompt.prompt_id }}">
+  <td>{{ prompt.id }}</td>
+  <td><a href="/webui/prompts/{{ prompt.id }}">{{ prompt.prompt_id }}</a></td>
+  <td>{{ prompt.title }}</td>
+  <td><span class="badge {% if prompt.message_role == 'systemprompt' %}badge-warning{% elif prompt.message_role == 'usermessage' %}badge-info{% else %}badge-secondary{% endif %}">{{ prompt.message_role }}</span></td>
+  <td><span class="badge {% if prompt.prompt_type == 'MCP' %}badge-primary{% elif prompt.prompt_type == 'Benchmark' %}badge-success{% else %}badge-secondary{% endif %}">{{ prompt.prompt_type }}</span></td>
+  <td>{{ prompt.version or '?' }}</td>
+  <td>{{ prompt.usage_counter_since_update or 0 }}</td>
+  <td>{{ prompt.error_counter_since_update or 0 }}</td>
+  <td>{{ prompt.age_created or '?' }}</td>
+  <td class="status-cell" data-checksum="{{ prompt.checksum_sha256 or '' }}" data-prompt-id="{{ prompt.prompt_id }}">
+    <span class="status-indicator">&#9642;</span> <span class="status-text">checking...</span>
+  </td>
+  <td>{{ formatBytes(prompt.file_size or 0) }} <span class="size-status" data-db-size="{{ prompt.file_size or 0 }}" data-prompt-id="{{ prompt.prompt_id }}">&#9645;</span></td>
+  <td><code>{{ prompt.file_path or '' }}</code></td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+
+<script>
+// Prompt list page JS — Check All verification, table sorting, filtering
+
+// Async function to check a single prompt's checksum.
+// Compares DB-registered checksum (from row) against disk content hash.
+async function checkPromptChecksum(row) {
+    const promptId = row.getAttribute('data-prompt-id');
+    const dbChecksum = row.querySelector('.status-cell').getAttribute('data-checksum') || '';
+    const statusCell = row.querySelector('.status-cell');
+    
+    if (!dbChecksum) {
+        statusCell.innerHTML = '<span style="color:gray;">&#9645;</span> no checksum';
+        return;
+    }
+    
+    try {
+        // Read current content from disk (via API endpoint)
+        const resp = await qrApi('/prompts/' + encodeURIComponent(promptId) + '/content', {}, true);
+        if (resp.status === 'ok') {
+            const content = resp.data.content;
+            
+            // Compute SHA-256 of disk content in browser
+            const encoder = new TextEncoder();
+            const hashBuffer = await crypto.subtle.digest('SHA-256', encoder.encode(content));
+            const hashArray = Array.from(new Uint8Array(hashBuffer));
+            const actual = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+            
+            if (dbChecksum === actual) {
+                statusCell.innerHTML = '<span style="color:green;">&#10004;</span> match';
+            } else {
+                statusCell.innerHTML = '<span style="color:orange;">&#9888;</span> mismatch';
+            }
+        } else {
+            statusCell.innerHTML = '<span style="color:red;">&#10008;</span> error';
+        }
+    } catch (e) {
+        statusCell.innerHTML = '<span style="color:red;">&#10008;</span> ' + e.message;
+    }
+}
+
+// Async function to check a single prompt's file size.
+// Compares DB-registered file_size against actual disk file size.
+async function checkFileSize(row) {
+    const dbSize = parseInt(row.querySelector('.size-status').getAttribute('data-db-size') || '0');
+    const sizeEl = row.querySelector('.size-status');
+    const promptId = row.getAttribute('data-prompt-id');
+    
+    if (!dbSize) {
+        sizeEl.textContent = ' ?';
+        return;
+    }
+    
+    try {
+        // Get actual file size from content endpoint
+        const resp = await qrApi('/prompts/' + encodeURIComponent(promptId) + '/content', {}, true);
+        if (resp.status === 'ok') {
+            const actualSize = resp.data.actual_file_size;
+            if (dbSize === actualSize) {
+                sizeEl.textContent = ' ✓';
+                sizeEl.style.color = 'green';
+            } else {
+                sizeEl.textContent = ` ${actualSize}B`;
+                sizeEl.style.color = 'orange';
+            }
+        } else {
+            sizeEl.textContent = ' ✗';
+            sizeEl.style.color = 'red';
+        }
+    } catch (e) {
+        sizeEl.textContent = ' ✗';
+        sizeEl.style.color = 'red';
+    }
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    const tbody = document.getElementById('prompt-table-body');
+    if (!tbody) return;
+
+    const rows = tbody.querySelectorAll('tr[data-prompt-id]');
+    const countEl = document.getElementById('prompt-count');
+    if (countEl) countEl.textContent = `(${rows.length})`;
+
+    // Auto-check all prompt checksums and file sizes on page load
+    for (const row of rows) {
+        checkPromptChecksum(row);
+        checkFileSize(row);
+    }
+
+    // Check All — verify checksums for all listed prompts (manual trigger)
+    document.getElementById('check-all-btn').addEventListener('click', async function() {
+        const btn = this;
+        btn.disabled = true;
+        btn.textContent = 'Re-checking...';
+        
+        let checked = 0, matched = 0, failed = 0;
+        
+        for (const row of rows) {
+            await checkPromptChecksum(row);
+            const statusText = row.querySelector('.status-text')?.textContent || '';
+            if (statusText.includes('match')) matched++;
+            if (statusText.includes('mismatch') || statusText.includes('error')) failed++;
+            checked++;
+        }
+        
+        btn.textContent = `Checked ${checked}: ${matched} ok, ${failed} fail`;
+        setTimeout(() => { btn.disabled = false; btn.textContent = '\u2699\ufe0f Check All'; }, 3000);
+    });
+
+    // Reset counters button
+    document.getElementById('reset-counters-btn').addEventListener('click', async function() {
+        const btn = this;
+        const status = document.getElementById('reset-status');
+        btn.disabled = true;
+        btn.textContent = 'Resetting...';
+        
+        try {
+            const resp = await qrApi('/prompts/reset-counters', {}, true);
+            if (resp.status === 'ok') {
+                status.textContent = `Reset ${resp.data.reset_count || 0} counters`;
+                // Reload to refresh display
+                setTimeout(() => location.reload(), 500);
+            } else {
+                status.textContent = 'Failed: ' + (resp.message || 'unknown error');
+            }
+        } catch (e) {
+            status.textContent = 'Error: ' + e.message;
+        }
+        
+        btn.disabled = false;
+        btn.textContent = 'Reset Counts';
+    });
+
+    // Search/refresh button
+    document.getElementById('apply-refresh-btn').addEventListener('click', function() {
+        const type = document.getElementById('filter-prompt-type').value;
+        const role = document.getElementById('filter-role').value;
+        const search = document.getElementById('filter-search').value;
+        
+        const params = new URLSearchParams();
+        if (type) params.set('prompt_type', type);
+        if (role) params.set('message_role', role);
+        if (search) params.set('search', search);
+        
+        window.location.href = '/webui/prompts' + (params.toString() ? '?' + params.toString() : '');
+    });
+
+    // Init sortable tables for this page
+    if (typeof qrSettings !== 'undefined') {
+        sortTable(tbody, 'prompt-table-body');
+    }
+});
+</script>

@@ -18,10 +18,12 @@ Tracks PID, RSS memory, uptime, Python and Flask versions
 for the local quickrobot API server process.
 """
 
+import logging
 import os
 import sys
 import time
 
+logger = logging.getLogger(__name__)
 from engine.base import BaseEngine
 
 
@@ -120,7 +122,8 @@ class QrApiEngine(BaseEngine):
                         "UPDATE instances SET rss_bytes = ? WHERE id = ?",
                         (rss_bytes, instance_id),
                     )
-            except Exception:
+            except Exception as _e:
+                logger.debug("rss_bytes update failed for API instance %d: %s", instance_id, _e)
                 pass  # Don't let DB errors break status reporting
 
         return {"engine": self._name, "instance_id": instance_id,

@@ -1,0 +1,125 @@
+<div style="padding:16px;">
+  <a href="/webui/prompts" style="color:#4fc3f7;text-decoration:none;">&larr; Back to prompts</a>
+
+  <h2 style="margin-top:16px;">Create New Prompt</h2>
+
+  <form id="create-prompt-form" method="POST" action="/webui/prompts/create">
+    <table style="margin-bottom:16px;font-size:14px;border-collapse:collapse;">
+      <tr>
+        <td style="padding:6px 12px 6px 0;color:#888;width:150px;">Prompt ID</td>
+        <td><input type="text" name="prompt_id" id="prompt-id-input" 
+                   placeholder="auto-generated from title" 
+                   style="flex:1;padding:6px 10px;border:1px solid #ccc;border-radius:4px;font-size:14px;font-family:monospace;width:400px;"></td>
+      </tr>
+      <tr>
+        <td style="padding:6px 12px 6px 0;color:#888;">Title *</td>
+        <td><input type="text" name="title" id="prompt-title-input" required 
+                   placeholder="Display title for the prompt" 
+                   style="flex:1;padding:6px 10px;border:1px solid #ccc;border-radius:4px;font-size:14px;width:400px;"></td>
+      </tr>
+      <tr>
+        <td style="padding:6px 12px 6px 0;color:#888;">Description</td>
+        <td><input type="text" name="description" id="prompt-desc-input" 
+                   placeholder="One-line description of what this prompt does" 
+                   style="flex:1;padding:6px 10px;border:1px solid #ccc;border-radius:4px;font-size:14px;width:400px;"></td>
+      </tr>
+      <tr>
+        <td style="padding:6px 12px 6px 0;color:#888;">Message Role</td>
+        <td><select name="message_role" id="prompt-role-input" 
+                   style="padding:6px 10px;border:1px solid #ccc;border-radius:4px;font-size:14px;width:400px;">
+          <option value="systemprompt" selected>systemprompt</option>
+          <option value="usermessage">usermessage</option>
+          <option value="assistant">assistant</option>
+          <option value="skill">skill</option>
+        </select></td>
+      </tr>
+      <tr>
+        <td style="padding:6px 12px 6px 0;color:#888;">Type</td>
+        <td><select name="prompt_type" id="prompt-type-input" 
+                   style="padding:6px 10px;border:1px solid #ccc;border-radius:4px;font-size:14px;width:400px;">
+          <option value="MCP" selected>MCP</option>
+          <option value="Benchmark">Benchmark</option>
+          <option value="Magi">Magi</option>
+        </select></td>
+      </tr>
+      <tr>
+        <td style="padding:6px 12px 6px 0;color:#888;">Tags</td>
+        <td><input type="text" name="tags" id="prompt-tags-input" 
+                   placeholder="comma-separated tags" 
+                   style="flex:1;padding:6px 10px;border:1px solid #ccc;border-radius:4px;font-size:14px;width:400px;"></td>
+      </tr>
+      <tr>
+        <td style="padding:6px 12px 4px 0;color:#888;vertical-align:top;">Content *</td>
+        <td>
+          <textarea name="content" id="prompt-content-input" required rows="15" 
+                    placeholder="The prompt content..." 
+                    style="width:100%;font-family:monospace;font-size:13px;padding:12px;border:1px solid #ccc;border-radius:4px;background:#1e1e1e;color:#d4d4d4;resize:vertical;"></textarea>
+          <div style="margin-top:4px;font-size:12px;color:#888;text-align:right;">
+            <span id="create-byte-counter">0</span> / 100,000 bytes
+          </div>
+        </td>
+      </tr>
+    </table>
+
+    <button type="submit" class="btn btn-primary" style="font-size:14px;padding:8px 20px;">Create Prompt</button>
+    <button type="button" id="create-cancel-btn" class="btn" style="font-size:14px;padding:8px 20px;background:#999;color:#fff;text-decoration:none;" onclick="window.location.href='/webui/prompts'">Cancel</button>
+  </form>
+
+  <script>
+  // Byte counter for creation form
+  var textarea = document.getElementById('prompt-content-input');
+  var byteCounter = document.getElementById('create-byte-counter');
+  if (textarea && byteCounter) {
+    textarea.addEventListener('input', function() {
+      byteCounter.textContent = new Blob([this.value]).size.toLocaleString();
+    });
+  }
+
+  // Auto-generate prompt_id from title when title changes
+  var titleInput = document.getElementById('prompt-title-input');
+  var idInput = document.getElementById('prompt-id-input');
+  if (titleInput && idInput) {
+    titleInput.addEventListener('input', function() {
+      var val = this.value.trim();
+      // Only auto-generate if the ID field is still empty or matches old auto-generated value
+      var slug = val.replace(/[^a-zA-Z0-9]+/g, '-').toLowerCase().replace(/^-+|-+$/g, '');
+      idInput.value = slug || '';
+    });
+  }
+
+  // Form submit — POST to API
+  document.getElementById('create-prompt-form').addEventListener('submit', function(e) {
+    e.preventDefault();
+    
+    var formData = {
+      prompt_id: document.getElementById('prompt-id-input').value.trim(),
+      title: document.getElementById('prompt-title-input').value.trim(),
+      description: document.getElementById('prompt-desc-input').value.trim(),
+      content: document.getElementById('prompt-content-input').value,
+      message_role: document.getElementById('prompt-role-input').value,
+      prompt_type: document.getElementById('prompt-type-input').value,
+      tags: document.getElementById('prompt-tags-input').value.trim(),
+    };
+
+    // Validate prompt_id has no spaces or special chars
+    if (formData.prompt_id && !/^[a-zA-Z0-9_-]+$/.test(formData.prompt_id)) {
+      alert('Prompt ID must contain only letters, numbers, hyphens, and underscores.');
+      return;
+    }
+
+    qrApi('/prompts', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(formData)
+    }).then(function(data) {
+      if (data.status === 'ok') {
+        window.location.href = '/webui/prompts/' + formData.prompt_id;
+      } else {
+        alert('Create failed: ' + (data.message || JSON.stringify(data)));
+      }
+    }).catch(function(e) {
+      alert('Request failed: ' + e);
+    });
+  });
+  </script>
+</div>

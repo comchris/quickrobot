@@ -29,7 +29,7 @@ Usage:
 """
 
 # ── Version ───────────────────────────────────────────────────────────
-QUICKROBOT_VERSION = "v0.08"
+QUICKROBOT_VERSION = "v0.09"
 
 # ── Default bind host (localhost loopback) ────────────────────────────
 # SSOT for "127.0.0.1" fallbacks across the codebase.
@@ -439,11 +439,12 @@ _QR_UNDEPLOY_CHAINS = {
 # ── Stage timeout defaults (SSOT for playbook header fallbacks) ─────
 # Playbook headers (# @timeout:) override these. These are the fallback
 # defaults when a playbook has no timeout header.
-QR_TIMEOUT_COMPILE       = 1800  # 30 min for cmake build
+QR_TIMEOUT_COMPILE       = 3600  # 60 min for cmake build
 QR_TIMEOUT_SOURCE        = 600   # 10 min for git clone
 QR_TIMEOUT_DEFAULT       = 300   # 5 min default for other stages
 QR_TIMEOUT_HEALTH_CHECK  = 60    # 1 min for health check playbooks (SSH/systemctl probe)
 QR_TIMEOUT_JOB           = 7200  # 2h global job timeout (stale task detection)
+QR_TIMEOUT_START         = 60    # 1 min for start/restart/simple jobs (should complete quickly)
 QR_SSH_PORT_DEFAULT   = 22    # Default SSH port for node connections
 
 # ── MCP subprocess startup retry limits (configurable via .env) ──────
@@ -469,6 +470,10 @@ QR_SCHEDULER_RESTART_ADOPT = "false"
 
 # Model path placeholder values treated as empty/omitted in merge chain
 _QR_MODEL_PATH_PLACEHOLDERS = frozenset(("none", "yes", "no", "true", "false"))
+
+# ── MCP Prompts System (SSOT) ──────────────────────────────────────
+# Max content size for prompts (bytes). Enforced at API layer.
+PROMPT_MAX_CONTENT_BYTES = 100_000
 
 # ── Backward-compatible exports ─────────────────────────────────────
 # These mirror the old lib_runner.py constant names for import compatibility.

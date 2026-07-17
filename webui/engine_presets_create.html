@@ -1,4 +1,3 @@
-<a class="back-link" href="/webui/engines">Back to engines</a>
 <h1>Create Preset -- {{ engine_type }}</h1>
 <form id="preset-form" style="max-width:600px;">
   <div style="margin-bottom:12px;">
@@ -89,12 +88,16 @@
 
 <script>
 (function() {
+  // Pre-fill model ID from URL query param (injected by route handler)
+  window._prefillModelId = {{ prefill_model_id | tojson }};
+
   var modelSelect = document.getElementById('model-select');
   var modelInfo = document.getElementById('model-info');
   var cliPreview = document.getElementById('cli-preview');
   var envPreview = document.getElementById('env-preview');
   var mergedPreview = document.getElementById('merged-preview');
   var gpuSelect = document.getElementById('gpu-device-select');
+  var presetNameInput = document.querySelector('[name="name"]');
 
   // Store current values
   var currentCli = [];
@@ -102,24 +105,36 @@
   var currentModelId = null;
 
  // Load models list (active only)
-  qrApi('/engine/{{ engine_type }}/models?include_inactive=false')
-    .then(function(data) {
-      var items = data.items || [];
-      items.forEach(function(m) {
-        var opt = document.createElement('option');
-        opt.value = m.id;
-        var q = m.quantization ? ' (' + m.quantization + ')' : '';
-        var tags = [];
-        if (m.mmproj_path) tags.push('(+ mmproj)');
-        if (m.draft_model_path) tags.push('(+ draft)');
-        opt.textContent = m.name + q + (tags.length ? ' ' + tags.join(' ') : '');
-        modelSelect.appendChild(opt);
-       });
-     }).catch(function(e) {
-       console.error('Model fetch failed: ' + e);
-       if(modelSelect) modelSelect.innerHTML = '<option>Error loading models — check console</option>';
-       else alert('model-select not found');
-    });
+   qrApi('/engine/{{ engine_type }}/models?include_inactive=false')
+     .then(function(data) {
+       var items = data.items || [];
+       items.forEach(function(m) {
+         var opt = document.createElement('option');
+         opt.value = m.id;
+         var q = m.quantization ? ' (' + m.quantization + ')' : '';
+         var tags = [];
+         if (m.mmproj_path) tags.push('(+ mmproj)');
+         if (m.draft_model_path) tags.push('(+ draft)');
+         opt.textContent = m.name + q + (tags.length ? ' ' + tags.join(' ') : '');
+         modelSelect.appendChild(opt);
+        });
+
+       // PREFILL: if prefill_model_id provided, select it and set suggested name
+       if (window._prefillModelId) {
+         var targetId = parseInt(window._prefillModelId, 10);
+         for (var i = 0; i < modelSelect.options.length; i++) {
+           if (parseInt(modelSelect.options[i].value, 10) === targetId) {
+             modelSelect.selectedIndex = i;
+             modelSelect.dispatchEvent(new Event('change'));
+             break;
+           }
+         }
+       }
+      }).catch(function(e) {
+        console.error('Model fetch failed: ' + e);
+        if(modelSelect) modelSelect.innerHTML = '<option>Error loading models — check console</option>';
+        else alert('model-select not found');
+     });
 
   // Debug: log element states
   if(!modelSelect) console.error('model-select element not found');
@@ -128,33 +143,45 @@
   if(!envPreview) console.error('env-preview element not found');
   if(!mergedPreview) console.error('merged-preview element not found');
 
-  modelSelect.addEventListener('change', function() {
-    currentModelId = this.value ? parseInt(this.value, 10) : null;
-    if (currentModelId) {
-      modelInfo.style.display = 'block';
-      document.getElementById('mi-name').textContent = this.options[this.selectedIndex].text;
-      // Fetch model details for quantization, size, mmproj, draft display
-      qrApi('/engine/{{ engine_type }}/models/' + currentModelId)
-       .then(function(d) {
-         if (d.status === 'ok' && d.data) {
-           var mp = d.data;
-           document.getElementById('mi-quant').textContent = mp.quantization || '';
-           document.getElementById('mi-size').textContent = mp.size_bytes ? formatSize(mp.size_bytes) : '';
-           if (mp.mmproj_path) {
-             document.getElementById('mi-mmproj').textContent = mp.mmproj_path;
-             document.getElementById('mi-mmproj-wrap').style.display = 'inline';
-           }
-           if (mp.draft_model_path) {
-             document.getElementById('mi-draft').textContent = mp.draft_model_path;
-             document.getElementById('mi-draft-wrap').style.display = 'inline';
-           }
-         }
-       }).catch(function() {});
-    } else {
-      modelInfo.style.display = 'none';
-    }
-    updatePreview();
-  });
+   modelSelect.addEventListener('change', function() {
+     currentModelId = this.value ? parseInt(this.value, 10) : null;
+     if (currentModelId) {
+       modelInfo.style.display = 'block';
+       document.getElementById('mi-name').textContent = this.options[this.selectedIndex].text;
+       // Fetch model details for quantization, size, mmproj, draft display
+       qrApi('/engine/{{ engine_type }}/models/' + currentModelId)
+        .then(function(d) {
+          if (d.status === 'ok' && d.data) {
+            var mp = d.data;
+            document.getElementById('mi-quant').textContent = mp.quantization || '';
+            var sizeStr = mp.size_bytes ? formatSize(mp.size_bytes) : '';
+            document.getElementById('mi-size').textContent = sizeStr;
+            // Auto-suggest preset name: {model_name}_{quantization}-{size}GB
+            if (presetNameInput && !presetNameInput.value) {
+              var q = (mp.quantization || '').replace(/[^A-Za-z0-9_]/g, '_');
+              var nameClean = (mp.name || '').replace(/[^A-Za-z0-9_]/g, '_');
+              var sizeGb = mp.size_bytes ? Math.round(mp.size_bytes / (1024*1024*1024)) : 0;
+              if (q && sizeGb > 0) {
+                presetNameInput.value = nameClean + '_' + q + '-' + sizeGb + 'GB';
+              } else if (nameClean) {
+                presetNameInput.value = nameClean;
+              }
+            }
+            if (mp.mmproj_path) {
+              document.getElementById('mi-mmproj').textContent = mp.mmproj_path;
+              document.getElementById('mi-mmproj-wrap').style.display = 'inline';
+            }
+            if (mp.draft_model_path) {
+              document.getElementById('mi-draft').textContent = mp.draft_model_path;
+              document.getElementById('mi-draft-wrap').style.display = 'inline';
+            }
+          }
+        }).catch(function() {});
+     } else {
+       modelInfo.style.display = 'none';
+     }
+     updatePreview();
+   });
 
   function formatSize(bytes) {
     if (!bytes || bytes === 0) return '';

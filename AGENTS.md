@@ -222,6 +222,40 @@ Stop: Query PID via `ps aux`, then `kill <PID>`, wait 1s, verify dead.
 tmux -S /tmp/qr.sock capture-pane -t qr_api -p -S - | tail -60
 ```
 
+### 5a.1. Kill + Restart Preflight Sequence
+
+When killing and restarting a process, **do NOT combine kill + restart in one bash command**. Processes need time to release ports and exit cleanly. Use separate steps with verification between each:
+
+**Correct sequence (kill → verify → wait → start → verify):**
+```bash
+# Step 1: Kill
+ps aux | grep quickrobot.py | grep -v grep | awk '{print $2}'   # find PID
+kill <PID>
+
+# Step 2: VERIFY dead — DO NOT SKIP
+sleep 1
+ps aux | grep quickrobot.py | grep -v grep                      # should return nothing
+tmux has-session -t qr_api 2>&1                                  # session gone = process dead
+```
+> **CRITICAL:** If you skip step 2 and immediately run `send-keys`, the old process may still be holding the port or tmux session. This causes silent failures (port already bound, duplicate sessions).
+
+**Step 3: Start fresh — only AFTER verification:**
+```bash
+tmux has-session -t qr_api 2>&1 || tmux new-session -d -s qr_api   # create if gone
+tmux send-keys -t qr_api 'cd /CORE/projects/quickrobot && python3 quickrobot.py' C-m
+sleep 8                                                              # wait for startup
+tmux capture-pane -t qr_api -p -S - | tail -60                     # verify output
+```
+
+**Why one-command kill+restart fails:**
+- `kill PID && sleep 1 && tmux send-keys ...` — if the process takes >1s to exit, the port is still bound. The new process starts but may bind to a different port or fail silently.
+- tmux session state: killing the process does NOT automatically kill the tmux session (if `remain-on-exit on` is set). `tmux new-session -d -s qr_api` will fail with "duplicate session" if the old session still exists.
+- Always verify the dead state BEFORE proceeding to start.
+
+**Rule of thumb:** Kill → verify dead → sleep → start → verify running. Never assume one step completed before moving to the next.
+
+**Behavioral note:** When the user asks a direct question, answer it first — do NOT auto-act. If they want you to restart the API after you killed it, they will say so. Answering "yes, I killed it" and waiting is better than assuming action is needed.
+
 ### 5a. Loading State Transition — SSE Model Load (v0.07)
 After a `start` or `restart` job completes, instance state transitions to `"loading"` (from `JOB_FINAL_STATES`). The WebUI monitors this state and:
 

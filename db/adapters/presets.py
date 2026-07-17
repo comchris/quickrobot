@@ -18,9 +18,11 @@ Functions: add_preset, get_preset, list_presets, update_preset,
            delete_preset, search_presets.
 All functions accept db_path as first positional argument.
 """
+import json
+import logging
 import sqlite3
 
-import json
+logger = logging.getLogger(__name__)
 
 
 class PresetError(Exception):
@@ -194,7 +196,8 @@ def list_presets(db_path, engine_type_id=None):
                 try:
                     parsed = json.loads(ct[:ct.rfind('}')+1])
                     d["config_template"] = parsed
-                except Exception:
+                except Exception as _e:
+                    logger.debug("config_template truncation parse failed: %s", _e)
                     d["config_template"] = {}
             d["tags"] = json.loads(d.get("tags") or "[]")
             results.append(d)

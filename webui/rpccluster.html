@@ -119,8 +119,8 @@
              </div>
              <span id="herd-gpu-override-status" style="font-size:0.8em;color:#888;display:block;margin-top:2px;"></span>
            <div style="min-width:80px;flex:0 0 auto;">
-             <label style="font-size:0.8em;color:#666;display:block;margin-bottom:2px;">Device Flags</label>
-             <span id="herd-dev-flag" style="display:inline-block;background:#fff3e0;padding:3px 6px;border-radius:3px;font-size:0.85em;white-space:nowrap;color:#e65100;font-family:Cascadia Code,Consolas,Monaco,monospace;word-break:break-all;">-</span>
+              <label style="font-size:0.8em;color:#666;display:block;margin-bottom:2px;">Device Flags</label>
+              <span id="herd-dev-flag" style="display:inline-block;background:#f5f5f5;padding:3px 6px;border-radius:3px;font-size:0.85em;white-space:nowrap;color:#333;font-family:Cascadia Code,Consolas,Monaco,monospace;word-break:break-all;">-</span>
            </div>
           <div>
             <label style="font-size:0.8em;color:#666;display:block;margin-bottom:2px;">Split Mode</label>
@@ -170,6 +170,7 @@
             <option value="a">A — Stride</option>
             <option value="b">B — Block</option>
             <option value="c">C — Load-Dist</option>
+            <option value="s">S — Staggered</option>
             <option value="f">F — Freeform</option>
           </select>
         </div>
@@ -183,13 +184,24 @@
               <th style="text-align:left;padding:4px;font-size:0.8em;color:#666;">Preview</th>
             </tr>
           </thead>
-          <tbody id="herd-expert-split-tbody"></tbody>
-        </table>
-        <!-- Live -ot flag preview -->
-        <div style="margin-top:8px;padding:6px;background:#fff3e0;border-radius:4px;">
-          <label style="font-size:0.8em;color:#e65100;display:block;margin-bottom:2px;">Generated -ot Flags (preview)</label>
-          <div id="herd-expert-flags-preview" style="font-family:Cascadia Code,Consolas,Monaco,monospace;font-size:0.8em;white-space:pre-wrap;color:#bf360c;">(no bindings with expert-split enabled)</div>
-        </div>
+            <tbody id="herd-expert-split-tbody"></tbody>
+          </table>
+          <!-- Extra -ot flags (custom entries: attention layers, CPU, Vulkan targeting) -->
+          <div style="margin-top:10px;padding:6px;background:#f9f9f9;border-radius:4px;">
+            <label style="font-size:0.8em;color:#666;display:block;margin-bottom:4px;">Custom -ot Flags</label>
+            <p style="color:#888;font-size:0.75em;margin:0 0 6px 0;">One entry per line. Each entry is a full -ot flag string (e.g. -ot "attn_q_exps.*=Vulkan0"). Generated above.</p>
+            <textarea id="herd-extra-ot-flags" rows="4" style="width:100%;min-height:60px;padding:4px;border:1px solid #ccc;border-radius:3px;font-family:monospace;font-size:0.78em;resize:vertical;" placeholder='-ot "attn_q_exps.*=Vulkan0"
+-ot "attn_v_exps.*=RPC0[host.lan:50052]"'></textarea>
+            <div style="margin-top:4px;display:flex;gap:6px;">
+              <button class="btn btn-primary" onclick="saveExtraOtFlags()" style="font-size:0.75em;padding:3px 8px;">Save</button>
+              <button class="btn" onclick="clearExtraOtFlags()" style="font-size:0.75em;padding:3px 8px;background:#fff;border:1px solid #bbb;border-radius:3px;cursor:pointer;">Clear All</button>
+            </div>
+          </div>
+          <!-- Live -ot flag preview -->
+         <div style="margin-top:8px;padding:6px;background:#f5f5f5;border-radius:4px;">
+           <label style="font-size:0.8em;color:#666;display:block;margin-bottom:2px;">Generated -ot Flags (preview)</label>
+           <div id="herd-expert-flags-preview" style="font-family:Cascadia Code,Consolas,Monaco,monospace;font-size:0.8em;white-space:pre-wrap;color:#333;">(no bindings with expert-split enabled)</div>
+         </div>
         </div>
       </details>
 
@@ -260,7 +272,8 @@ var HERD_CLI_FLAGS = [
    {id: 'cache-type-k',     label: '--cache-type-k',      type: 'toggle-select', options: ['f32','f16','bf16','q8_0','q4_0','q4_1','iq4_nl','q5_0','q5_1'], highlight: true},
    {id: 'cache-type-v',     label: '--cache-type-v',      type: 'toggle-select', options: ['f32','f16','bf16','q8_0','q4_0','q4_1','iq4_nl','q5_0','q5_1'], highlight: true},
    {id: 'verbose',          label: '-v',                  type: 'toggle', highlight: true, hint: 'verbose'},
-  {id: 'device-draft',     label: '--device-draft',      type: 'toggle-select', options: ['Vulkan0','CUDA0','CUDA1','CUDA2','CUDA3','CUDA4','CUDA5','CUDA6','CUDA7']},
+   {id: 'log-verbosity',    label: '-lv',                 type: 'toggle-select', options: [0,1,2,3,4,5]},
+   {id: 'device-draft',     label: '--device-draft',      type: 'toggle-select', options: ['Vulkan0','CUDA0','CUDA1','CUDA2','CUDA3','CUDA4','CUDA5','CUDA6','CUDA7']},
   {id: 'tools',            label: '--tools',              type: 'toggle-multi', options: ['all','read_file','file_glob_search','grep_search','exec_shell_command','write_file','edit_file','apply_diff','get_datetime']},
   {id: 'custom-cli',       label: '--CUSTOM-cli',         type: 'toggle-fulltext'},
 ];
@@ -395,8 +408,9 @@ function buildFlagsGrid() {
    { id: 'LLAMA_ARG_N_PARALLEL', label: 'LLAMA_ARG_N_PARALLEL', style: 'bold' },
    { id: 'LLAMA_ARG_FLASH_ATTN', label: 'LLAMA_ARG_FLASH_ATTN', style: 'italic' },
    { id: 'LLAMA_ARG_KV_UNIFIED', label: 'LLAMA_ARG_KV_UNIFIED', placeholder: '' },
-   { id: 'LLAMA_ARG_FIT', label: 'LLAMA_ARG_FIT', style: 'italic' },
- ];
+    { id: 'LLAMA_ARG_FIT', label: 'LLAMA_ARG_FIT', style: 'italic' },
+    { id: 'GGML_CUDA_ENABLE_UNIFIED_MEMORY', label: 'GGML_CUDA_ENABLE_UNIFIED_MEMORY', placeholder: '' },
+  ];
 
 // Track current ENV overrides in memory
 var herdEnvOverrides = {};
@@ -814,6 +828,11 @@ function loadExpertSplitConfig(llamaId, bindings) {
       document.getElementById('herd-es-prefix').value = _expertSplitCache.template_prefix || 'blk.';
       document.getElementById('herd-es-suffix').value = _expertSplitCache.template_suffix || 'ffn_(up|gate|down|gate_up)_exps.*';
       document.getElementById('herd-es-offset').value = _expertSplitCache.skip_n_first || 0;
+      // Load extra_ot_flags into textarea
+      var otTa = document.getElementById('herd-extra-ot-flags');
+      if (otTa && _expertSplitCache.extra_ot_flags) {
+        otTa.value = _expertSplitCache.extra_ot_flags.join('\n');
+      }
       renderExpertSplitRows(llamaId, _expertSplitCache);
     })
     .catch(function(e) {
@@ -862,6 +881,7 @@ function renderExpertSplitRows(llamaId, expertConfig) {
         var modeOpts = '<option value="a"' + (mode === 'a' ? ' selected' : '') + '>A — Stride</option>' +
            '<option value="b"' + (mode === 'b' ? ' selected' : '') + '>B — Block</option>' +
            '<option value="c"' + (mode === 'c' ? ' selected' : '') + '>C — Load-Dist</option>' +
+           '<option value="s"' + (mode === 's' ? ' selected' : '') + '>S — Staggered</option>' +
            '<option value="f"' + (mode === 'f' ? ' selected' : '') + '>F — Freeform</option>';
 
           // Freeform pattern input — always visible, disabled when mode != F
@@ -870,7 +890,7 @@ function renderExpertSplitRows(llamaId, expertConfig) {
            var fpInput = '<input type="text" id="herd-es-fp-' + rpcId + '" value="' + (modeCfg.index_pattern || '') + '" placeholder="e.g. blk.(1|7).ffn_(up|gate|down)_exps.*" style="flex:1;min-width:200px;max-width:300px;padding:2px;border:1px solid #ccc;border-radius:3px;font-size:0.8em;opacity:' + ((mode === 'f') ? '1' : '0.5') + ';"' + (mode !== 'f' ? ' disabled' : '') + ' onchange="setRpcExpertPattern(' + llamaId + ',' + rpcId + ',this.value)" title="Full -ot pattern string (e.g. blk.(0|2).ffn_up_exps.*)">';
 
         // Preview
-        var esPreview = expertsVal > 0 ? '<span style="font-family:monospace;font-size:0.8em;color:#e65100;">-ot "pattern=RPC0[' + (b.hostname||'?') + ':' + (b.port_assigned||'?') + ']"</span>' : '<span style="color:#aaa;font-size:0.8em;">disabled</span>';
+        var esPreview = expertsVal > 0 ? '<span style="font-family:monospace;font-size:0.8em;color:#333;">-ot "pattern=RPC0[' + (b.hostname||'?') + ':' + (b.port_assigned||'?') + ']"</span>' : '<span style="color:#aaa;font-size:0.8em;">disabled</span>';
 
         html += '<tr><td style="font-size:0.85em;padding:3px;">' + b.name + '</td>';
         html += '<td style="font-size:0.85em;padding:3px;">' + expertsVal + '</td>';
@@ -1049,6 +1069,48 @@ function saveExpertSplitTemplate() {
     console.error('[herd] expert-split template save error:', e);
     btn.textContent = 'Error';
     setTimeout(function() { btn.textContent = origText; btn.disabled = false; }, 1500);
+  });
+}
+
+// Save custom -ot flags from textarea to expert_split config
+function saveExtraOtFlags() {
+  if (!herdCurrentLlamaId) { return; }
+  var ta = document.getElementById('herd-extra-ot-flags');
+  if (!ta) return;
+  var raw = ta.value.trim();
+  var flags = [];
+  if (raw) {
+    flags = raw.split('\n').map(function(l){return l.trim();}).filter(function(l){return l.length > 0;});
+  }
+  if (!_expertSplitCache) _expertSplitCache = {};
+  _expertSplitCache.extra_ot_flags = flags;
+  qrApi('/instances/' + herdCurrentLlamaId + '/config', {
+    method: 'PUT', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({expert_split: _expertSplitCache})
+  }).then(function(data) {
+    if (data.status === 'ok') {
+      loadExpertSplitConfig(herdCurrentLlamaId, _expertSplitCache ? _expertSplitCache._bindings : null);
+    }
+  }).catch(function(e) {
+    console.error('[herd] save extra_ot_flags error:', e);
+  });
+}
+
+// Clear all custom -ot flags
+function clearExtraOtFlags() {
+  if (!_expertSplitCache) _expertSplitCache = {};
+  _expertSplitCache.extra_ot_flags = [];
+  var ta = document.getElementById('herd-extra-ot-flags');
+  if (ta) ta.value = '';
+  qrApi('/instances/' + herdCurrentLlamaId + '/config', {
+    method: 'PUT', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({expert_split: _expertSplitCache})
+  }).then(function(data) {
+    if (data.status === 'ok') {
+      loadExpertSplitConfig(herdCurrentLlamaId, _expertSplitCache ? _expertSplitCache._bindings : null);
+    }
+  }).catch(function(e) {
+    console.error('[herd] clear extra_ot_flags error:', e);
   });
 }
 
@@ -1441,7 +1503,7 @@ function herdApplyPreset(newPresetId) {
         qrApi('/instances/' + herdCurrentLlamaId, {
           method: 'PUT',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({preset_id: newPresetId, skip_build: true})
+          body: JSON.stringify({preset_id: newPresetId})
         })
         .then(function(data) {
           if (data.status === 'ok') {

@@ -21,8 +21,10 @@ All functions accept db_path as first positional argument.
 """
 
 import json
+import logging
 from datetime import datetime as _dt, timezone as _tz
 
+logger = logging.getLogger(__name__)
 from lib.qr_engine_ids import get_id_by_name, QR_ENGINE_LLAMA_SERVER_NAME, QR_ENGINE_LLAMA_RPC_NAME, QR_ENGINE_PORT_DEFAULTS
 from lib.lib_config_merge import _parse_config_override as _pcov
 
@@ -43,7 +45,7 @@ VALID_TRANSITIONS = {
     "running": ["stopping", "error", "test_mode", "updating", "compiling"],
     "stopping": ["stopped", "running", "starting", "deployed", "configuring", "error", "timeout"],
     "stopped": ["starting", "running", "configuring", "stopping", "error", "test_mode", "unconfigured", "compiling", "updating"],
-    "error": ["unconfigured", "configuring", "deploying", "starting", "stopping", "updating", "build_error", "compiling", "running"],
+    "error": ["unconfigured", "configuring", "deploying", "starting", "stopping", "updating", "build_error", "compiling", "running", "error"],
     "timeout": ["error", "stopping"],
     "test_mode": ["running", "stopped", "error", "stopping"],
     "updating": ["running", "deployed", "build_error", "error", "timeout", "unconfigured", "stopping"],
@@ -70,7 +72,8 @@ def get_engine_state_transitions(engine_type_name):
         eng_inst = _get_engine(engine_type_name)
         if eng_inst and hasattr(eng_inst, "get_state_machine"):
             return eng_inst.get_state_machine()
-    except Exception:
+    except Exception as _e:
+        logger.debug("engine get_state_machine failed for %s: %s", engine_type_name, _e)
         pass
     # Fallback to base
     return dict(VALID_TRANSITIONS)
@@ -129,7 +132,8 @@ def _resolve_rpc_bindings(db_path, bind_ids):
                         rpc_dict["node_hostname"] = ""
                     rpc_list.append(rpc_dict)
         return rpc_list
-    except Exception:
+    except Exception as _e:
+        logger.debug("rpc_bind_nodes lookup failed for instance %d: %s", instance_id, _e)
         return []
 
 
@@ -555,7 +559,8 @@ def transition_state(db_path, instance_id, new_state):
                 ).fetchone()
                 if et_row:
                     engine_type_name = et_row["name"]
-            except Exception:
+            except Exception as _e:
+                logger.debug("engine_type lookup failed for instance %d: %s", row["id"], _e)
                 pass
 
         # Resolve per-engine state machine via merge utility
@@ -582,7 +587,8 @@ def transition_state(db_path, instance_id, new_state):
                         "UPDATE nodes SET node_build_state = 'idle', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                         (node_id,),
                     )
-            except Exception:
+            except Exception as _e:
+                logger.debug("node_build_state reset failed (node_id=%s): %s", node_id, _e)
                 pass  # Non-critical — build state reset failure doesn't block transition
         # Read back the updated row on the same connection to avoid
         # stale reads from WAL mode (a second connection won't see the

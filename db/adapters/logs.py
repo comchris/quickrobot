@@ -53,7 +53,7 @@ def log_instance_action(db_path, instance_id, action, status, detail=None,
                 created_at, started_at, finished_at, task_stage, stage_playbook,
                 retry_count, max_retries, details_json, duration_ms)
                VALUES (NULL, ?, NULL, ?, ?, 'system',
-                       strftime('%Y-%m-%dT%H:%M:%S','now'), NULL, NULL, NULL, NULL,
+                        strftime('%Y-%m-%dT%H:%M:%SZ','now'), NULL, NULL, NULL, NULL,
                        0, 1, ?, ?)""",
             (action, instance_id, status, detail_json, duration_ms or 0),
         )

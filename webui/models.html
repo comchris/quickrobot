@@ -253,9 +253,10 @@ function _fmtDraft(val) {
              '</td>' +
               '<td class="age-cell" data-sort="' + (m.created_at || '') + '">' + qrFmtRelative(m.created_at) + '</td>' +
 '<td style="white-space:nowrap;">' +
-                '<a href="/webui/models/' + m.id + '/edit" class="btn btn-sm" style="font-size:0.8em;padding:1px 6px;" title="Edit">Edit</a> ' +
-                '<button class="btn btn-danger model-delete-btn" data-id="' + m.id + '" data-engine="' + encodeURIComponent(etName) + '" style="font-size:1.1em;padding:2px 5px;line-height:1;" title="Remove">\u00d7</button>' +
-             '</td></tr>';
+                 '<a href="/webui/models/' + m.id + '/edit" class="btn btn-secondary btn-sm" style="font-size:0.8em;padding:1px 6px;" title="Edit">Edit</a> ' +
+                 '<button class="btn btn-secondary btn-sm model-preset-btn" data-id="' + m.id + '" data-engine="' + encodeURIComponent(etName) + '" style="font-size:0.8em;padding:1px 6px;" title="Create preset from this model">+Preset</button> ' +
+                 '<button class="btn btn-danger model-delete-btn" data-id="' + m.id + '" data-engine="' + encodeURIComponent(etName) + '" style="font-size:1.1em;padding:2px 5px;line-height:1;" title="Remove">\u00d7</button>' +
+              '</td></tr>';
          }
          document.getElementById('models-tbody').innerHTML = rows;
 
@@ -314,25 +315,35 @@ function _fmtDraft(val) {
                 } catch(e) { /* invalid data, ignore */ }
               }
 
-   // Attach delete handlers
-            var delBtns = document.querySelectorAll('.model-delete-btn');
-            for (var j = 0; j < delBtns.length; j++) {
-              delBtns[j].addEventListener('click', function() {
-                var id = this.getAttribute('data-id');
-                var engine = this.getAttribute('data-engine');
-                if (!confirm('Remove model ' + id + '? This only removes the DB entry.')) return;
-                qrApi('/engine/' + encodeURIComponent(engine) + '/models/' + id, {method: 'DELETE'})
-                   .then(function(data) {
-                     if (data.status === 'ok') {
-                       location.reload();
-                     } else {
-                       alert('Remove failed: ' + (data.message || 'Unknown'));
-                     }
-                   }).catch(function(e) { alert('Error: ' + e.message); });
-              });
-            }
+    // Attach delete handlers
+             var delBtns = document.querySelectorAll('.model-delete-btn');
+             for (var j = 0; j < delBtns.length; j++) {
+               delBtns[j].addEventListener('click', function() {
+                 var id = this.getAttribute('data-id');
+                 var engine = this.getAttribute('data-engine');
+                 if (!confirm('Remove model ' + id + '? This only removes the DB entry.')) return;
+                 qrApi('/engine/' + encodeURIComponent(engine) + '/models/' + id, {method: 'DELETE'})
+                    .then(function(data) {
+                      if (data.status === 'ok') {
+                        location.reload();
+                      } else {
+                        alert('Remove failed: ' + (data.message || 'Unknown'));
+                      }
+                    }).catch(function(e) { alert('Error: ' + e.message); });
+               });
+             }
 
-           // Attach active/inactive toggle handlers
+            // Attach +Preset handlers
+             var presetBtns = document.querySelectorAll('.model-preset-btn');
+             for (var j = 0; j < presetBtns.length; j++) {
+               presetBtns[j].addEventListener('click', function() {
+                 var id = this.getAttribute('data-id');
+                 var engine = this.getAttribute('data-engine');
+                 window.location.href = '/webui/engine/' + encodeURIComponent(engine) + '/presets/create?model=' + id;
+               });
+             }
+
+            // Attach active/inactive toggle handlers
             var toggleBtns = document.querySelectorAll('.model-toggle-btn');
             for (var j = 0; j < toggleBtns.length; j++) {
               toggleBtns[j].addEventListener('click', function() {

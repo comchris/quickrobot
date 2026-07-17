@@ -73,6 +73,9 @@ GRACE_PERIOD_RUNNING = 300
 # Can be overridden per-playbook via # @timeout: N comment at top of YAML file.
 QUICKROBOT_PLAYBOOK_TIMEOUT = 3600
 
+# Default timeout for short local shell commands (e.g., hardware info gathering).
+QUICKROBOT_LOCAL_CMD_TIMEOUT = 10
+
 # ── SSH connection settings — flow: .env → qr_engine_ids fallbacks ────
 # Real SOT: .quickrobot.env keys (QUICKROBOT_SSH_STRICT_HOST_KEY_CHECKING / QUICKROBOT_SSH_CONNECT_TIMEOUT)
 # Fallback defaults (from qr_engine_ids): "accept-new", 5s

@@ -20,9 +20,13 @@ command or Ansible playbook on remote nodes, with per-instance lifecycle
 configuration stored in instances.config_override.
 """
 
+import logging
+
 from lib.qr_engine_ids import QR_DEFAULT_LOCALHOST
 from engine.base import BaseEngine
 from lib.lib_constants import DEFAULT_ANSIBLE_USER
+
+logger = logging.getLogger(__name__)
 
 
 CAPABILITIES = {
@@ -239,7 +243,8 @@ class UniversalEngine(BaseEngine):
                             import json as _json
                             d = _json.loads(msg)
                             service_state = d.get("service_state", "unknown")
-                        except Exception:
+                        except Exception as _e:
+                            logger.debug("health check result JSON parse failed: %s", _e)
                             pass
 
             active = (service_state == "active")
@@ -297,7 +302,8 @@ class UniversalEngine(BaseEngine):
                 if isinstance(co, str):
                     try:
                         co = _json.loads(co)
-                    except Exception:
+                    except Exception as _e:
+                        logger.debug("config_override JSON parse failed (universal list_configs): %s", _e)
                         co = {}
                 return {"engine": self._name, "instance_id": instance_id, "config": co or {}}
 
@@ -340,7 +346,8 @@ class UniversalEngine(BaseEngine):
                 conn.close()
                 if row:
                     co = row["config_override"] if isinstance(row["config_override"], dict) else {}
-            except Exception:
+            except Exception as _e:
+                logger.debug("config_override direct DB parse failed (universal list_configs): %s", _e)
                 co = {}
 
         if not isinstance(co, dict):
@@ -374,7 +381,8 @@ class UniversalEngine(BaseEngine):
                 conn.close()
                 if row and row["node_id"] is not None:
                     node_id = int(row["node_id"])
-            except Exception:
+            except Exception as _e:
+                logger.debug("node_id lookup in instances table failed: %s", _e)
                 pass
 
             if node_id is None:
@@ -463,7 +471,8 @@ class UniversalEngine(BaseEngine):
         # Import _execute_playbook from quickrobot at call time to avoid circular imports
         try:
             from qr_api import _execute_playbook as _ep, _CONFIG
-        except Exception:
+        except Exception as _e:
+            logger.debug("quickrobot _execute_playbook import failed, using fallback: %s", _e)
             # Fallback: direct run_playbook with dynamic inventory if quickrobot not available
             from lib.lib_ansible_runner import run_playbook
 
@@ -705,7 +714,8 @@ class UniversalEngine(BaseEngine):
             try:
                 import json as _jc
                 co_raw = _jc.loads(co_raw)
-            except Exception:
+            except Exception as _e:
+                logger.debug("config_override JSON parse failed (universal get_status): %s", _e)
                 co_raw = {}
         if isinstance(co_raw, dict) and co_raw:
             engine_data["deploy_playbook"] = co_raw.get("deploy_playbook", "N/A")
@@ -736,15 +746,15 @@ class UniversalEngine(BaseEngine):
     def _get_available_actions(cls, state):
         """Map instance state to available actions."""
         action_map = {
-            "unconfigured": [{"name": "deploy", "label": "Deploy"}],
-            "configuring": [{"name": "restart", "label": "Restart"}],
-            "deployed": [{"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "reconfigure", "label": "Reconfigure"}],
+            "unconfigured": [{"name": "deploy", "label": "Deploy"}, {"name": "delete", "label": "Delete"}],
+            "configuring": [{"name": "stop", "label": "Stop"}],
+            "deployed": [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "delete", "label": "Delete"}],
             "starting": [{"name": "stop", "label": "Stop"}],
-            "running": [{"name": "stop", "label": "Stop"}, {"name": "restart", "label": "Restart"}, {"name": "reconfigure", "label": "Reconfigure"}],
+            "running": [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "stop", "label": "Stop"}],
             "stopping": [{"name": "start", "label": "Start"}],
-            "stopped": [{"name": "start", "label": "Start"}, {"name": "rebuild", "label": "Rebuild"}],
-            "error": [{"name": "start", "label": "Start"}, {"name": "deploy", "label": "Deploy"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "stop", "label": "Stop"}],
-            "build_error": [{"name": "deploy", "label": "Deploy"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}],
+            "stopped": [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "deploy", "label": "Deploy"}],
+            "error": [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "deploy", "label": "Deploy"}, {"name": "delete", "label": "Delete"}],
+            "build_error": [{"name": "deploy", "label": "Deploy"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "delete", "label": "Delete"}],
             "timeout": [{"name": "deploy", "label": "Deploy"}],
         }
         return action_map.get(state, [])

@@ -429,7 +429,7 @@ def _build_chain(conn, engine_type_id, preset_id, inst_config_override,
                 if alias in override_raw and override_raw[alias] is not None:
                     ov_env["qr_cluster_gpu_override"] = override_raw[alias]
         elif supports_models and has_flat_override:
-            # Legacy flat override for model engines: split into env (LLAMA_ARG_* keys) and model (other keys)
+            # Legacy flat override for model engines: split into env (LLAMA_ARG_* keys + build keys) and model (other keys)
             # NOTE: qr_cluster_gpu_override goes into env — it's a GPU device name, not a file path,
             # so it must NOT end up in the model section where _resolve_model_paths() mangles it.
             ov_env = {}
@@ -439,6 +439,15 @@ def _build_chain(conn, engine_type_id, preset_id, inst_config_override,
                 if k == "gpu_override" or k == "device":
                     k = "qr_cluster_gpu_override"
                 if k.startswith("LLAMA_ARG_") or k == "qr_cluster_gpu_override":
+                    ov_env[k] = v
+                elif k in ("binary_path", "git_clone_url", "model_root_path", "node_build_dir",
+                           "node_build_install_depends", "node_build_run_cmd", "node_build_set_cmd",
+                           "node_git_pull_cmd", "node_src_dir", "restart_policy", "skip_build",
+                           "start_on_boot", "base_port"):
+                    # Build/engine config keys go into env — these are used directly by playbooks,
+                    # not as model inference parameters. Without this, per-instance overrides for
+                    # build keys (e.g., git_clone_url) would land in model section and fail to
+                    # override the engine_default value from Layer 1.
                     ov_env[k] = v
                 else:
                     wrapped = _wrap_flat_as_model({k: v})

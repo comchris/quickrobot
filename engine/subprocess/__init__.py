@@ -20,10 +20,12 @@ Configurable executable, working directory, and CLI args.
 Use case: run any binary as a managed service (opencode, pi-agent, etc.)
 """
 
+import logging
 import os
-import sys
 import subprocess
+import sys
 
+logger = logging.getLogger(__name__)
 from lib.qr_engine_ids import QR_DEFAULT_LOCALHOST
 from engine.base import BaseEngine
 
@@ -98,7 +100,8 @@ class QrSubprocessEngine(BaseEngine):
                 proc = _psutil.Process(pid)
                 if proc.status() != "zombie":
                     running = True
-            except Exception:
+            except Exception as _e:
+                logger.debug("psutil process status check for subprocess pid %d failed: %s", pid, _e)
                 pass
 
         return _bcs(self._name, instance_id,
@@ -133,7 +136,8 @@ class QrSubprocessEngine(BaseEngine):
                 try:
                     import json as _jc
                     co = _jc.loads(co)
-                except Exception:
+                except Exception as _e:
+                    logger.debug("config_override JSON parse failed (subprocess health): %s", _e)
                     co = {}
             port = co.get("port") or inst.get("port_assigned")
             host = co.get("host", QR_DEFAULT_LOCALHOST) if co else QR_DEFAULT_LOCALHOST
@@ -221,7 +225,8 @@ class QrSubprocessEngine(BaseEngine):
             try:
                 import json as _jc
                 co = _jc.loads(co)
-            except Exception:
+            except Exception as _e:
+                logger.debug("config_override JSON parse failed (subprocess execute): %s", _e)
                 co = {}
 
         executable = co.get("executable", "")
@@ -266,16 +271,18 @@ class QrSubprocessEngine(BaseEngine):
                         elif current == "starting":
                             try:
                                 _ts(db_path, instance_id, "running")
-                            except Exception:
+                            except Exception as _e:
+                                logger.debug("transition_state starting failed for subprocess %d: %s", instance_id, _e)
                                 pass
                         else:
                             try:
                                 _ts(db_path, instance_id, "starting")
-                            except Exception:
+                            except Exception as _e:
+                                logger.debug("transition_state starting (fallback) failed for subprocess %d: %s", instance_id, _e)
                                 pass
                             try:
                                 _ts(db_path, instance_id, "running")
-                            except Exception:
+                            except Exception as _e:
                                 pass
                         return {"action": "start", "port": port,
                                 "pid": old_pid, "status": "existing_process_alive"}
@@ -328,14 +335,16 @@ class QrSubprocessEngine(BaseEngine):
             # Transition to starting first (valid from stopped/deployed/error)
             try:
                 _ts(db_path, instance_id, "starting")
-            except Exception:
+            except Exception as _e:
+                logger.debug("transition_state starting failed for subprocess start: %s", _e)
                 pass
             # Then to running (valid from starting); skip if already running
             try:
                 _cur = get_instance(db_path, instance_id)
                 if _cur and _cur.get("state") != "running":
                     _ts(db_path, instance_id, "running")
-            except Exception:
+            except Exception as _e:
+                logger.debug("transition_state running failed for subprocess start: %s", _e)
                 pass
             return {"action": "start", "port": port, "pid": new_pid, "status": "started"}
 
@@ -417,7 +426,8 @@ class QrSubprocessEngine(BaseEngine):
         try:
             import json as _json
             co_dict = _json.loads(co_raw) if isinstance(co_raw, str) else (co_raw if isinstance(co_raw, dict) else {})
-        except Exception:
+        except Exception as _e:
+            logger.debug("config_override JSON parse failed (get_status): %s", _e)
             pass
         executable = co_dict.get("executable", "")
 
@@ -457,14 +467,14 @@ class QrSubprocessEngine(BaseEngine):
         """
         action_map = {
             "unconfigured": [{"name": "deploy", "label": "Deploy"}, {"name": "delete", "label": "Delete"}],
-            "configuring": [{"name": "restart", "label": "Restart"}],
-            "deployed": [{"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}],
+            "configuring": [{"name": "stop", "label": "Stop"}],
+            "deployed": [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "delete", "label": "Delete"}],
             "starting": [{"name": "stop", "label": "Stop"}],
-            "running": [{"name": "stop", "label": "Stop"}, {"name": "restart", "label": "Restart"}],
+            "running": [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "stop", "label": "Stop"}],
             "stopping": [{"name": "start", "label": "Start"}],
-            "stopped": [{"name": "start", "label": "Start"}, {"name": "delete", "label": "Delete"}],
-            "error": [{"name": "start", "label": "Start"}, {"name": "restart", "label": "Restart"}, {"name": "deploy", "label": "Deploy"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "stop", "label": "Stop"}],
-            "build_error": [{"name": "deploy", "label": "Deploy"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}],
+            "stopped": [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "deploy", "label": "Deploy"}],
+            "error": [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "deploy", "label": "Deploy"}, {"name": "delete", "label": "Delete"}],
+            "build_error": [{"name": "deploy", "label": "Deploy"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "delete", "label": "Delete"}],
             "timeout": [{"name": "deploy", "label": "Deploy"}],
         }
         return action_map.get(state, [])

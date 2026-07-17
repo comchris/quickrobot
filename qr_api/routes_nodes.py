@@ -5,15 +5,17 @@ Route registration is handled by __init__.py via app.add_url_rule().
 """
 
 import json
+import logging
 import os
 import threading
 from flask import request, jsonify
+logger = logging.getLogger(__name__)
 from qr_api.lib_responses import success_single, success_list, error_response, require_json
 from qr_api import _CONFIG, _project_root
 from engine import get_engine, get_engine_capabilities, ENGINES
 from lib.qr_engine_ids import (
     QR_ENGINE_API_NAME, QR_ENGINE_LLAMA_SERVER, QR_ENGINE_LLAMA_RPC,
-    QR_ENGINE_LLAMA_SERVER_NAME,
+    QR_ENGINE_LLAMA_SERVER_NAME, QR_ENGINE_LLAMA_RPC_NAME,
     QR_ENGINE_MCP_NAME, QR_ENGINE_SUBPROCESS, QR_ENGINE_UNIVERSAL,
     QR_ENGINE_WEBUI_NAME,
     QR_SSH_PORT_DEFAULT,
@@ -141,8 +143,8 @@ def api_create_node():
         try:
             from lib.lib_qr_actions import update_qr_task as _uqt
             _uqt(_CONFIG["db_path"], task_id, 'failed', duration_ms=0)
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("task update failed (node_create): %s", _e)
         return error_response("NODE_UNREACHABLE",
             f"Node '{name}' ({hostname}) — {disc_result.get('error', 'validation failed')}")
 
@@ -160,8 +162,8 @@ def api_create_node():
     try:
         from lib.lib_qr_actions import update_qr_task as _uqt
         _uqt(_CONFIG["db_path"], task_id, 'completed', duration_ms=0)
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.debug("task update failed (node_create completion): %s", _e)
 
     # Re-fetch node to return post-discovery state (not the pre-discovery snapshot)
     node = _gn(_CONFIG["db_path"], node["id"]) or node
@@ -220,7 +222,7 @@ def api_delete_node(node_id):
         for inst in user_instances:
             inst_id = inst["id"]
             inst_name = inst["name"]
-            engine_type_name = inst.get("engine_type_name", "llama_rpc")
+            engine_type_name = inst.get("engine_type_name", QR_ENGINE_LLAMA_RPC_NAME)
             play_name = f"undeploy_{engine_type_name}.yml"
             state = inst.get("state", "unknown")
 
@@ -272,7 +274,8 @@ def api_delete_node(node_id):
                         "success": not result.get("failed", False),
                         "verified": not check_result.get("failed", False),
                     })
-                except Exception:
+                except Exception as _e:
+                    logger.debug("undeploy check failed for inst %d: %s", inst_id, _e)
                     undeploy_results.append({
                         "instance_id": inst_id, "instance_name": inst_name,
                         "success": not result.get("failed", False),
@@ -534,14 +537,16 @@ def api_node_reboot(node_id):
                                           "node_user": user, "ansible_port": port},
                               action_type="reboot_node")
         if r["error"]:
-            conn.execute("UPDATE log_entries SET status='failed' WHERE id=?", (job_id,))
-            conn.commit()
+            with db_pool(_CONFIG["db_path"]) as conn2:
+                conn2.execute("UPDATE log_entries SET status='failed' WHERE id=?", (job_id,))
+                conn2.commit()
             return error_response("DEPLOYMENT_FAILED", r["error"])
 
         # Mark task completed
-        conn.execute("UPDATE log_entries SET status='completed', finished_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE parent_id=? AND task_stage='reboot'", (job_id,))
-        conn.execute("UPDATE log_entries SET status='completed', finished_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?", (job_id,))
-        conn.commit()
+        with db_pool(_CONFIG["db_path"]) as conn2:
+            conn2.execute("UPDATE log_entries SET status='completed', finished_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE parent_id=? AND task_stage='reboot'", (job_id,))
+            conn2.execute("UPDATE log_entries SET status='completed', finished_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?", (job_id,))
+            conn2.commit()
 
         return success_single({"action": "reboot", "node_id": node_id,
                                "job_id": job_id,
@@ -619,19 +624,21 @@ def api_node_apt(node_id, action="update"):
                                  extra_vars={"inventory_host": hostname},
                                  action_type=f"apt_{stage['stage']}")
             if r["error"]:
-                conn.execute("UPDATE log_entries SET status='failed' WHERE id=?", (job_id,))
-                conn.execute("UPDATE log_entries SET status='failed' WHERE parent_id=?", (job_id,))
-                conn.commit()
+                with db_pool(_CONFIG["db_path"]) as conn2:
+                    conn2.execute("UPDATE log_entries SET status='failed' WHERE id=?", (job_id,))
+                    conn2.execute("UPDATE log_entries SET status='failed' WHERE parent_id=?", (job_id,))
+                    conn2.commit()
                 return error_response("DEPLOYMENT_FAILED", r["error"])
             results.append(r.get("result"))
 
-        conn.execute("""UPDATE log_entries SET status='completed',
-                        finished_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')
-                        WHERE parent_id=?""", (job_id,))
-        conn.execute("""UPDATE log_entries SET status='completed',
-                        finished_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')
-                        WHERE id=?""", (job_id,))
-        conn.commit()
+        with db_pool(_CONFIG["db_path"]) as conn2:
+            conn2.execute("""UPDATE log_entries SET status='completed',
+                            finished_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')
+                            WHERE parent_id=?""", (job_id,))
+            conn2.execute("""UPDATE log_entries SET status='completed',
+                            finished_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')
+                            WHERE id=?""", (job_id,))
+            conn2.commit()
 
         return success_single({"action": "apt_update_upgrade", "node_id": node_id,
                                "job_id": job_id, "message": "APT update + upgrade completed"})
@@ -692,14 +699,15 @@ def api_node_ping(node_id):
             stdout=_subp.DEVNULL, stderr=_subp.DEVNULL,
         )
         ps = "online" if result.returncode == 0 else "offline"
-    except Exception:
+    except Exception as _e:
+        logger.debug("ping failed for %s: %s", hostname, _e)
         ps = "offline"
 
     # Update DB
     try:
         _ups(_CONFIG["db_path"], node_id, ps)
-    except Exception:
-        pass  # non-critical
+    except Exception as _e:
+        logger.debug("ping state DB update failed (node_id=%d): %s", node_id, _e)
 
     return success_single({"ping_state": ps})
 
@@ -1443,8 +1451,8 @@ def api_preset_restart_all(engine_type, preset_id):
                 try:
                     _ts(_CONFIG["db_path"], iid, "stopping")
                     _ts(_CONFIG["db_path"], iid, "stopped")
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("preset_restart stop failed for inst %d: %s", iid, _e)
 
             # Trigger deploy via the deploy_instance function (skip_build since preset restart is config-only)
             deploy_result = deploy_instance(_CONFIG["db_path"], iid, skip_build=True)
@@ -1459,8 +1467,8 @@ def api_preset_restart_all(engine_type, preset_id):
                 from db.adapters.instances import log_action as _log
                 _log(_CONFIG["db_path"], iid, "preset_restart", "failed",
                         detail={"error": str(exc)})
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("preset_restart log_action failed for inst %d: %s", iid, _e)
 
         results.append(result)
 
@@ -2243,8 +2251,8 @@ def api_qr_actions():
                 if pb_rec:
                     d["playbook_file"] = pb_rec.get("file_path", "")
                     d["playbook_version"] = pb_rec.get("version", "")
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("playbook resolve by ID failed (pb_id=%s): %s", pb_id, _e)
 
         items.append(d)
 
@@ -2357,8 +2365,8 @@ def api_set_webui_settings():
                 (json.dumps(settings),)
             )
             conn.commit()
-    except Exception:
-        pass  # Non-critical — client localStorage is the primary store
+    except Exception as _e:
+        logger.debug("webui settings save failed (page=%s): %s", page, _e)
     return success_single({"saved": True})
 
 
@@ -2690,7 +2698,8 @@ def api_web_server_settings():
             try:
                 import json as _jc
                 co = _jc.loads(co)
-            except Exception:
+            except Exception as _e:
+                logger.debug("config_override JSON parse failed (web_instance): %s", _e)
                 co = {}
         from db.adapters.configs import get_engine_config as _gec_web, get_polling_intervals
         et_id = inst.get("engine_type_id")
@@ -2722,8 +2731,8 @@ def api_web_server_settings():
                 remote_poll = get_polling_intervals(_CONFIG["db_path"], api_et_id, is_local=False) or "600000"
                 result["polling_interval_local_sec"] = local_poll
                 result["polling_interval_remote_sec"] = remote_poll
-    except Exception:
-        pass  # Non-critical — polling values are engine-level, not instance-level
+    except Exception as _e:
+        logger.debug("polling interval fetch failed for web_instance %d: %s", inst["id"], _e)
     return success_single(result)
 
 
@@ -2766,7 +2775,8 @@ def api_web_server_update_settings():
             try:
                 import json as _jc2
                 co = _jc2.loads(co)
-            except Exception:
+            except Exception as _e:
+                logger.debug("config_override JSON parse failed (web_server_settings): %s", _e)
                 co = {}
         for k, v in config.items():
             co[k] = v
@@ -2922,7 +2932,8 @@ def api_mcp_settings():
             try:
                 import json as _jc
                 co = _jc.loads(co)
-            except Exception:
+            except Exception as _e:
+                logger.debug("config_override JSON parse failed (mcp_settings): %s", _e)
                 co = {}
         et_id = inst.get("engine_type_id")
         from db.adapters.configs import get_engine_config as _gec2
@@ -3005,7 +3016,8 @@ def api_mcp_update_settings():
         if isinstance(co, str):
             try:
                 co = json.loads(co)
-            except Exception:
+            except Exception as _e:
+                logger.debug("config_override JSON parse failed (mcp_config): %s", _e)
                 co = {}
         for k, v in config.items():
             co[k] = v
@@ -3348,7 +3360,8 @@ def api_cleanup_log_entries():
         body = request.get_json(silent=True) or {}
         older_than = body.get("older_than_minutes", 4320)  # 3 days default
         status_filter = body.get("status")  # optional: only delete specific status
-    except Exception:
+    except Exception as _e:
+        logger.debug("body parse failed (clear_ansible_actions): %s", _e)
         return error_response("VALIDATION_ERROR", "Invalid JSON body")
 
     try:
@@ -3359,7 +3372,7 @@ def api_cleanup_log_entries():
     if older_than < 1:
         older_than = 1
 
-    cutoff = (_dt.datetime.utcnow() - _dt.timedelta(minutes=older_than)).strftime("%Y-%m-%dT%H:%M:%S")
+    cutoff = (_dt.datetime.utcnow() - _dt.timedelta(minutes=older_than)).strftime("%Y-%m-%dT%H:%M:%SZ")
     # Protect running/recent jobs: never delete entries with status 'running', 'received', or 'queued'
     # unless the user explicitly filters by that status
     if not status_filter:
@@ -3406,7 +3419,8 @@ def api_health_check():
     try:
         body = request.get_json(silent=True) or {}
         scope = body.get("scope", "all")
-    except Exception:
+    except Exception as _e:
+        logger.debug("body parse failed (health_check_all): %s", _e)
         return error_response("VALIDATION_ERROR", "Invalid JSON body")
 
     results = {"nodes": {}, "instances": {}}
@@ -3511,8 +3525,8 @@ def api_health_check():
                     ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
                     _ui(_CONFIG["db_path"], iid,
                         last_state_change=ts)
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("last_state_change update failed for inst %d: %s", iid, _e)
                 # Recover error/build_error instances when health check confirms alive
                 from db.adapters.instances import get_instance as _gi
                 cur = _gi(_CONFIG["db_path"], iid)
@@ -3523,8 +3537,8 @@ def api_health_check():
                             from db.adapters.instances import transition_state as _ts
                             _ts(_CONFIG["db_path"], iid, "running")
                             new_state = "running"
-                        except Exception:
-                            pass
+                        except Exception as _e:
+                            logger.debug("transition_state error→running failed for inst %d: %s", iid, _e)
             else:
                 summary["instances_fail"] += 1
 
@@ -3874,8 +3888,8 @@ def _kill_subprocesses_on_exit():
                     pass  # already dead
         conn.commit()
         conn.close()
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.debug("kill_stale_instances DB cleanup failed: %s", _e)
 
 def _handle_signal(signum, frame):
     """Signal handler: kill subprocesses before exit."""
@@ -3888,13 +3902,14 @@ def _handle_signal(signum, frame):
         for child in api_proc.children(recursive=True):
             try:
                 child.terminate()
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("terminate subprocess child failed: %s", _e)
         _time.sleep(0.5)
         for child in api_proc.children(recursive=True):
             try:
                 child.kill()
-            except Exception:
+            except Exception as _e:
+                logger.debug("kill subprocess child failed: %s", _e)
                 pass
     except ImportError:
         # Fallback: use os.killpg to kill entire process group
@@ -3903,7 +3918,8 @@ def _handle_signal(signum, frame):
             os.killpg(os.getpgrp(), _sig.SIGTERM)
             _time.sleep(0.5)
             os.killpg(os.getpgrp(), _sig.SIGKILL)
-        except Exception:
+        except Exception as _e:
+            logger.debug("killpg fallback failed: %s", _e)
             pass
     os._exit(0)
 

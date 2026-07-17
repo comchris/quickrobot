@@ -170,6 +170,20 @@ class SchedulerRunner:
                     result.get("error", "unknown"), result["duration_ms"],
                 )
 
+                # Finalize parent job so Phase 3 stale detection can resolve it.
+                # _run_task_playbook already set task status='failed' in DB;
+                # we need to finalize the parent (mark error or requeue if retries remain).
+                from db.sqlite import pool
+                with pool(self.db_path) as conn:
+                    try:
+                        self.runner.complete_job(task["job_id"], conn=conn)
+                        conn.commit()
+                    except Exception as exc:
+                        logger.error(
+                            "[qr-scheduler] Failed to finalize job %d after task %d error: %s",
+                            task["job_id"], task["id"], exc,
+                        )
+
         except Exception as exc:
             logger.error(
                 "[qr-scheduler] Background worker for task %d failed: %s",
