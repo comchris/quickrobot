@@ -174,16 +174,28 @@ Updated system-managed instance QR-Sched (ID 4)
 [qr] Pre-flight: all ports and processes clear
 [qr] host ping started (interval=120s)
 [qr] 17:53:14 run_startup returned
+<<<<<<< Updated upstream
 [qr] quickrobot API server starting on http://127.0.0.1:7039
+=======
+[qr] quickrobot API server starting on http://127.0.0.1:8039
+>>>>>>> Stashed changes
 [qr] version=v0.11 mode=prod
 [qr] 17:53:14 starting waitress.serve
 [qr] starting waitress.serve()
 [qr] ENV: subprocess env reduced 127 → 16 keys (whitelist)
+<<<<<<< Updated upstream
 [qr] [WEBUI] auto-start: Quickrobot Webui at http://127.0.0.1:7038/webui/  pid=540300  api=127.0.0.1:7039
 [qr] Quickrobot Mcp start failed: mcp package not installed. Run: pipx install mcp or pip install mcp
 [qr] [SCHEDULER] auto-start: Quickrobot Scheduler at N/A (background process, no network endpoint)  pid=540308  api=127.0.0.1:7039
 ```
 open http://127.0.0.1:7038/webui/ in Browser 
+=======
+[qr] [WEBUI] auto-start: Quickrobot Webui at http://127.0.0.1:8038/webui/  pid=540300  api=127.0.0.1:8039
+[qr] Quickrobot Mcp start failed: mcp package not installed. Run: pipx install mcp or pip install mcp
+[qr] [SCHEDULER] auto-start: Quickrobot Scheduler at N/A (background process, no network endpoint)  pid=540308  api=127.0.0.1:8039
+```
+open http://127.0.0.1:8038/webui/ in Browser 
+>>>>>>> Stashed changes
 
 
 Currently llama.cpp deployment is limited to git builds per node from scratch, binary downloads will follow later. (apt)   
