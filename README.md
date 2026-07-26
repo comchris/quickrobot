@@ -19,7 +19,6 @@ WIP
 ![RPCandClusterSetup](docs/examples/llamaCPP_cluster/Expertsplit9nodes-GLM52-Q2XXS/Expertsplit9nodes-GLM52-Q2XXS_001.png)
 
 
-
 Example Quickrobot prompt:
 
 "Start quickrobot server. Add 3 nodes (Hostnames node1.lan, node2.lan, node3.lan). 
@@ -60,14 +59,13 @@ Model Qwen3.6-35B-A3B-MTP-Q5_K_M.gguf ~ 23GB  CTX_SIZE=262144   ~ 10t/s
 
 ## "Security":
 
-- API key gatekeeper (`QUICKROBOT_API_KEY`) on all `/api/v1/*` routes
+- no TLS/HTTPS by default currently
+- API key (`QUICKROBOT_API_KEY`) on all `/api/v1/*` routes
 - WebUI password login (`QUICKROBOT_WEBUI_PASSWORD`), rate-limited with failed-attempt logging
-- MCP auth via same `QUICKROBOT_API_KEY` token, configurable DNS rebinding protection
-- SSL optional — plain HTTP by default (`QUICKROBOT_*_SSL_CERT/KEY` for future HTTPS)
-- CORS wildcard (`*`) by default, configurable via `QUICKROBOT_API_CORS_ORIGINS`
-- REMOTE LLama.cpp SERVERS BIND TO 0.0.0.0 by default - Needs Custom per Instance override to local (v/Vx/LAN ipv4/6) and "re-deploy" - but I added warning Label in Ape interface - should be fine^^  
+- MCP auth via same `QUICKROBOT_API_KEY` token- plain HTTP by default (future HTTPS)
+- REMOTE LLama.cpp SERVERS BIND TO 0.0.0.0 by default - Needs Custom per Instance override to local (v/Vx/LAN ipv4/6) and "re-deploy"   
 - Run Agent Harness's console and the (API) server as different users for seperation.
-- TODO: randomize API key on server deployment and use for proxy and API interactions
+
 
 ## BUT WHY?
 
@@ -92,21 +90,6 @@ Draft (MTP) Model handling for standalone draft heads,
 Model and Preset based Merge chain for ENV or cli
 TODO wrapper for downloader with checksums
 
-
-
-
-## "Get started" 
-WIP
-
-Currently llama.cpp deployment is limited to git builds per node from scratch, binary downloads will follow later. (apt)   
-
-## Features (Unique Capabilities)
-
-- **RPC Cluster Inference** — Distribute a single model across multiple nodes. Each RPC node holds GPU/CPU memory; the main server coordinates attention layers, KV cache, and MoE experts across the cluster via gRPC. Supports tensor_split, layer_split, and expert_split modes.
-- **6-Layer Config Merge Chain** — Engine defaults → node defaults → preset template → model params → cluster bindings → instance override. Preset changes only rewrite the env file (no git clone, no cmake rebuild, no port change). Swap presets on a running instance in <100ms.
-- **Ansible Playbook Deployment** — Remote nodes managed via structured playbooks (not raw SSH). Each deploy stage (preflight, deps, source, compile, config, start) is independent and retryable. Shared build per node: one git clone + cmake build serves all instances on that host.
-- **Per-Instance Auth Tokens** — Every llama_server/llama_rpc instance gets a random bearer token on creation. Toggle globally via `auto_auth_token` engine config. Regenerate or disable tokens from WebUI without redeploy.
-- **Staged Chain with Async Jobs** — Create + deploy + start in one API call. Scheduler polls for queued jobs, executes stages sequentially. 2-hour global timeout per job. Query progress via `/jobs` and `/tasks` endpoints.
 
 ## Architecture
 
@@ -138,35 +121,8 @@ Currently llama.cpp deployment is limited to git builds per node from scratch, b
               └───────────────────────┘
 ```
 
-**System Engines** (managed by API on startup):
-| Engine | Port | Lifecycle | Purpose |
-|--------|------|-----------|---------|
-| API server | `QUICKROBOT_API_PORT` | REST API + route handlers |
-| WebUI | `QUICKROBOT_WEBUI_PORT` | subprocess | Browser SPA (instances, models, herd) |
-| MCP server | `QUICKROBOT_MCP_PORT` | subprocess | LLM agent tools via SSE transport |
-| Scheduler | N/A | subprocess | Claims queued jobs, executes staged chains |
-
-**Engine Types** (user instances):
-| Engine ID | Type | Purpose |
-|-----------|------|---------|
-| 21 | llama_server | Model-loaded inference on remote nodes |
-| 22 | llama_rpc | CPU gRPC serving for cluster offload |
-| 31 | iperf3 | Network bandwidth testing |
-| 23 | timestamp_proxy | Chat proxy with in-prompt timestamp injection |
-
 **Deployment Stages** (llama_server/llama_rpc):
 `preflight` → `deps` → `source` (git clone) → `compile` (cmake, up to 30min) → `config_svc` (systemd unit) → `config_env` (env file, `$QR_CLI_ARGS_JOINED`) → `start` (service + health probe)
-
-## Preset System
-
-Presets bundle environment variables, CLI arguments, and model references into reusable templates. They are the core mechanism for configuring instances.
-
-**How presets work:**
-1. Create an instance with a preset (or create without one, stays `unconfigured`)
-2. Preset provides default `env` vars, `cli_opts`, and a `model_id` reference
-3. At deploy time, quickrobot merges 6 layers of config (L1-L6 above) to produce the final command line
-4. To change presets on a running instance: `PUT /instances/<id>` with new `preset_id` — only the env file is rewritten, the server restarts with the new model
-
 
 ## Configuration
 
@@ -179,45 +135,9 @@ Network configuration is defined in `.quickrobot.env` (human-edited, read-only b
 | `QUICKROBOT_MCP_HOST` / `PORT` | `127.0.0.1` / `8040` | MCP server bind address |
 | `*_AUTOSTART` flags | `true` | Auto-start WebUI/MCP/Scheduler on API boot |
 
-## Security Notes
+## "Get started" 
 
-**Current security model:** quickrobot is designed for trusted, air-gapped LANs. Security features are minimal and configurable.
+WIP
 
-### Implemented but untested!
+Currently llama.cpp deployment is limited to git builds per node from scratch, binary downloads will follow later. (apt)   
 
-| Feature | Details |
-|---------|---------|
-| **Per-instance auth tokens** | Each llama_server/llama_rpc instance gets a random bearer token on creation. Controlled by `auto_auth_token` engine config (`true`/`false`). Tokens used as `Authorization: Bearer` header for `/v1/completions`. |
-| **MCP SSE authentication** | MCP endpoint gated by `QUICKROBOT_API_KEY` (or `QUICKROBOT_MCP_TOKEN` if set separately — dual-token feature in design). |
-| **Subprocess env whitelist** | WebUI/MCP/Scheduler subprocesses receive only engine-scoped environment variables, not full inheritance. Sensitive tokens filtered. |
-| **MCP DNS rebinding protection** | Configurable via `QUICKROBOT_MCP_DISABLE_DNS_REBINDING` env var. |
-| **CORS wildcard** | Default `allow_origins=["*"]` for all engines. Can be tightened per-engine in config. |
-
-### Known Risks & Planned
-
-| Risk | Current State | Planned |
-|------|--------------|---------|
-| **No SSL/TLS** | Plain HTTP on all ports | TODO: reverse proxy with TLS termination |
-| **RPC servers bind 0.0.0.0** | All interfaces by default; per-instance override available | Consider changing default to 127.0.0.1 (BIND-ADDR TODO, deferred) |
-| **Single-token auth** | Same key gates MCP SSE + proxy calls | `QUICKROBOT_MCP_TOKEN` for serving vs `QUICKROBOT_API_KEY` for proxy (MCP-DUAL-TOKEN, v0.11+) |
-| **No container isolation** | Runs directly on host OS | Users bring their own containers/VMs/airgap |
-
-**Trust model:** SSH key-based trust for remote node access. If an untrusted host can reach the API port, it has full control over all instances (deploy, stop, reconfigure). Designed for trusted LAN only.
-
-## MCP Integration
-
-The MCP server exposes tools wrapping the REST API for LLM agent use. Two tiers:
-
-**Summary tools** (low token usage, recommended for smaller models):
-| Tool | Purpose |
-|------|---------|
-| `list_instances_summary()` | Inventory: id, name, state, engine, node, port |
-| `list_nodes_summary()` | Availability: id, name, hostname, status, ping_state |
-| `list_presets_summary(engine_type)` | Preset selection |
-| `list_models_summary(engine_type)` | Model selection |
-
-**Write tools:**
-`create_instance()`, `deploy_instance()`, `start_instance()`, `stop_instance()`, `restart_instance()`, `change_preset()`, `delete_instance()`, `create_node()`, `discover_node()`, `toggle_node_active()`, `bind_rpc()`, `unbind_rpc()`, `scan_models()`, `run_benchmark()`
-
-**Proxy tool** (requires `ALLOW_PROXY`):
-`quickrobot_api(method, path, body)` — direct pass-through to any API endpoint.
