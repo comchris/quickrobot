@@ -201,7 +201,7 @@ def resolve_seed_path(project_root=None):
         from qr_api import _project_root
         project_root = _project_root
     if _seed_file_path is None:
-        _seed_file_path = os.path.join(project_root, "data", "_seed", "seed_v010.sql")
+        _seed_file_path = os.path.join(project_root, "data", "_seed", "seed_v011.sql")
     return _seed_file_path
 
 
@@ -286,5 +286,153 @@ def pre_validate_seed_checksum(env_cfg):
         print(f"  actual:   {actual_size}")
         print("[qr] Check .quickrobot.env QUICKROBOT_SEED_FILESIZE and seed file integrity.")
         sys.exit(1)
+
+
+def ensure_db_and_env(project_root=None):
+    """Pre-flight check for DB file + .env file existence.
+
+    Handles 4 scenarios:
+      A) Both exist → return (proceed normally)
+      B) .env missing, DB exists → FATAL: copy sample then restart
+      C) DB missing, .env exists → return (phase3_db_handling() creates fresh DB)
+      D) Both missing + sample exists → copy sample, generate secrets, EXIT 1
+
+    Args:
+        project_root: Project root directory. Defaults to current working dir.
+
+    Returns:
+        None — exits via sys.exit(1) in scenarios B, D. Scenario C returns.
+    """
+    import secrets as _secrets
+
+    if project_root is None:
+        try:
+            from qr_api import _project_root
+            project_root = _project_root
+        except ImportError:
+            project_root = os.getcwd()
+
+    db_path = os.path.join(project_root, "data", "quickrobot.db")
+    env_path = os.path.join(project_root, ".quickrobot.env")
+    sample_path = os.path.join(project_root, ".quickrobot.env.sample")
+
+    db_exists = os.path.isfile(db_path)
+    env_exists = os.path.isfile(env_path)
+    sample_exists = os.path.isfile(sample_path)
+
+    if db_exists and env_exists:
+        return  # both present, proceed
+
+    if not env_exists and db_exists and sample_exists:
+        print("[qr] FATAL: .quickrobot.env missing but DB exists.")
+        print(f"[qr]   Copy the sample: cp {sample_path} {env_path}")
+        print("[qr]   Then restart quickrobot to load config.")
+        sys.exit(1)
+
+    if env_exists and not db_exists:
+        print("[qr] .quickrobot.env exists — will create fresh DB on next phase.")
+        return  # Let phase3_db_handling() create the DB naturally
+
+    # Both missing — attempt auto-provision from sample
+    if not env_exists and not db_exists and sample_exists:
+        # Copy sample → .env
+        import shutil as _shutil
+        _shutil.copy2(sample_path, env_path)
+
+        # Generate random secrets for WebUI password and API key
+        new_password = _secrets.token_urlsafe(24)
+        new_api_key = _secrets.token_urlsafe(32)
+
+        # Replace CHANGE_ME placeholders in the new .env file
+        with open(env_path, "r") as f:
+            content = f.read()
+        content = content.replace("QUICKROBOT_WEBUI_PASSWORD=CHANGE_ME",
+                                  f"QUICKROBOT_WEBUI_PASSWORD={new_password}")
+        content = content.replace("QUICKROBOT_API_KEY=CHANGE_ME",
+                                  f"QUICKROBOT_API_KEY={new_api_key}")
+        with open(env_path, "w") as f:
+            f.write(content)
+
+        print("=" * 60)
+        print("[qr] Fresh setup detected — generated new .quickrobot.env")
+        print("=" * 60)
+        print(f"[qr] WebUI password: {new_password}")
+        print(f"[qr] API key:        {new_api_key}")
+        print(f"[qr] File created:   {env_path}")
+        print("[qr] Restart quickrobot to create fresh DB with seed data.")
+        print("=" * 60)
+        sys.exit(1)
+
+    # Fallback: nothing found
+    print("[qr] FATAL: No DB, no .env, no sample file found.")
+    if not sample_exists:
+        print(f"[qr]   Expected sample at: {sample_path}")
+    sys.exit(1)
+
+
+def load_ssl_context(cert_key_map):
+    """Load ssl.SSLContext from cert/key pairs in env config dict.
+
+    Checks each (cert, key) pair from cert_key_map. If both files exist and
+    are valid, loads the first successful context and returns it.
+
+    Args:
+        cert_key_map: dict of {engine_name: {"cert": path, "key": path}}
+
+    Returns:
+        ssl.SSLContext if any pair is valid, or None.
+    """
+    import ssl as _ssl
+
+    for engine, paths in cert_key_map.items():
+        cert = paths.get("cert", "")
+        key = paths.get("key", "")
+        if not cert or not key:
+            continue
+        if os.path.isfile(cert) and os.path.isfile(key):
+            ctx = _ssl.create_default_context(_ssl.Purpose.CLIENT_AUTH)
+            ctx.load_cert_chain(cert, key)
+            return ctx
+    return None
+
+
+def check_ssl_engine(cert_path, key_path, engine_name):
+    """Validate SSL cert/key pair for a single engine.
+
+    Returns (ssl_context_or_None, log_message).
+    - Empty paths → returns (None, "HTTP")
+    - Missing file → logs warning, returns (None, "HTTP (cert/key missing)")
+    - Wrong file type → logs error, returns (None, "HTTP (bad file)")
+    - Both valid files → loads context, returns (ctx, "HTTPS")
+
+    Args:
+        cert_path: Path to SSL certificate file
+        key_path: Path to SSL private key file
+        engine_name: Human-readable engine name for logging
+
+    Returns:
+        tuple: (ssl.SSLContext or None, log_message string)
+    """
+    import ssl as _ssl
+
+    if not cert_path and not key_path:
+        return None, "HTTP"
+    if not cert_path or not key_path:
+        missing = "cert" if not cert_path else "key"
+        print(f"[qr] WARNING: {engine_name} SSL — {missing} path empty, using HTTP")
+        return None, f"HTTP (no {missing})"
+    if not os.path.isfile(cert_path):
+        print(f"[qr] WARNING: {engine_name} SSL — cert not a file ({cert_path}), using HTTP")
+        return None, f"HTTP (cert missing)"
+    if not os.path.isfile(key_path):
+        print(f"[qr] WARNING: {engine_name} SSL — key not a file ({key_path}), using HTTP")
+        return None, f"HTTP (key missing)"
+    try:
+        ctx = _ssl.create_default_context(_ssl.Purpose.CLIENT_AUTH)
+        ctx.load_cert_chain(cert_path, key_path)
+        return ctx, "HTTPS"
+    except Exception as exc:
+        print(f"[qr] WARNING: {engine_name} SSL — load failed ({exc}), using HTTP")
+        return None, f"HTTP (load error: {exc})"
 
 

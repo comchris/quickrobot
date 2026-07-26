@@ -39,7 +39,8 @@ if os.path.isfile(_env_file):
             if len(_v) >= 2 and (( _v[0] == '"' and _v[-1] == '"') or (_v[0] == "'" and _v[-1] == "'")):
                 _v = _v[1:-1]
             os.environ[_k] = _v
-del _f, _line, _k, _v, _env_file  # clean up loop vars
+    del _f, _line, _k, _v  # clean up loop vars (only defined if file existed)
+del _env_file  # always defined above
 
 # Module-level logger for bare-except blocks at module scope (lines 237-243)
 import logging as _logging
@@ -77,6 +78,10 @@ atexit.register(_remove_pid_file)
 
 def main():
     """Entry point for the quickrobot API server (CLI + pipx install)."""
+    # Pre-flight: verify DB + .env file state before anything else
+    from lib.lib_startup import ensure_db_and_env as _ensure_db_env
+    _ensure_db_env(_project_root)
+    
     # Use standard logging from the start — no separate debug log file needed.
     # Configure a basic console handler so we capture startup messages even
     # before the Flask app's logger is fully set up.
@@ -191,7 +196,7 @@ def main():
     # Register routes (idempotent — already registered at package import time)
     register_routes(app)
     
-    print(f"[qr] quickrobot API server starting on {config['host']}:{config['api_port']}")
+    print(f"[qr] quickrobot API server starting on http://{config['host']}:{config['api_port']}")
     print(f"[qr] version={VERSION} mode={config.get('pb_mode', 'prod')}")
     
     # Exit mode: system engines already started by run_startup(), skip Flask loop

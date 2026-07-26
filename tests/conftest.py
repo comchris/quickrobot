@@ -272,46 +272,46 @@ def playbook_info():
 def db_path(env_config):
     """Database path for tests.
 
-    If DB exists, use it (copy to temp).
+    If DB exists, use it (copy to temp dir).
     If DB does not exist, create a fresh temp DB and seed it.
+    Uses tempfile.TemporaryDirectory so files are auto-removed on GC,
+    even if pytest is interrupted (Ctrl+C).
     """
     import sqlite3
 
-    # Check if we have an existing DB
-    if DB_PATH.exists():
-        # Use a copy so tests don't pollute live DB
-        tmp = tempfile.NamedTemporaryFile(
-            suffix=".db", prefix="qr_test_", delete=False, dir=DB_DIR
-        )
-        tmp_path = tmp.name
-        tmp.close()
-        shutil.copy2(str(DB_PATH), tmp_path)
-        yield tmp_path
-        # Cleanup: remove temp DB (keep live DB untouched)
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-    else:
-        # Fresh DB — create temp, apply base schema + seed data
-        tmp = tempfile.NamedTemporaryFile(
-            suffix=".db", prefix="qr_test_fresh_", delete=False, dir=DB_DIR
-        )
-        tmp_path = tmp.name
-        tmp.close()
+    tmpdir = tempfile.TemporaryDirectory(prefix="qr_test_")
+    try:
+        # Check if we have an existing DB
+        if DB_PATH.exists():
+            # Use a copy so tests don't pollute live DB
+            tmp_path = os.path.join(tmpdir.name, "quickrobot.db")
+            shutil.copy2(str(DB_PATH), tmp_path)
+        else:
+            # Fresh DB — create temp, apply base schema + seed data
+            tmp_path = os.path.join(tmpdir.name, "quickrobot.db")
 
-        seed_files = sorted(SEED_DIR.glob("seed_v*.sql"), key=lambda p: p.name)
-        if seed_files:
-            # Prefer non-backup files
-            active_seed = [f for f in seed_files if "_backup_" not in f.name]
-            seed_file = sorted(active_seed, key=lambda p: p.name)[-1] if active_seed else seed_files[-1]
-            # Apply seed
-            conn = sqlite3.connect(tmp_path)
-            conn.executescript(seed_file.read_text())
-            conn.close()
+            seed_files = sorted(SEED_DIR.glob("seed_v*.sql"), key=lambda p: p.name)
+            if seed_files:
+                active_seed = [f for f in seed_files if "_backup_" not in f.name]
+                seed_file = sorted(active_seed, key=lambda p: p.name)[-1] if active_seed else seed_files[-1]
+                conn = sqlite3.connect(tmp_path)
+                conn.executescript(seed_file.read_text())
+                conn.close()
+
         yield tmp_path
+    finally:
+        # TemporaryDirectory auto-removes on close — safe even if interrupted
+        tmpdir.cleanup()
+
+
+# Session finalizer: clean up any orphaned qr_test_*.db files in data/
+@pytest.fixture(scope="session", autouse=True)
+def _clean_test_db_orphans():
+    """Remove any qr_test_*.db files left behind from previous interrupted test runs."""
+    yield
+    for f in DB_DIR.glob("qr_test_*.db"):
         try:
-            os.unlink(tmp_path)
+            os.unlink(f)
         except OSError:
             pass
 

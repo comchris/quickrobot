@@ -29,7 +29,7 @@ Usage:
 """
 
 # ── Version ───────────────────────────────────────────────────────────
-QUICKROBOT_VERSION = "v0.10"
+QUICKROBOT_VERSION = "v0.11"
 
 # ── Default bind host (localhost loopback) ────────────────────────────
 # SSOT for "127.0.0.1" fallbacks across the codebase.

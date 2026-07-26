@@ -74,7 +74,8 @@ if os.path.isfile(_env_file):
             if len(_v) >= 2 and ((_v[0] == '"' and _v[-1] == '"') or (_v[0] == "'" and _v[-1] == "'")):
                 _v = _v[1:-1]
             os.environ[_k] = _v
-del _f, _line, _k, _v, _env_file
+    del _f, _line, _k, _v  # clean up loop vars (only defined if file existed)
+del _env_file  # always defined above
 
 # Root guard — same as main process, refuse to run as root
 if os.getuid() == 0:

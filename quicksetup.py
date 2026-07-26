@@ -30,6 +30,10 @@ from db.sqlite import pool as _pool
 from lib.qr_engine_ids import QR_ENGINE_LLAMA_SERVER
 from qr_api import _project_root
 
+# Pre-flight: verify DB + .env file state
+from lib.lib_startup import ensure_db_and_env as _ensure_db_env
+_ensure_db_env(_project_root)
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 PRESET_ROUTER_ID = 20         # QuickSetup-Router (fast start, no model)
 PRESET_DOWNLOAD_ID = 21       # QuickSetup-Download (model download trigger)

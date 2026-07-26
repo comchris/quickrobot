@@ -1099,6 +1099,8 @@ def phase5_init():
     qr_env = _env_result[0] if isinstance(_env_result, tuple) else (_CONFIG.get("qr_env_config", {}) if "_CONFIG" in dir() else {})
     # Set qr_env_config and logging config keys in _CONFIG (now defined)
     _CONFIG["qr_env_config"] = qr_env
+    # Load SSL contexts from .env cert/key pairs (deferred — waitress doesn't support it yet)
+    _CONFIG["ssl_context"] = None
     if isinstance(_env_result, tuple) and len(_env_result) >= 3:
         _CONFIG["console_debug_level"] = _env_result[1]
         _CONFIG["ansible_log_level"] = _env_result[2]

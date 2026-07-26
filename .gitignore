@@ -13,6 +13,7 @@ data/*.db
 data/quickrobot.pid
 data/quickrobot.db-wal
 data/quickrobot.db-shm
+data/_certs/
 
 # Opencode managed
 .opencode/node_modules/
@@ -23,6 +24,7 @@ data/quickrobot.db-shm
 .env
 .env.local
 .env.*.local
+.quickrobot.env
 
 # Editor configs
 .vscode/
