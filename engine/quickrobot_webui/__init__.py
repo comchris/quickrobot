@@ -25,13 +25,13 @@ import sys
 import time
 
 logger = logging.getLogger(__name__)
-from lib.qr_engine_ids import QR_DEFAULT_LOCALHOST, QR_FORBIDDEN_HOSTS
+from lib.qr_engine_ids import QR_DEFAULT_LOCALHOST, QR_FORBIDDEN_HOSTS, QR_ENGINE_WEBUI_NAME
 
 from engine.base import BaseEngine
 
 
 CAPABILITIES = {
-    "name": "quickrobot-webui",
+    "name": QR_ENGINE_WEBUI_NAME,
     "display_name": "Quickrobot WebUI",
     "supports_models": False,
     "supports_presets": False,
@@ -173,13 +173,13 @@ class QrWebuiEngine(BaseEngine):
         """
         from db.adapters.instances import update_instance
         if not config_dict:
-            return {"engine": "quickrobot-webui", "config": {}}
+            return {"engine": QR_ENGINE_WEBUI_NAME, "config": {}}
 
         try:
             inst = update_instance(db_path, instance_id, config_override=config_dict)
-            return {"engine": "quickrobot-webui", "config": config_dict, "applied": True}
+            return {"engine": QR_ENGINE_WEBUI_NAME, "config": config_dict, "applied": True}
         except Exception as exc:
-            return {"engine": "quickrobot-webui", "error": str(exc)}
+            return {"engine": QR_ENGINE_WEBUI_NAME, "error": str(exc)}
 
     def get_config(self, instance_id, db_path=None):
         """Read current web server config from instance.

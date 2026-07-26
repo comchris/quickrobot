@@ -26,7 +26,7 @@ import subprocess
 import sys
 
 logger = logging.getLogger(__name__)
-from lib.qr_engine_ids import QR_DEFAULT_LOCALHOST
+from lib.qr_engine_ids import QR_DEFAULT_LOCALHOST, QR_ENGINE_PORT_DEFAULTS
 from engine.base import BaseEngine
 
 
@@ -50,20 +50,14 @@ class QrSubprocessEngine(BaseEngine):
     def get_state_machine(cls):
         """State machine for subprocess engine.
 
-        Extends base machine but removes states not applicable to subprocess
-        (compiling, updating, build_error) since subprocess has no cmake build.
-        Adds config-from-running support for BC-1 style updates.
+        Removes build states (compiling, updating, build_error) from all entries
+        and adds configuring from running (BC-1 style config updates).
         """
-        sm = super().get_state_machine()
-        # Remove build-specific states not relevant to subprocess
-        for key in list(sm.keys()):
-            sm[key] = [s for s in sm[key] if s not in ("compiling", "updating", "build_error", "test_mode")]
-        # Remove states that subprocess can't reach
-        for key in ["unconfigured", "configuring", "deploying", "deployed", "starting", "running", "stopping", "stopped", "error"]:
-            sm[key] = [s for s in sm[key] if s != "compiling" and s != "updating" and s != "build_error"]
-        # Add configuring from running (BC-1 style config updates)
-        sm["running"].append("configuring")
-        return sm
+        from lib.lib_engine_states import build_state_machine as _bsm
+        return _bsm(
+            removals=["compiling", "updating", "build_error"],
+            extensions={"running": ["configuring"]},
+        )
 
     def get_status(self, instance_id, db_path=None):
         """Check if the subprocess is running via PID-in-DB.
@@ -307,7 +301,7 @@ class QrSubprocessEngine(BaseEngine):
                 from lib.lib_system_engine import build_subprocess_env
                 from qr_api import _CONFIG as _qr_config
                 api_host = _qr_config.get("host", QR_DEFAULT_LOCALHOST) if isinstance(_qr_config, dict) else QR_DEFAULT_LOCALHOST
-                api_port = _qr_config.get("api_port", 8039) if isinstance(_qr_config, dict) else 8039
+                api_port = _qr_config.get("api_port") or QR_ENGINE_PORT_DEFAULTS.get("quickrobot-api") or 8039
                 env = build_subprocess_env(
                     engine_name="subprocess",
                     env_config={},
@@ -382,102 +376,57 @@ class QrSubprocessEngine(BaseEngine):
 
         raise ValueError(f"Unknown action: {command}")
 
-    def list_resources(self, instance_id, db_path=None):
-        """No models or presets for subprocess engine."""
-        return {"models": [], "presets": []}
-
-    def get_presets(self, engine_type_id, db_path=None):
-        """No presets for subprocess engine."""
-        return []
-
-    def set_active_preset(self, instance_id, preset_id, db_path=None):
-        """No presets for subprocess engine."""
-        pass
-
+    # list_resources, get_presets, set_active_preset inherited from BaseEngine (shared lib)
     @classmethod
     def get_instance_status(cls, db_path, instance_id):
         """Unified status endpoint for subprocess instances (STATUS-1).
 
-        Returns a standardized dict with engine_data, available actions,
-        warnings, and meta info for WebUI rendering.
+        Delegates to shared build_instance_status() with subprocess-specific
+        extras (pid_last_known, executable from config_override).
         """
+        result = cls.build_instance_status(db_path, instance_id)
+        if not result:
+            return None
+
+        # Engine-specific: pid + executable from config_override
         from db.sqlite import pool
 
         with pool(db_path) as conn:
-            inst = conn.execute(
-                """SELECT i.id, i.name, i.state, i.port_assigned,
-                          i.config_override,
-                          e.name as engine_type_name,
-                          n.hostname as node_hostname,
-                          i.pid_last_known
-                   FROM instances i
-                   JOIN engine_types e ON i.engine_type_id = e.id
-                   LEFT JOIN nodes n ON i.node_id = n.id
-                   WHERE i.id = ?""",
+            co_row = conn.execute(
+                "SELECT config_override, pid_last_known FROM instances WHERE id = ?",
                 (instance_id,),
             ).fetchone()
 
-        if not inst:
-            return None
+        if co_row:
+            co_raw = co_row["config_override"] or "{}"
+            co_dict = {}
+            try:
+                import json as _json
+                co_dict = _json.loads(co_raw) if isinstance(co_raw, str) else (co_raw if isinstance(co_raw, dict) else {})
+            except Exception as _e:
+                logger.debug("config_override JSON parse failed (get_status): %s", _e)
+                pass
+            executable = co_dict.get("executable", "")
+            result["engine_data"]["pid"] = co_row["pid_last_known"]
+            result["engine_data"]["executable"] = executable or "-"
 
-        # Extract executable from config_override JSON (stored as string)
-        co_raw = inst["config_override"] or "{}"
-        co_dict = {}
-        try:
-            import json as _json
-            co_dict = _json.loads(co_raw) if isinstance(co_raw, str) else (co_raw if isinstance(co_raw, dict) else {})
-        except Exception as _e:
-            logger.debug("config_override JSON parse failed (get_status): %s", _e)
-            pass
-        executable = co_dict.get("executable", "")
+        # Subprocess: no node hostname warning
+        return result
 
-        engine_data = {
-            "port_assigned": inst["port_assigned"],
-            "node_hostname": inst["node_hostname"],
-            "pid": inst["pid_last_known"],
-            "executable": executable or "-",
-        }
+    @classmethod
+    def build_instance_status(cls, db_path, instance_id):
+        """Shared STATUS-1 base response (lib/lib_engine_status.build_instance_status).
 
-        actions = cls._get_available_actions(inst["state"])
-        warnings = []
-
-        state_machine = cls.get_state_machine()
-        valid_next = state_machine.get(inst["state"], [])
-
-        return {
-            "id": inst["id"],
-            "state": inst["state"],
-            "engine_type_name": inst["engine_type_name"],
-            "engine_data": engine_data,
-            "actions": actions,
-            "warnings": warnings,
-            "_meta": {
-                "valid_next_states": valid_next,
-                "is_transitioning": inst["state"] in ("configuring",),
-            },
-        }
+        subprocess-specific: only 'configuring' in transitioning states.
+        """
+        from lib.lib_engine_status import build_instance_status as _shared_build
+        return _shared_build(cls, db_path, instance_id)
 
     @classmethod
     def _get_available_actions(cls, state):
-        """Map instance state to available actions.
-
-        Subprocess engine does not support reconfigure — it has no config
-        merge pipeline (no preset/env/template chain). Use restart instead.
-        Delete is hidden in running state (instance must be stopped first).
-        """
-        action_map = {
-            "unconfigured": [{"name": "deploy", "label": "Deploy"}, {"name": "delete", "label": "Delete"}],
-            "configuring": [{"name": "stop", "label": "Stop"}],
-            "deployed": [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "delete", "label": "Delete"}],
-            "starting": [{"name": "stop", "label": "Stop"}],
-            "running": [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "stop", "label": "Stop"}],
-            "stopping": [{"name": "start", "label": "Start"}],
-            "stopped": [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "deploy", "label": "Deploy"}],
-            "error": [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "deploy", "label": "Deploy"}, {"name": "delete", "label": "Delete"}],
-            "build_error": [{"name": "deploy", "label": "Deploy"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "delete", "label": "Delete"}],
-            "timeout": [{"name": "deploy", "label": "Deploy"}],
-        }
-        return action_map.get(state, [])
+        """Map instance state to available actions (shared lib module)."""
+        from lib.lib_engine_actions import get_action_map
+        return get_action_map(CAPABILITIES["name"]).get(state, [])
 
     def forward_request(self, instance_id, method, params=None, db_path=None):
         """Forward a request — returns subprocess status."""

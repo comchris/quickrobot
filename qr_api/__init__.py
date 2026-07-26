@@ -13,7 +13,28 @@ from werkzeug.exceptions import NotFound, MethodNotAllowed
 
 app = Flask(__name__)
 
+# ---------------------------------------------------------------------------
+# CORS — global middleware for all /api/v1/* routes.
+# Configured via QUICKROBOT_API_CORS_ORIGINS in .quickrobot.env.
+# Default: wildcard "*" for trusted LAN deployments.
+# ---------------------------------------------------------------------------
+import os as _cors_os
+_cors_origins_raw = _cors_os.environ.get("QUICKROBOT_API_CORS_ORIGINS", "*").strip()
+if _cors_origins_raw == "*":
+    _cors_allow_all = "*"
+else:
+    _cors_allow_all = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()] or "*"
+
+from flask_cors import CORS as _CORS
+_CORS(app, resources={r"/api/v1/*": {"origins": _cors_allow_all}}, supports_credentials=False)
+
 import time as _time_mod
+import logging as _logging
+
+# LOG-CONSOLIDATE: shared dual logger (console + file) for API
+import lib.lib_logging as _ll
+logger = _ll.create_logger("api")
+
 _START_TIME = _time_mod.time()
 
 # Project root — PARENT of this package directory
@@ -102,7 +123,7 @@ def _kill_existing(port=None):
         os.remove(pid_path)
         return
 
-    print(f"Found existing process (PID {pid}) on port {target_port}")
+    logger.debug("Found existing process (PID %d) on port %d", pid, target_port)
     import signal
     try:
         os.kill(pid, signal.SIGTERM)
@@ -113,11 +134,11 @@ def _kill_existing(port=None):
                 os.kill(pid, 0)
                 time.sleep(0.2)
             except OSError:
-                print(f"Process {pid} terminated gracefully")
+                logger.debug("Process %d terminated gracefully", pid)
                 break
         else:
             os.kill(pid, signal.SIGKILL)
-            print(f"Process {pid} force-killed")
+            logger.debug("Process %d force-killed", pid)
     except OSError:
         pass
 
@@ -153,64 +174,160 @@ def _method_not_allowed(error):
     return jsonify({"status": "error", "code": "VALIDATION_ERROR", "message": str(error)}), 405
 
 
-# Instance route handlers
-from .routes_instances import (
-    api_bind_rpc,
-    api_cluster_bind,
+# ── Auth state ────────────────────────────────────────────────────────
+# Loaded once at startup from .quickrobot.env / os.environ.
+# Supports multiple tokens: API_KEY, WEBUI_TOKEN, MCP_TOKEN are all valid.
+# Empty string or missing for ALL = no auth (legacy mode).
+# When any is set, enforced on all /api/v1/* routes except allowlisted paths.
+_AUTH_TOKENS = set()
+
+
+def _load_api_key():
+    """Load the single API gatekeeper key from environment. Called once during startup.
+    
+    All services (MCP, WebUI, external agents) use the same token.
+    The API validates whichever X-API-Key header the caller provides.
+    """
+    global _AUTH_TOKENS
+    import os as _os
+    _AUTH_TOKENS = set()
+    raw = _os.environ.get("QUICKROBOT_API_KEY", "").strip()
+    if raw:
+        _AUTH_TOKENS.add(raw)
+
+
+@app.before_request
+def _auth_middleware():
+    """Gate /api/v1/* requests on X-API-Key header or SSE query param.
+
+    Accepts only QUICKROBOT_API_KEY as the API gatekeeper token.
+    WebUI and MCP subprocesses authenticate using this same token (not
+    WEBUI_TOKEN or MCP_TOKEN, which are reserved for future use).
+
+    Auth mode:
+      - Dev mode (--mode dev): always allow (no auth enforced)
+      - Prod mode: if any token is set, enforce on all /api/v1/*
+        except explicitly allowlisted paths. If all tokens empty in prod,
+        FAIL startup (handled in lib_startup_pipeline).
+
+    SSE endpoints use ?api_key= query param since EventSource cannot send
+    custom headers. Regular endpoints use X-API-Key header.
+    """
+    import re as _re
+    from flask import request, jsonify
+
+    # Dev mode: always pass through (backward compat for LAN debugging)
+    if _CONFIG.get("pb_mode") == "dev":
+        return None
+
+    # No tokens configured: allow all (legacy LAN-only mode)
+    if not _AUTH_TOKENS:
+        return None
+
+    path = request.path
+
+    # ── SSE endpoints: accept ?api_key= query param ──
+    # EventSource (browser-native SSE) cannot send custom headers.
+    if _re.match(r"^/api/v1/instances/\d+/models-sse$", path):
+        api_key = request.args.get("api_key", "").strip()
+        if not api_key:
+            logger.warning("UNAUTH: SSE %s missing key (client=%s)", path, request.remote_addr)
+            return jsonify({
+                "status": "error",
+                "code": "UNAUTHORIZED",
+                "message": "SSE endpoint requires X-API-Key header or ?api_key= query param"
+            }), 401
+        if api_key not in _AUTH_TOKENS:
+            logger.warning("UNAUTH: SSE %s bad key (client=%s)", path, request.remote_addr)
+            return jsonify({
+                "status": "error",
+                "code": "UNAUTHORIZED",
+                "message": "Invalid API key"
+            }), 401
+        return None  # Authenticated via query param
+
+    # ── Health check endpoint: always allow (monitoring probes) ──
+    if path == "/api/v1/app/status":
+        return None
+
+    # ── All other /api/v1/* routes: require X-API-Key header ──
+    api_key = request.headers.get("X-API-Key", "").strip()
+    if not api_key:
+        logger.warning("UNAUTH: %s missing key (client=%s)", path, request.remote_addr)
+        return jsonify({
+            "status": "error",
+            "code": "UNAUTHORIZED",
+            "message": "Missing API key. Provide X-API-Key header."
+        }), 401
+
+    if api_key not in _AUTH_TOKENS:
+        logger.warning("UNAUTH: %s bad key (client=%s)", path, request.remote_addr)
+        return jsonify({
+            "status": "error",
+            "code": "UNAUTHORIZED",
+            "message": "Invalid API key"
+        }), 401
+
+    return None  # Authenticated — proceed to route handler
+
+
+# Instance route handlers (split into feature-group submodules)
+from .routes_instances.status_queries import (
     api_create_instance,
-    api_cycle_split_mode,
-    api_delete_instance,
-    # EP-CONSOLIDATE P3+P4: unified config handlers
-    api_get_instance_config,
-    api_set_instance_config,
-    api_set_split_mode,
-    api_deploy_instance,
-     api_reconfigure_instance,
-    api_deploy_preview,
-    api_execute_instance,
-    api_get_cli_flags,
-    api_get_expert_split_config,
-    api_get_gpu_override,
-    api_set_gpu_override,
+    api_list_instances,
     api_get_instance,
-    api_get_instance_status,
+    api_update_instance,
+    api_delete_instance,
+)
+from .routes_instances.instance_health import (
     api_health_check_all,
-    api_instance_health,
     api_instance_journal,
     api_instance_logs,
     api_instance_status,
-    api_list_instances,
-    api_list_rpc_bindings,
-    api_merged_config,
+    api_system_instance_status,
+    api_regenerate_instance_token,
+    api_disable_instance_token,
+)
+from .routes_instances.deploy_lifecycle import (
+    api_start_instance,
+    api_stop_instance,
+    api_restart_instance,
+    api_deploy_instance,
+    api_reconfigure_instance,
+    api_undeploy_instance,
+    api_execute_instance,
+    api_run_client,
+    api_update_log_level,
+)
+from .routes_instances.config_mgmt import (
+    api_cycle_split_mode,
+    api_set_draft,
+    api_set_cli_flags,
+    api_get_cli_flags,
+    api_set_herd_config,
+    api_get_gpu_override,
+    api_set_gpu_override,
+    api_patch_expert_split,
+    api_get_instance_config,
+    api_set_instance_config,
     # CONFIG-1 Phase 2: config-levels endpoints
+    api_deploy_preview,
+    api_merged_config,
     api_get_config_levels,
     api_set_config_level,
     api_delete_config_level,
     api_get_merged_config,
-    api_query_status,
-    api_restart_instance,
-    api_restart_system_instance,
-    api_rpccluster_bind,
-    api_rpccluster_summary,
-    api_rpccluster_unbind,
-     api_run_client,
-    api_set_cli_flags,
-    api_set_herd_config,
-    api_set_expert_split_config,
-    api_patch_expert_split,
-    api_set_draft,
-    api_set_experts,
-    api_set_split,
-    api_start_instance,
-    api_stop_instance,
-    api_system_instance_status,
-    api_toggle_test_mode,
+)
+from .routes_instances.rpccluster import (
+    api_bind_rpc,
     api_unbind_rpc,
-    api_proxy_remote,
-    api_undeploy_instance,
-    api_update_instance,
-    api_update_log_level,
-    # Job & task query endpoints
+    api_list_rpc_bindings,
+    api_cluster_bind,
+    api_rpccluster_summary,
+    api_rpccluster_bind,
+    api_rpccluster_unbind,
+)
+from .routes_instances.jobs_tasks import (
     api_list_jobs,
     api_get_job,
     api_delete_job,
@@ -219,122 +336,84 @@ from .routes_instances import (
     api_get_task,
     api_cancel_task,
     api_delete_task,
-    api_model_load_sse,
 )
-
-# Node and misc route handlers
-from .routes_nodes import (
-    api_ansible_actions,
-    api_api_server_update_setting,
-    api_app_status,
-    api_batch_set_engine_config,
-    api_checksum_diff,
-    api_cleanup_null_logs,
-    api_clear_all_models,
-    api_clear_old_ansible_actions,
-    api_qr_actions,
-    api_clear_old_qr_actions,
-     api_log_entries,
-     api_cleanup_log_entries,
-     api_clear_results,
-    api_clone_preset,
-
-    api_create_model,
-    api_create_model_global,
-    api_create_node,
-    api_create_preset,
-    api_create_prompt,
-    api_delete_benchmark_run,
-    api_delete_config,
-    api_delete_engine_config,
-    api_delete_model,
-    api_delete_node,
-
-    api_delete_node_config,
-    api_delete_playbook,
-    api_delete_preset,
-    api_delete_prompt,
-    api_force_delete_instance,
-    api_get_config,
-    api_get_engine_config,
-    api_get_model,
-    api_get_model_global,
-    api_get_node,
-
-    api_get_preset,
-    api_get_progress,
-    api_get_prompt,
-    api_get_result_detail,
-    api_get_webui_settings,
-    api_health_check,
-    api_home,
-    api_instance_rebuild,
-    api_list_all_models,
-    api_list_engines,
-
-    api_list_models,
-    api_model_active,
-    api_list_nodes,
-    api_list_playbooks,
-    api_list_presets,
-    api_list_prompts,
-    api_list_results,
-    api_list_system_engines,
-    api_mcp_restart,
-    api_mcp_settings,
-
-    api_mcp_start,
-    api_mcp_status,
-    api_mcp_stop,
-    api_mcp_update_setting,
-    api_mcp_update_settings,
-     api_node_apt,
-    api_node_apt_update,
-    api_node_apt_upgrade,
-    api_node_apt_update_upgrade,
-    api_node_configs,
-    api_node_discover,
-    api_discover_local,
-    api_node_ping,
-
-    api_node_reboot,
-    api_reset_node_build_state,
-    api_node_shutdown,
-    api_node_status,
-    api_orphans,
-    api_playbook_content,
-    api_preset_restart_all,
-    api_quickrobot_api_metrics,
-    api_quickrobot_api_status,
-    api_register_playbook,
-
-    api_register_system_engine,
-    api_rescan_playbooks,
-    api_reset_playbook_counters,
-    api_scan_models,
-    api_scan_models_agnostic,
-    api_set_config,
-    api_set_engine_config,
-    api_set_node_config,
-    api_set_node_host_status,
-    api_set_webui_settings,
-
-    api_start_benchmark,
-    api_update_model,
-    api_update_model_global,
-    api_update_node,
-    api_update_playbook,
-    api_update_preset,
+from .routes_instances.misc import (
+    api_model_load_sse,
+    api_proxy_remote,
+    api_restart_system_instance,
+)
+# Node and misc route handlers (split into feature-group submodules)
+from .routes_nodes.node_lifecycle import (
+    api_list_nodes, api_create_node, api_delete_node, api_get_node, api_update_node,
+)
+from .routes_nodes.node_status import (
+    api_node_status, api_set_node_host_status,
+    api_node_shutdown, api_node_reboot, api_node_ping, api_node_discover,
+)
+from .routes_nodes.node_config import (
+    api_node_configs, api_set_node_config, api_delete_node_config,
+)
+from .routes_nodes.engine_mgmt import (
+    api_list_engines, api_get_engine_config, api_set_engine_config, api_delete_engine_config,
+    api_batch_set_engine_config, _let_config, api_api_server_update_setting,
+)
+from .routes_nodes.preset_mgmt import (
+    api_list_presets, api_create_preset, api_get_preset, api_update_preset,
+    api_preset_restart_all, api_delete_preset, api_clone_preset,
+)
+from .routes_nodes.model_mgmt import (
+    api_list_all_models, api_get_model_global, api_update_model_global,
+    api_create_model_global, api_clear_all_models, api_model_active,
+    api_scan_models_agnostic, api_checksum_diff,
+    api_remove_missing_models, api_remove_missing_models_confirm,
+)
+from .routes_nodes.preset_mgmt import (
+    api_remove_empty_presets, api_remove_empty_presets_confirm,
+)
+from .routes_nodes.model_ops import (
+    api_list_models, api_get_model, api_update_model, api_delete_model,
+    api_create_model, api_clone_model, api_scan_models, api_verify_checksum,
+)
+from .routes_nodes.misc_nodes import (
+    api_instance_rebuild, api_orphans, api_force_delete_instance,
+    api_ansible_actions, api_qr_actions, api_clear_old_ansible_actions,
+    api_clear_old_qr_actions, api_home,
+)
+from .routes_nodes.system_mgmt import (
+    api_app_status, api_cleanup_log_entries, api_cleanup_null_logs,
+    api_health_check, api_list_system_engines, api_log_entries,
+    api_quickrobot_api_metrics, api_quickrobot_api_status,
+    api_api_settings,
+)
+from .routes_nodes.benchmarks import (
+    api_clear_results, api_create_prompt, api_delete_benchmark_run,
+    api_delete_prompt, api_get_progress, api_get_prompt,
+    api_get_result_detail, api_get_webui_settings, api_list_prompts,
+    api_list_results, api_set_webui_settings, api_start_benchmark,
     api_update_prompt,
-    api_verify_checksum,
-    api_web_server_restart,
-    api_web_server_settings,
-
-    api_web_server_start,
-    api_web_server_status,
-    api_web_server_stop,
-    api_web_server_update_setting,
-    api_web_server_update_settings,
+)
+from .routes_nodes.webui_mgmt import (
+    api_web_server_restart, api_web_server_settings, api_web_server_start,
+    api_web_server_status, api_web_server_stop,
+    api_web_server_update_setting, api_web_server_update_settings,
+)
+from .routes_nodes.mcp_mgmt import (
+    api_mcp_restart, api_mcp_settings, api_mcp_start, api_mcp_status,
+    api_mcp_stop, api_mcp_update_setting, api_mcp_update_settings,
+)
+from .routes_nodes.playbook_mgmt import (
+    api_delete_playbook, api_list_playbooks, api_playbook_content,
+    api_rescan_playbooks,
+    api_reset_playbook_counters, api_update_playbook,
+)
+from .routes_nodes.node_apt import (
+    api_node_apt,
+)
+from .routes_timestamp_proxy import (
+    api_timestamp_proxy_settings,
+    api_timestamp_proxy_update_setting,
+    api_timestamp_proxy_instance_config,
+    api_timestamp_proxy_validate_config,
 )
 
 # ── SCRIPT-1: Dynamic job scripting blueprint ──────────────────────────
@@ -353,6 +432,7 @@ from .routes_prompts import (
     api_prompt_rescan,
     api_rescan_engine_prompts,
     api_reset_engine_prompt_counters,
+    api_prompt_refresh,
 )
 
 def register_routes(app):
@@ -381,9 +461,6 @@ def register_routes(app):
     app.add_url_rule("/api/v1/benchmarks/results/<run_id>", "api_get_result_detail", api_get_result_detail, methods=["GET"])
     app.add_url_rule("/api/v1/benchmarks/results/<run_id>/progress", "api_get_progress", api_get_progress, methods=["GET"])
     app.add_url_rule("/api/v1/benchmarks/run", "api_start_benchmark", api_start_benchmark, methods=["POST"])
-    app.add_url_rule("/api/v1/config", "api_get_config", api_get_config, methods=["GET"])
-    app.add_url_rule("/api/v1/config/<key>", "api_delete_config", api_delete_config, methods=["DELETE"])
-    app.add_url_rule("/api/v1/config/<key>", "api_set_config", api_set_config, methods=["PUT"])
     app.add_url_rule("/api/v1/engine/<engine_type>/config", "api_get_engine_config", api_get_engine_config, methods=["GET"])
     app.add_url_rule("/api/v1/engine/<engine_type>/config/<key>", "api_delete_engine_config", api_delete_engine_config, methods=["DELETE"])
     app.add_url_rule("/api/v1/engine/<engine_type>/config/<key>", "api_set_engine_config", api_set_engine_config, methods=["PUT"])
@@ -393,6 +470,7 @@ def register_routes(app):
     app.add_url_rule("/api/v1/engine/<engine_type>/models/<int:model_id>", "api_delete_model", api_delete_model, methods=["DELETE"])
     app.add_url_rule("/api/v1/engine/<engine_type>/models/<int:model_id>", "api_get_model", api_get_model, methods=["GET"])
     app.add_url_rule("/api/v1/engine/<engine_type>/models/<int:model_id>", "api_update_model", api_update_model, methods=["PUT"])
+    app.add_url_rule("/api/v1/engine/<engine_type>/models/<int:model_id>/clone", "api_clone_model", api_clone_model, methods=["POST"])
     app.add_url_rule("/api/v1/engine/<engine_type>/models/<int:model_id>/verify-checksum", "api_verify_checksum", api_verify_checksum, methods=["POST"])
     app.add_url_rule("/api/v1/engine/<engine_type>/models/checksum-diff", "api_checksum_diff", api_checksum_diff, methods=["GET"])
     app.add_url_rule("/api/v1/engine/<engine_type>/models/scan", "api_scan_models", api_scan_models, methods=["POST"])
@@ -403,6 +481,9 @@ def register_routes(app):
     app.add_url_rule("/api/v1/engine/<engine_type>/presets/<int:preset_id>", "api_update_preset", api_update_preset, methods=["PUT"])
     app.add_url_rule("/api/v1/engine/<engine_type>/presets/<int:preset_id>/clone", "api_clone_preset", api_clone_preset, methods=["POST"])
     app.add_url_rule("/api/v1/engine/<engine_type>/presets/<int:preset_id>/restart_all", "api_preset_restart_all", api_preset_restart_all, methods=["POST"])
+    # Remove empty presets — confirm route MUST be before main route for proper matching
+    app.add_url_rule("/api/v1/engine/<engine_type>/presets/remove-empty/confirm", "api_remove_empty_presets_confirm", api_remove_empty_presets_confirm, methods=["POST"])
+    app.add_url_rule("/api/v1/engine/<engine_type>/presets/remove-empty", "api_remove_empty_presets", api_remove_empty_presets, methods=["POST"])
     app.add_url_rule("/api/v1/engine/quickrobot-api/config/<key>", "api_api_server_update_setting", api_api_server_update_setting, methods=["GET", "PUT"])
     app.add_url_rule("/api/v1/engines", "api_list_engines", api_list_engines, methods=["GET"])
     app.add_url_rule("/api/v1/engines/quickrobot-api/metrics", "api_quickrobot_api_metrics", api_quickrobot_api_metrics, methods=["GET"])
@@ -415,18 +496,24 @@ def register_routes(app):
     app.add_url_rule("/api/v1/engines/quickrobot-mcp/status", "api_mcp_status", api_mcp_status, methods=["GET"])
     app.add_url_rule("/api/v1/engines/quickrobot-mcp/stop", "api_mcp_stop", api_mcp_stop, methods=["POST"])
     app.add_url_rule("/api/v1/engines/quickrobot-webui/restart", "api_web_server_restart", api_web_server_restart, methods=["POST"])
+    app.add_url_rule("/api/v1/engines/quickrobot-api/settings", "api_api_settings", api_api_settings, methods=["GET"])
     app.add_url_rule("/api/v1/engines/quickrobot-webui/settings", "api_web_server_settings", api_web_server_settings, methods=["GET"])
     app.add_url_rule("/api/v1/engines/quickrobot-webui/settings", "api_web_server_update_settings", api_web_server_update_settings, methods=["PUT"])
     app.add_url_rule("/api/v1/engines/quickrobot-webui/settings/<key>", "api_web_server_update_setting", api_web_server_update_setting, methods=["GET", "PUT"])
     app.add_url_rule("/api/v1/engines/quickrobot-webui/start", "api_web_server_start", api_web_server_start, methods=["POST"])
     app.add_url_rule("/api/v1/engines/quickrobot-webui/status", "api_web_server_status", api_web_server_status, methods=["GET"])
     app.add_url_rule("/api/v1/engines/quickrobot-webui/stop", "api_web_server_stop", api_web_server_stop, methods=["POST"])
+    # TIMESTAMP-PROXY: Engine settings and config routes
+    app.add_url_rule("/api/v1/engine/timestamp_proxy/settings", "api_timestamp_proxy_settings", api_timestamp_proxy_settings, methods=["GET"])
+    app.add_url_rule("/api/v1/engine/timestamp_proxy/settings/<key>", "api_timestamp_proxy_update_setting", api_timestamp_proxy_update_setting, methods=["PUT"])
+    app.add_url_rule("/api/v1/engine/timestamp_proxy/validate", "api_timestamp_proxy_validate_config", api_timestamp_proxy_validate_config, methods=["POST"])
+    app.add_url_rule("/api/v1/instances/<int:inst_id>/timestamp-config", "api_timestamp_proxy_instance_config", api_timestamp_proxy_instance_config, methods=["GET", "PUT"])
     app.add_url_rule("/api/v1/health/check", "api_health_check", api_health_check, methods=["POST"])
     app.add_url_rule("/api/v1/instances", "api_create_instance", api_create_instance, methods=["POST"])
     app.add_url_rule("/api/v1/instances", "api_list_instances", api_list_instances, methods=["GET"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>", "api_delete_instance", api_delete_instance, methods=["DELETE"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>", "api_get_instance", api_get_instance, methods=["GET"])
-    app.add_url_rule("/api/v1/instances/<int:inst_id>/status", "api_get_instance_status", api_get_instance_status, methods=["GET"])
+    app.add_url_rule("/api/v1/instances/<int:inst_id>/status", "api_instance_status", api_instance_status, methods=["GET"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>", "api_update_instance", api_update_instance, methods=["PUT"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/bind-rpc", "api_bind_rpc", api_bind_rpc, methods=["POST"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/bind-rpc/<int:rpc_id>", "api_unbind_rpc", api_unbind_rpc, methods=["DELETE"])
@@ -435,8 +522,6 @@ def register_routes(app):
     app.add_url_rule("/api/v1/instances/<int:inst_id>/herd-config", "api_set_herd_config", api_set_herd_config, methods=["PUT"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/gpu-override", "api_get_gpu_override", api_get_gpu_override, methods=["GET"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/gpu-override", "api_set_gpu_override", api_set_gpu_override, methods=["PUT"])
-    app.add_url_rule("/api/v1/instances/<int:inst_id>/expert-split-config", "api_get_expert_split_config", api_get_expert_split_config, methods=["GET"])
-    app.add_url_rule("/api/v1/instances/<int:inst_id>/expert-split-config", "api_set_expert_split_config", api_set_expert_split_config, methods=["PUT"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/expert-split", "api_patch_expert_split", api_patch_expert_split, methods=["PATCH"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/cluster-bind", "api_cluster_bind", api_cluster_bind, methods=["PUT"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/deploy", "api_deploy_instance", api_deploy_instance, methods=["POST"])
@@ -445,9 +530,7 @@ def register_routes(app):
     app.add_url_rule("/api/v1/instances/<int:inst_id>/deploy-preview", "api_deploy_preview", api_deploy_preview, methods=["GET"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/draft", "api_set_draft", api_set_draft, methods=["PUT"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/execute", "api_execute_instance", api_execute_instance, methods=["POST"])
-    app.add_url_rule("/api/v1/instances/<int:inst_id>/experts", "api_set_experts", api_set_experts, methods=["PUT"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/force-delete", "api_force_delete_instance", api_force_delete_instance, methods=["POST"])
-    app.add_url_rule("/api/v1/instances/<int:inst_id>/health", "api_instance_health", api_instance_health, methods=["GET"])
     # BG-HEALTH-1
     app.add_url_rule("/api/v1/instances/health-check-all", "api_health_check_all", api_health_check_all, methods=["POST"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/journal", "api_instance_journal", api_instance_journal, methods=["GET"])
@@ -459,22 +542,19 @@ def register_routes(app):
     app.add_url_rule("/api/v1/instances/<int:inst_id>/config-levels/<int:level>", "api_set_config_level", api_set_config_level, methods=["PUT"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/config-levels/<int:level>", "api_delete_config_level", api_delete_config_level, methods=["DELETE"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/config-levels/merged", "api_get_merged_config", api_get_merged_config, methods=["GET"])
-    app.add_url_rule("/api/v1/instances/<int:inst_id>/query-status", "api_query_status", api_query_status, methods=["GET"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/restart", "api_restart_instance", api_restart_instance, methods=["POST"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/restart_system", "api_restart_system_instance", api_restart_system_instance, methods=["POST"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/run_client", "api_run_client", api_run_client, methods=["POST"])
-    app.add_url_rule("/api/v1/instances/<int:inst_id>/split", "api_set_split", api_set_split, methods=["PUT"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/split-mode", "api_cycle_split_mode", api_cycle_split_mode, methods=["PATCH"])
-    app.add_url_rule("/api/v1/instances/<int:inst_id>/split-mode", "api_set_split_mode", api_set_split_mode, methods=["PUT"])
     # EP-CONSOLIDATE P3+P4: unified instance config endpoint
     app.add_url_rule("/api/v1/instances/<int:inst_id>/config", "api_get_instance_config", api_get_instance_config, methods=["GET"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/config", "api_set_instance_config", api_set_instance_config, methods=["PUT"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/start", "api_start_instance", api_start_instance, methods=["POST"])
-    # /instances/<id>/status registered at line 409 as api_get_instance_status (merged handler)
-    # Former duplicate at line 447 removed — EP-CONSOLIDATE P1
     app.add_url_rule("/api/v1/instances/<int:inst_id>/stop", "api_stop_instance", api_stop_instance, methods=["POST"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/system-status", "api_system_instance_status", api_system_instance_status, methods=["GET"])
-    app.add_url_rule("/api/v1/instances/<int:inst_id>/test_mode", "api_toggle_test_mode", api_toggle_test_mode, methods=["POST"])
+    app.add_url_rule("/api/v1/instances/<int:inst_id>/regenerate-token", "api_regenerate_instance_token", api_regenerate_instance_token, methods=["POST"])
+    app.add_url_rule("/api/v1/instances/<int:inst_id>/disable-token", "api_disable_instance_token", api_disable_instance_token, methods=["POST"])
+
     app.add_url_rule("/api/v1/instances/<int:inst_id>/undeploy", "api_undeploy_instance", api_undeploy_instance, methods=["POST"])
     app.add_url_rule("/api/v1/instances/<int:inst_id>/rebuild", "api_instance_rebuild", api_instance_rebuild, methods=["POST"])
     # Job & Task query endpoints
@@ -496,31 +576,28 @@ def register_routes(app):
     app.add_url_rule("/api/v1/models/clear-all", "api_clear_all_models", api_clear_all_models, methods=["POST"])
     app.add_url_rule("/api/v1/models/<int:model_id>/active", "api_model_active", api_model_active, methods=["PUT"])
     app.add_url_rule("/api/v1/models/scan", "api_scan_models_agnostic", api_scan_models_agnostic, methods=["POST"])
+    # Remove missing models — confirm route MUST be before main route for proper matching
+    app.add_url_rule("/api/v1/models/remove-missing/confirm", "api_remove_missing_models_confirm", api_remove_missing_models_confirm, methods=["POST"])
+    app.add_url_rule("/api/v1/models/remove-missing", "api_remove_missing_models", api_remove_missing_models, methods=["POST"])
     app.add_url_rule("/api/v1/nodes", "api_create_node", api_create_node, methods=["POST"])
     app.add_url_rule("/api/v1/nodes", "api_list_nodes", api_list_nodes, methods=["GET"])
     app.add_url_rule("/api/v1/nodes/<int:node_id>", "api_delete_node", api_delete_node, methods=["DELETE"])
     app.add_url_rule("/api/v1/nodes/<int:node_id>", "api_get_node", api_get_node, methods=["GET"])
     app.add_url_rule("/api/v1/nodes/<int:node_id>", "api_update_node", api_update_node, methods=["PUT"])
-    # EP-CONSOLIDATE P2: Unified APT endpoint (3→1)
+    # EP-CONSOLIDATE P1: Unified APT endpoint (3→1) — legacy endpoints removed
     app.add_url_rule("/api/v1/nodes/<int:node_id>/apt", "api_node_apt", api_node_apt, methods=["POST"])
-    # Backward-compat wrappers (thin: redirect to unified handler)
-    app.add_url_rule("/api/v1/nodes/<int:node_id>/apt-update", "api_node_apt_update", api_node_apt_update, methods=["POST"])
-    app.add_url_rule("/api/v1/nodes/<int:node_id>/apt-upgrade", "api_node_apt_upgrade", api_node_apt_upgrade, methods=["POST"])
-    app.add_url_rule("/api/v1/nodes/<int:node_id>/apt-update-upgrade", "api_node_apt_update_upgrade", api_node_apt_update_upgrade, methods=["POST"])
+
     app.add_url_rule("/api/v1/nodes/<int:node_id>/configs", "api_node_configs", api_node_configs, methods=["GET"])
     app.add_url_rule("/api/v1/nodes/<int:node_id>/configs/<key>", "api_delete_node_config", api_delete_node_config, methods=["DELETE"])
     app.add_url_rule("/api/v1/nodes/<int:node_id>/configs/<key>", "api_set_node_config", api_set_node_config, methods=["PUT"])
     app.add_url_rule("/api/v1/nodes/<int:node_id>/discover", "api_node_discover", api_node_discover, methods=["POST"])
-    app.add_url_rule("/api/v1/nodes/1/discover-local", "api_discover_local", api_discover_local, methods=["POST"])
     app.add_url_rule("/api/v1/nodes/<int:node_id>/host-status", "api_set_node_host_status", api_set_node_host_status, methods=["PUT"])
     app.add_url_rule("/api/v1/nodes/<int:node_id>/ping", "api_node_ping", api_node_ping, methods=["GET"])
     app.add_url_rule("/api/v1/nodes/<int:node_id>/reboot", "api_node_reboot", api_node_reboot, methods=["POST"])
-    app.add_url_rule("/api/v1/nodes/<int:node_id>/reset-build-state", "api_reset_node_build_state", api_reset_node_build_state, methods=["POST"])
     app.add_url_rule("/api/v1/nodes/<int:node_id>/shutdown", "api_node_shutdown", api_node_shutdown, methods=["POST"])
     app.add_url_rule("/api/v1/nodes/<int:node_id>/status", "api_node_status", api_node_status, methods=["GET"])
     app.add_url_rule("/api/v1/orphans", "api_orphans", api_orphans, methods=["GET"])
     app.add_url_rule("/api/v1/playbooks", "api_list_playbooks", api_list_playbooks, methods=["GET"])
-    app.add_url_rule("/api/v1/playbooks", "api_register_playbook", api_register_playbook, methods=["POST"])
     app.add_url_rule("/api/v1/playbooks/<int:playbook_id>", "api_delete_playbook", api_delete_playbook, methods=["DELETE"])
     app.add_url_rule("/api/v1/playbooks/<int:playbook_id>", "api_update_playbook", api_update_playbook, methods=["PUT"])
     app.add_url_rule("/api/v1/playbooks/<int:playbook_id>/content", "api_playbook_content", api_playbook_content, methods=["GET"])
@@ -529,21 +606,21 @@ def register_routes(app):
     # MCP Prompts System routes (MCP-PROMPTS)
     app.add_url_rule("/api/v1/prompts", "api_list_engine_prompts", api_list_engine_prompts, methods=["GET"])
     app.add_url_rule("/api/v1/prompts", "api_create_engine_prompt", api_create_engine_prompt, methods=["POST"])
+    # Exact-match routes BEFORE catch-all <string> routes (Flask routing order)
+    app.add_url_rule("/api/v1/prompts/refresh", "api_prompt_refresh", api_prompt_refresh, methods=["POST"])
+    app.add_url_rule("/api/v1/prompts/rescan", "api_rescan_engine_prompts", api_rescan_engine_prompts, methods=["POST"])
+    app.add_url_rule("/api/v1/prompts/reset-counters", "api_reset_engine_prompt_counters", api_reset_engine_prompt_counters, methods=["POST"])
     app.add_url_rule("/api/v1/prompts/<int:db_id>", "api_get_engine_prompt_by_db_id", api_get_engine_prompt_by_db_id, methods=["GET"])
     app.add_url_rule("/api/v1/prompts/<string:prompt_id>", "api_get_engine_prompt", api_get_engine_prompt, methods=["GET"])
     app.add_url_rule("/api/v1/prompts/<string:prompt_id>", "api_update_engine_prompt", api_update_engine_prompt, methods=["PUT"])
     app.add_url_rule("/api/v1/prompts/<string:prompt_id>", "api_delete_engine_prompt", api_delete_engine_prompt, methods=["DELETE"])
     app.add_url_rule("/api/v1/prompts/<string:prompt_id>/content", "api_engine_prompt_content", api_engine_prompt_content, methods=["GET"])
-    app.add_url_rule("/api/v1/prompts/<string:prompt_id>/rescan", "api_prompt_rescan", api_prompt_rescan, methods=["POST"])
-    app.add_url_rule("/api/v1/prompts/rescan", "api_rescan_engine_prompts", api_rescan_engine_prompts, methods=["POST"])
-    app.add_url_rule("/api/v1/prompts/reset-counters", "api_reset_engine_prompt_counters", api_reset_engine_prompt_counters, methods=["POST"])
     app.add_url_rule("/api/v1/proxy/<path:subpath>", "api_proxy_remote", api_proxy_remote, methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
     app.add_url_rule("/api/v1/rpc-bindings", "api_list_rpc_bindings", api_list_rpc_bindings, methods=["GET"])
     app.add_url_rule("/api/v1/rpccluster/llama/<int:llama_id>/bind-rpc", "api_rpccluster_bind", api_rpccluster_bind, methods=["PUT"])
     app.add_url_rule("/api/v1/rpccluster/llama/<int:llama_id>/bind-rpc/<int:rpc_id>", "api_rpccluster_unbind", api_rpccluster_unbind, methods=["DELETE"])
     app.add_url_rule("/api/v1/rpccluster/summary", "api_rpccluster_summary", api_rpccluster_summary, methods=["GET"])
     app.add_url_rule("/api/v1/system-engines", "api_list_system_engines", api_list_system_engines, methods=["GET"])
-    app.add_url_rule("/api/v1/system-engines", "api_register_system_engine", api_register_system_engine, methods=["POST"])
     app.add_url_rule("/api/v1/webui/settings", "api_get_webui_settings", api_get_webui_settings, methods=["GET"])
     app.add_url_rule("/api/v1/webui/settings", "api_set_webui_settings", api_set_webui_settings, methods=["POST"])
 

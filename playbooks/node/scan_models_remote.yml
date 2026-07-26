@@ -1,10 +1,11 @@
 # @name: Scan Models Remote
 # @playbook_id: scan_models_remote
-# @version: 2
+# @version: 3
 # @timeout: 600
 # scan_models_remote.yml — Scan remote nodes for GGUF model files
 # Outputs JSONL lines per host: {"host": ..., "models_raw": [...]}
 # Required vars: model_root_path (must be provided, no default)
+# v3: Fixed mmproj detection — case-insensitive filter, wider glob patterns
 
 - hosts: all
   gather_facts: no
@@ -27,7 +28,7 @@
     - name: Find GGUF models with metadata via shell
       ansible.builtin.shell: >
         find {{ model_root_path }}
-        -name '*.gguf' -type f 2>/dev/null | grep -v mmproj | while read f; do
+        -name '*.gguf' -type f 2>/dev/null | grep -vi mmproj | while read f; do
           sz=$(stat -c '%s' "$f" 2>/dev/null || echo "0")
           dir=$(dirname "$f")
           base=$(basename "$f" .gguf)
@@ -37,13 +38,24 @@
           elif [ -f "${dir}/${base}_mmproj.gguf" ]; then
             mmproj_path="${dir}/${base}_mmproj.gguf"
           else
-            clean_base=$(echo "$base" | sed -E 's/-(bf?16|f32|q[0-9]+_[a-z]+|-Q[0-9])$//i')
-            for pattern in "${dir}/${clean_base}-mmproj*.gguf" "${dir}/${clean_base}_mmproj*.gguf" "${dir}/mmproj-${clean_base}*.gguf"; do
-              if [ -f "$pattern" ]; then
-                mmproj_path="$pattern"
-                break
+            clean_base=$(echo "$base" | sed -E 's/-(bf?16|f32|q[0-9]+_[a-z]+|-Q[0-9][_0-9A-Za-z]*)$//i')
+            if [ -n "$clean_base" ]; then
+              for pattern in "${dir}/${clean_base}-mmproj*.gguf" "${dir}/${clean_base}_mmproj*.gguf" "${dir}/mmproj-${clean_base}*.gguf"; do
+                if [ -f "$pattern" ]; then
+                  mmproj_path="$pattern"
+                  break
+                fi
+              done
+              # Additional fallback: match any mmproj with common naming variants
+              if [ -z "$mmproj_path" ]; then
+                for pattern in "${dir}/${clean_base}-*.mmproj" "${dir}/${clean_base}_*.mmproj" "${dir}/mmproj-${clean_base}*" "${dir}/${clean_base}*mmproj*"; do
+                  if [ -f "$pattern" ]; then
+                    mmproj_path="$pattern"
+                    break
+                  fi
+                done
               fi
-            done
+            fi
           fi
           mt=$(stat -c '%Y' "$f" 2>/dev/null || echo "0")
           printf '{"path":"%s","size":%s,"mmproj_path":"%s","last_modified_epoch":%s}\n' "$f" "$sz" "$mmproj_path" "$mt"

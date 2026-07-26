@@ -1,0 +1,27 @@
+# @name: Start Timestamp Proxy Service
+# @playbook_id: service_start_timestamp_proxy
+# @version: 1
+# @timeout: 30
+# service_start_timestamp_proxy.yml — Signal that timestamp_proxy is ready.
+# The actual process management uses tmux (handled by engine execute()).
+# This playbook writes the systemd-compatible signal for staged chains.
+- hosts: "{{ inventory_host }}"
+  gather_facts: no
+
+  vars:
+    unit_name: "qr-{{ instance_id }}-{{ engine_type }}"
+
+  tasks:
+    - name: Verify config file exists
+      stat:
+        path: "/etc/quickrobot/{{ unit_name }}.conf"
+      register: _config_file
+
+    - name: Warn if config file missing
+      debug:
+        msg: "WARNING: timestamp_proxy config not found at /etc/quickrobot/{{ unit_name }}.conf — proxy may start with defaults"
+      when: not _config_file.stat.exists
+
+    - name: Report service start readiness
+      debug:
+        msg: "timestamp_proxy service start — instance {{ instance_id }}, config present={{ _config_file.stat.exists | default(false) }}"

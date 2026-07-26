@@ -17,8 +17,14 @@
 {% endif %}
 
 <div class="actions">
-{# ACTION BUTTONS: rendered by initDetailActions() from STATUS-1 API #}
-<span class="actions-render" data-inst-id="{{ inst_id }}"></span>
+{# ACTION BUTTONS: pre-rendered from server-side state→actions mapping (#)
+   initDetailActions() replaces this with live data from /status call.
+   This ensures buttons appear immediately without waiting for ~3.6s SSH call. #}
+<span class="actions-render" data-inst-id="{{ inst_id }}">
+  {% for action_name, action_label, action_endpoint, action_enabled in actions %}
+  {% if action_enabled %}<button class="btn btn-primary inst-action" data-inst-id="{{ inst_id }}" data-action="{{ action_name }}" style="font-size:0.7em;padding:2px 5px;height:20px;" title="{{ action_label }}">{{ action_label }}</button>{% endif %}
+  {% endfor %}
+</span>
 {# STATUS-1 warnings #}
 {% for w in status_warnings or [] %}
 <div class="warning-badge" style="font-size:0.8em;padding:2px 8px;margin-left:6px;border-radius:3px;background:#fff3cd;color:#856404;border:1px solid #ffc107;display:inline-block;">
@@ -69,6 +75,259 @@
   </a>
 </div>
 {% endif %}
+
+{# Per-instance Auth Token (llama_server / llama_rpc only) #}
+{% if is_llama or (engine_name == 'llama_rpc' or engine_name == 'llama-server') %}
+{% set auth_token = detail_items | selectattr(0, 'equalto', 'Auth Token') | list | first | default(None) %}
+{% if auth_token %}
+<div class="detail-card" style="margin-bottom:12px;">
+  <label>Instance Auth Token</label>
+  <div style="display:flex;gap:8px;align-items:center;">
+    <code id="inst-auth-token" style="background:#f5f5f5;padding:4px 8px;border-radius:3px;font-size:0.85em;word-break:break-all;flex:1;">{{ auth_token[1] if auth_token[1] != '<em>not set</em>' else '' }}</code>
+    <button class="btn btn-warning" style="font-size:0.85em;padding:3px 10px;" onclick="regenerateToken()" title="Generate new auth token (DB-only, no restart)">Regenerate</button>
+    <button class="btn btn-danger" style="font-size:0.85em;padding:3px 10px;" onclick="disableAuthToken()" title="Disable instance auth (set NULL in DB, no restart)">Disable Auth</button>
+  </div>
+  <span id="token-status" style="font-size:0.8em;color:#888;display:block;margin-top:2px;"></span>
+</div>
+{% endif %}
+{% endif %}
+
+{# Timestamp Proxy — Target Server Binding Section #}
+{% if is_timestamp_proxy %}
+<div class="detail-card" style="margin-bottom:12px;">
+  <label>Target Servers</label>
+  <div style="display:flex;gap:8px;align-items:center;margin-bottom:4px;">
+    <p style="color:#888;font-size:0.85em;margin:0;">
+      Select llama-server instances to proxy. Supports multiple targets (mirror mode).
+    </p>
+  </div>
+  <div id="ts-proxy-target-section" style="display:flex;gap:12px;align-items:flex-start;">
+    <select id="ts-target-sel" size="5"
+            style="width:300px;height:140px;padding:4px;border:1px solid #ccc;border-radius:3px;"
+            title="Available target servers">
+      <option value="" disabled>Loading...</option>
+    </select>
+    <div style="display:flex;flex-direction:column;gap:4px;">
+      <button id="ts-add-target" class="btn btn-sm btn-success" title="Add selected target">+ Add</button>
+      <button id="ts-remove-target" class="btn btn-sm btn-warning" title="Remove selected target(s)">- Remove</button>
+    </div>
+  </div>
+  <div id="ts-current-targets" style="margin-top:8px;">
+    <p style="color:#888;font-size:0.85em;" id="ts-empty-msg">No target servers bound.</p>
+    <table id="ts-target-table" style="width:100%;font-size:0.85em;border-collapse:collapse;display:none;">
+      <thead><tr style="border-bottom:1px solid #ccc;"><th style="text-align:left;padding:4px;">ID</th><th style="text-align:left;padding:4px;">Name</th><th style="text-align:left;padding:4px;">Endpoint</th><th style="text-align:left;padding:4px;">Status</th><th style="text-align:left;padding:4px;"></th></tr></thead>
+      <tbody id="ts-target-tbody"></tbody>
+    </table>
+  </div>
+</div>
+
+{# Timestamp Proxy — Inject Settings #}
+<div class="detail-card" style="margin-bottom:12px;">
+  <label>Inject Settings</label>
+  <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:4px;">
+    <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+      <input type="checkbox" id="ts-inject-user-ts" onchange="updateTsSetting('inject_user_timestamp', this.checked)">
+      <span style="font-size:0.9em;">Inject user message timestamps</span>
+    </label>
+    <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+      <input type="checkbox" id="ts-inject-response-ts" onchange="updateTsSetting('inject_response_time', this.checked)">
+      <span style="font-size:0.9em;">Inject response timing</span>
+    </label>
+  </div>
+  <div style="display:flex;gap:16px;margin-top:8px;align-items:center;">
+    <label style="font-size:0.9em;">Position:</label>
+    <select id="ts-position-sel" onchange="updateTsSetting('timestamp_position', this.value)" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+      <option value="front">Front</option>
+      <option value="back">Back</option>
+      <option value="both">Both</option>
+    </select>
+    <label style="font-size:0.9em;margin-left:12px;">Format:</label>
+    <input id="ts-format-input" type="text" value="%Y-%m-%d %H:%M:%S" style="width:180px;padding:3px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;" onchange="updateTsSetting('timestamp_format', this.value)">
+  </div>
+</div>
+{% endif %}
+
+{% if is_timestamp_proxy %}
+<script>
+(function() {
+  var instId = {{ inst_id }};
+  var tsSel = document.getElementById('ts-target-sel');
+  var tsAddBtn = document.getElementById('ts-add-target');
+  var tsRemoveBtn = document.getElementById('ts-remove-target');
+  var tsTable = document.getElementById('ts-target-table');
+  var tbody = document.getElementById('ts-target-tbody');
+  var emptyMsg = document.getElementById('ts-empty-msg');
+  var currentTargets = [];
+  var allTargets = [];
+
+  // Load available target servers (llama_server instances)
+  qrApi('/instances?engine_type=llama_server')
+    .then(function(data) {
+      if (data.status !== 'ok') return;
+      allTargets = data.items || [];
+      tsSel.innerHTML = '<option value="">-- Select a target server --</option>';
+      allTargets.forEach(function(t) {
+        var opt = document.createElement('option');
+        opt.value = t.id;
+        opt.textContent = t.id + ': ' + (t.name || '') + ' @ ' + (t.node_hostname || t.node_name || '?') + ':' + (t.port_assigned || '?');
+        tsSel.appendChild(opt);
+      });
+      // Load current bindings
+      loadCurrentTargets();
+    })
+    .catch(function(e) { console.error('ts targets load error:', e); });
+
+  function loadCurrentTargets() {
+    qrApi('/instances/' + instId)
+      .then(function(data) {
+        if (data.status !== 'ok' || !data.data) return;
+        var tids = data.data.target_instance_ids || [];
+        if (typeof tids === 'string') { try { tids = JSON.parse(tids); } catch(e) { tids = []; } }
+        if (!Array.isArray(tids)) tids = [];
+
+        currentTargets = tids;
+        // Update select to mark bound items
+        for (var i = tsSel.options.length - 1; i >= 0; i--) {
+          var opt = tsSel.options[i];
+          if (tids.indexOf(parseInt(opt.value, 10)) !== -1) {
+            opt.selected = true;
+          } else {
+            opt.selected = false;
+          }
+        }
+        renderTargetTable(tids);
+      })
+      .catch(function(e) { console.error('current targets load error:', e); });
+  }
+
+  function renderTargetTable(tids) {
+    if (!tids || tids.length === 0) {
+      tbody.innerHTML = '';
+      emptyMsg.style.display = 'block';
+      tsTable.style.display = 'none';
+      return;
+    }
+    emptyMsg.style.display = 'none';
+    tsTable.style.display = 'table';
+
+    var html = '';
+    tids.forEach(function(tid) {
+      var target = allTargets.find(function(t) { return t.id == tid; });
+      if (!target) {
+        html += '<tr><td colspan="4"><em>Instance ' + tid + ' not found</em></td><td></td></tr>';
+        return;
+      }
+      var stateColor = target.state === 'running' ? '#4caf50' : (target.state === 'deployed' ? '#2196f3' : '#888');
+      var endpoint = (target.node_hostname || target.node_name || '?') + ':' + (target.port_assigned || '?');
+      html += '<tr>';
+      html += '<td>' + target.id + '</td>';
+      html += '<td><a href="/webui/instances/' + target.id + '">' + (target.name || 'Instance ' + target.id) + '</a></td>';
+      html += '<td><a href="http://' + endpoint.replace(/<[^>]*>/g, '') + '" target="_blank" rel="noopener" style="font-size:0.85em;color:#4fc3f7;">' + endpoint + '</a></td>';
+      html += '<td><span style="color:' + stateColor + '">' + (target.state || '-') + '</span></td>';
+      html += '<td><button class="btn btn-sm btn-warning" onclick="removeTsTarget(' + tid + ')" style="font-size:0.7em;padding:2px 6px;">Remove</button></td>';
+      html += '</tr>';
+    });
+    tbody.innerHTML = html;
+  }
+
+  window.addTsTarget = function() {
+    var sel = document.getElementById('ts-target-sel');
+    var selectedOptions = [];
+    for (var i = 0; i < sel.options.length; i++) {
+      if (sel.options[i].selected) {
+        selectedOptions.push(parseInt(sel.options[i].value, 10));
+      }
+    }
+    if (selectedOptions.length === 0) { alert('Select at least one target'); return; }
+
+    // Deduplicate with current targets
+    var newIds = selectedOptions.filter(function(id) {
+      return currentTargets.indexOf(id) === -1;
+    });
+    if (newIds.length === 0) { alert('Selected target(s) already bound'); return; }
+
+    currentTargets = currentTargets.concat(newIds);
+    saveTsTargets();
+  };
+
+  window.removeTsTarget = function(tid) {
+    if (!confirm('Remove target server instance #' + tid + '?')) return;
+    currentTargets = currentTargets.filter(function(id) { return id !== tid; });
+    saveTsTargets();
+  };
+
+  tsAddBtn.addEventListener('click', window.addTsTarget);
+
+  tsRemoveBtn.addEventListener('click', function() {
+    var sel = document.getElementById('ts-target-sel');
+    var selectedIds = [];
+    for (var i = 0; i < sel.options.length; i++) {
+      if (sel.options[i].selected) {
+        selectedIds.push(parseInt(sel.options[i].value, 10));
+      }
+    }
+    if (selectedIds.length === 0) { alert('Select at least one target to remove'); return; }
+    currentTargets = currentTargets.filter(function(id) { return selectedIds.indexOf(id) === -1; });
+    saveTsTargets();
+  });
+
+  function saveTsTargets() {
+    qrApi('/instances/' + instId + '/config', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({target_instance_ids: currentTargets})
+    })
+    .then(function(data) {
+      if (data.status === 'ok') {
+        loadCurrentTargets();
+      } else {
+        alert('Failed to save targets: ' + (data.message || 'unknown error'));
+      }
+    })
+    .catch(function(e) { alert('Request failed: ' + e); });
+  }
+
+  // Load and set inject settings from instance config
+  function loadTsSettings() {
+    qrApi('/instances/' + instId)
+      .then(function(data) {
+        if (data.status !== 'ok' || !data.data) return;
+        var co = data.data.config_override || {};
+        if (typeof co === 'string') { try { co = JSON.parse(co); } catch(e) { co = {}; } }
+        var env = co.env || {};
+
+        // Load inject settings (keys match config_override.env format)
+        document.getElementById('ts-inject-user-ts').checked = 
+          env['ts_proxy_inject_user_timestamp'] !== 'false';
+        document.getElementById('ts-inject-response-ts').checked = 
+          env['ts_proxy_inject_response_time'] !== 'false';
+        
+        var pos = env['ts_proxy_timestamp_position'] || 'front';
+        document.getElementById('ts-position-sel').value = pos;
+
+        var fmt = env['ts_proxy_timestamp_format'] || '%Y-%m-%d %H:%M:%S';
+        document.getElementById('ts-format-input').value = fmt;
+      })
+      .catch(function(e) { console.error('ts settings load error:', e); });
+  }
+  loadTsSettings();
+
+  window.updateTsSetting = function(key, value) {
+    qrApi('/instances/' + instId + '/config', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({env: {[key]: value}})
+    })
+    .then(function(data) {
+      if (data.status !== 'ok') {
+        alert('Failed to save setting: ' + (data.message || 'unknown error'));
+      }
+    })
+    .catch(function(e) { alert('Request failed: ' + e); });
+  };
+})();
+{% endif %}
+</script>
 
 {# System Options Panel — Start on Boot + Restart Policy combined #}
 {% if not is_system %}
@@ -130,7 +389,7 @@
   {% endif %}
   <label style="color:#666;font-size:0.9em;margin-top:12px;">Change Preset</label>
   <div style="display:flex;gap:8px;align-items:center;margin-top:4px;">
-    <select id="preset-change-select" style="width:280px;padding:7px 10px;border:1px solid #ccc;border-radius:4px;font-size:0.9em;">
+    <select id="preset-change-select" style="width:300px;padding:7px 10px;border:1px solid #ccc;border-radius:4px;font-size:0.9em;">
       <option value="">-- Select a different preset --</option>
       {% for p in presets_list %}
         <option value="{{ p.id }}" {% if p.id == preset_id %}selected{% endif %}>
@@ -138,10 +397,10 @@
         </option>
       {% endfor %}
     </select>
-    <button id="preset-apply-btn" class="btn btn-success">Apply &amp; Restart</button>
+    <span id="preset-status" style="font-size:0.85em;color:#888;"></span>
   </div>
   <small style="color:#888;margin-top:8px;display:block;">
-    Applying a preset redeploys the instance with new configuration. Model loading may take up to 60 minutes.
+    Selecting a preset updates the config immediately. Click "Reconfig/Restart" to apply and reload.
   </small>
 </div>
 {% endif %}
@@ -477,15 +736,14 @@
 </div>
 {% endif %}
 
-{# Log Level (llama.cpp only) #}
+{# Log Level (llama.cpp only) — off/info/debug, takes effect on next restart #}
 {% if is_llama %}
 <div class="detail-card" style="margin-bottom:12px;max-width:400px;">
-  <label>Log Level (llama-server)</label>
+  <label>Log Level <span style="color:#888;font-weight:normal;font-size:0.8em;">(restart to apply)</span></label>
   <div style="display:flex;gap:8px;margin-top:4px;">
-    <button class="btn btn-primary log-level-btn" data-level="debug">debug</button>
+    <button class="btn btn-primary log-level-btn" data-level="off">off</button>
     <button class="btn btn-primary log-level-btn" data-level="info">info</button>
-    <button class="btn btn-primary log-level-btn" data-level="warn">warn</button>
-    <button class="btn btn-primary log-level-btn" data-level="error">error</button>
+    <button class="btn btn-primary log-level-btn" data-level="debug">debug</button>
   </div>
 </div>
 {% endif %}
@@ -546,28 +804,32 @@
   startJournalPoll(savedInterval);
 
   // Pause/resume
-  pauseBtn.addEventListener('click', function() {
-    paused = !paused;
-    if (paused) {
-      clearInterval(refreshInterval);
-      pauseBtn.textContent = 'Resume';
-      pauseBtn.className = 'btn btn-success';
-    } else {
-      fetchJournal();
-      var val = parseInt(autoIntervalSelect.value, 10);
-      refreshInterval = setInterval(fetchJournal, val * 1000);
-      pauseBtn.textContent = 'Pause';
-      pauseBtn.className = 'btn btn-secondary';
-    }
-    qrSettings.set('instance_detail', 'journal_paused', paused ? '1' : '0');
-  });
+  if (pauseBtn) {
+    pauseBtn.addEventListener('click', function() {
+      paused = !paused;
+      if (paused) {
+        clearInterval(refreshInterval);
+        pauseBtn.textContent = 'Resume';
+        pauseBtn.className = 'btn btn-success';
+      } else {
+        fetchJournal();
+        var val = parseInt(autoIntervalSelect.value, 10);
+        refreshInterval = setInterval(fetchJournal, val * 1000);
+        pauseBtn.textContent = 'Pause';
+        pauseBtn.className = 'btn btn-secondary';
+      }
+      qrSettings.set('instance_detail', 'journal_paused', paused ? '1' : '0');
+    });
+  }
 
   // Interval change
-  autoIntervalSelect.addEventListener('change', function() {
-    var val = parseInt(this.value, 10);
-    startJournalPoll(val);
-    qrSettings.set('instance_detail', 'journal_interval_sec', val.toString());
-  });
+  if (autoIntervalSelect) {
+    autoIntervalSelect.addEventListener('change', function() {
+      var val = parseInt(this.value, 10);
+      startJournalPoll(val);
+      qrSettings.set('instance_detail', 'journal_interval_sec', val.toString());
+    });
+  }
 
   // Load on demand button
   var loadBtn = document.getElementById('journal-fetch-btn');
@@ -787,19 +1049,53 @@
 (function() {
   var instId = {{ inst_id }};
 
-  // Fetch status and render actions via shared renderer from base.html
+  // Shared status cache — avoids re-fetching /status for both action buttons and SSE check
+  window._qrDetailStatusCache = null;
+  window._qrDetailStatusCacheTime = 0;
+  window._QR_DETAIL_STATUS_TTL = 10000;  // 10 second TTL
+
+  function getCachedStatus() {
+    if (window._qrDetailStatusCache && (Date.now() - window._qrDetailStatusCacheTime) < window._QR_DETAIL_STATUS_TTL) {
+      return Promise.resolve(window._qrDetailStatusCache);
+    }
+    return null;
+  }
+
+  function cacheStatus(data) {
+    window._qrDetailStatusCache = data;
+    window._qrDetailStatusCacheTime = Date.now();
+  }
+
+  // Async health check: fetch /status for live data, update health badge.
+  // Actions are pre-rendered server-side from state→actions mapping —
+  // this call updates the button set if STATUS-1 returns different actions
+  // (e.g., disabled states) but does NOT block page load.
   function initDetailActions() {
-    qrApi('/instances/' + instId + '/status')
-      .then(function(data) {
-        var statusData = (data && data.data) || {};
-        var cell = document.querySelector('.actions-render[data-inst-id="' + instId + '"]');
-        if (!cell) return;
-        // Use shared renderer from base.html — pass methodOverrides for restart-system
+    var cached = getCachedStatus();
+    if (cached) {
+      var statusData = (cached && cached.data) || {};
+      var cell = document.querySelector('.actions-render[data-inst-id="' + instId + '"]');
+      if (cell) {
         window.renderInstanceActions(instId, statusData, cell, {
           methodOverrides: {'restart-system': 'POST'}
         });
-      })
-      .catch(function() {});
+      }
+      return;
+    }
+    // Non-blocking async call — fires after page is interactive
+    setTimeout(function() {
+      qrApi('/instances/' + instId + '/status')
+        .then(function(data) {
+          cacheStatus(data);
+          var statusData = (data && data.data) || {};
+          var cell = document.querySelector('.actions-render[data-inst-id="' + instId + '"]');
+          if (!cell) return;
+          window.renderInstanceActions(instId, statusData, cell, {
+            methodOverrides: {'restart-system': 'POST'}
+          });
+        })
+        .catch(function() {});
+    }, 100);  // 100ms delay — page is already interactive
   }
 
   // Run after page load (base.html script block is available)
@@ -810,69 +1106,49 @@
   }
 })();
 
-// Preset change handler
+// Preset change handler — auto-triggers on dropdown change
   (function() {
     var selectEl = document.getElementById('preset-change-select');
-    var applyBtn = document.getElementById('preset-apply-btn');
+    var statusEl = document.getElementById('preset-status');
     var instId = {{ inst_id }};
-    if (!selectEl || !applyBtn) return;
-    var origPresetId = {{ preset_id | default('null') }};
+    if (!selectEl) return;
 
     selectEl.addEventListener('change', function() {
       var val = this.value ? parseInt(this.value) : null;
-      applyBtn.disabled = (val === null || val === origPresetId);
-    });
-
-    applyBtn.addEventListener('click', function() {
-      var val = selectEl.value ? parseInt(selectEl.value) : null;
-      if (!val) return;
-      if (!confirm('Apply preset and redeploy this instance?')) return;
-      var origHTML = applyBtn.innerHTML;
-      applyBtn.disabled = true;
-      applyBtn.style.pointerEvents = 'none';
-      applyBtn.style.opacity = '0.6';
-      var dots = ['...', '. .', ' . .'];
-      var dotIdx = 0;
-      var dotInterval = setInterval(function() {
-        applyBtn.textContent = dots[dotIdx % 3];
-        dotIdx++;
-      }, 400);
-      var toast = document.createElement('div');
-      toast.style.cssText = 'position:fixed;top:20px;right:20px;z-index:9999;padding:10px 16px;background:#1976d2;color:#fff;border-radius:4px;font-size:0.85em;opacity:0.95;box-shadow:0 2px 8px rgba(0,0,0,0.2);';
-      toast.textContent = 'Applying preset... please wait';
-      document.body.appendChild(toast);
-      qrApi('/instances/' + instId, {
-         method: 'PUT',
-         headers: {'Content-Type': 'application/json'},
+      if (!val || val === {{ preset_id | default('null') }}) {
+        statusEl.textContent = '';
+        return;
+      }
+      // Debounce: only trigger on final selection (user stops changing)
+      if (this._debounceTimer) clearTimeout(this._debounceTimer);
+      statusEl.textContent = 'Applying...';
+      this.disabled = true;
+      this._debounceTimer = setTimeout(function() {
+        qrApi('/instances/' + instId, {
+          method: 'PUT',
+          headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({preset_id: val})
-       })
-      .then(function(data) {
-        clearInterval(dotInterval);
-        toast.style.opacity = '0';
-        setTimeout(function() { toast.remove(); }, 300);
-        if (data.status === 'ok') {
-          applyBtn.style.pointerEvents = '';
-          applyBtn.style.opacity = '';
-          setTimeout(function() { window.location.reload(); }, 1200);
-        } else {
-          applyBtn.disabled = false;
-          applyBtn.textContent = origHTML;
-          applyBtn.style.pointerEvents = '';
-          applyBtn.style.opacity = '';
-          alert('Preset change failed: ' + (data.message || JSON.stringify(data)));
-        }
-      }).catch(function(e) {
-          clearInterval(dotInterval);
-          toast.style.opacity = '0';
-          setTimeout(function() { toast.remove(); }, 300);
-          applyBtn.disabled = false;
-          applyBtn.textContent = origHTML;
-          applyBtn.style.pointerEvents = '';
-          applyBtn.style.opacity = '';
-         alert('Request failed: ' + e);
+        }).then(function(data) {
+          if (data.status === 'ok') {
+            statusEl.textContent = 'Preset updated. Click "Reconfig/Restart" to apply.';
+            statusEl.style.color = '#28a745';
+            setTimeout(function() {
+              statusEl.textContent = '';
+              statusEl.style.color = '#888';
+            }, 5000);
+          } else {
+            statusEl.textContent = 'Error: ' + (data.message || 'unknown');
+            statusEl.style.color = '#dc3545';
+          }
+        }).catch(function(e) {
+          statusEl.textContent = 'Error: ' + e;
+          statusEl.style.color = '#dc3545';
+        }).finally(function() {
+          selectEl.disabled = false;
         });
+      }, 600);
     });
-})();
+  })();
 </script>
 
 {# Model Load SSE Client — connects to /api/v1/instances/<id>/models-sse #}
@@ -922,46 +1198,53 @@
   }
 
   function connectSSE() {
-    // Check current state first
-    qrApi('/instances/' + instId + '/status')
-    .then(function(data) {
-      var statusData = (data && data.data) || {};
-      var st = statusData.state || '';
+    // Try SSE directly — the /models-sse endpoint itself is the state indicator:
+    // connected + events = loading/starting (show progress bar)
+    // error/disconnected = not loading (hide progress bar)
+    // This avoids the ~3.6s SSH pre-check via /status.
+    var progressEl = document.getElementById('load-progress');
+    if (!progressEl) return;
+
+    // If we already have cached status showing non-loading state, skip SSE entirely
+    var cached = getCachedStatus();
+    if (cached) {
+      var st = (cached.data && cached.data.state) || '';
       if (st === 'running' || st === 'error') {
         progressEl.style.display = 'none';
         if (eventSource) { eventSource.close(); eventSource = null; }
         return;
       }
-      // Show progress bar for starting/loading states
-      if (st === 'starting' || st === 'loading') {
-        progressEl.style.display = 'block';
-        // Connect to SSE proxy
-        if (eventSource) { eventSource.close(); }
-        var url = '/api/v1/instances/' + instId + '/models-sse';
+    }
+
+    // Attempt SSE connection
+    var url = '/api/v1/instances/' + instId + '/models-sse';
+    try {
+      progressEl.style.display = 'block';  // Assume loading until proven otherwise
+      if (eventSource) { eventSource.close(); }
+      eventSource = new EventSource(url);
+      eventSource.addEventListener('message', function(e) {
         try {
-          eventSource = new EventSource(url);
-          eventSource.addEventListener('message', function(e) {
-            try {
-              var msg = JSON.parse(e.data);
-              if (msg.status === 'loaded' || msg.status === 'sleeping') {
-                updateProgress('loaded', 1.0);
-                setTimeout(function() { location.reload(); }, 2000);
-              } else if (msg.status === 'unloaded') {
-                progressEl.style.display = 'none';
-                eventSource.close();
-              } else if (msg.progress) {
-                updateProgress(msg.progress.stage, msg.progress.value);
-              }
-            } catch(err) { /* ignore parse errors */ }
-          });
-          eventSource.onerror = function() {
-            // SSE error — check if server still supports the endpoint
+          var msg = JSON.parse(e.data);
+          if (msg.status === 'loaded' || msg.status === 'sleeping') {
+            updateProgress('loaded', 1.0);
+            setTimeout(function() { location.reload(); }, 2000);
+          } else if (msg.status === 'unloaded') {
             progressEl.style.display = 'none';
             eventSource.close();
-          };
-        } catch(e) { /* EventSource not supported, silently hide */ }
-      }
-    }).catch(function() {});
+          } else if (msg.progress) {
+            updateProgress(msg.progress.stage, msg.progress.value);
+          }
+        } catch(err) { /* ignore parse errors */ }
+      });
+      eventSource.onerror = function() {
+        // SSE error — server not in loading state or endpoint unavailable
+        progressEl.style.display = 'none';
+        eventSource.close();
+        eventSource = null;
+      };
+    } catch(e) { /* EventSource not supported, silently hide */
+      progressEl.style.display = 'none';
+    }
   }
 
   // Connect on page load
@@ -1026,5 +1309,57 @@
       });
     });
   }
-})();
-</script>
+
+   // Copy auth token to clipboard
+    // Regenerate auth token — DB-only update, no reconfig job
+    function regenerateToken() {
+      var statusEl = document.getElementById('token-status');
+      var btn = event.target;
+      btn.disabled = true;
+      btn.textContent = 'Generating...';
+      qrApi('/instances/{{ inst_id }}/regenerate-token', {method: 'POST'})
+      .then(function(d) {
+       if (d.status === 'ok') {
+         document.getElementById('inst-auth-token').textContent = d.auth_token;
+          statusEl.textContent = 'Token regenerated (DB updated). Click "Reconfig/Restart" to apply.';
+         setTimeout(function() { statusEl.textContent = ''; }, 5000);
+       } else {
+         statusEl.textContent = 'Error: ' + (d.message || 'unknown');
+       }
+     }).catch(function(e) {
+       statusEl.textContent = 'Error: ' + e.message;
+     }).finally(function() {
+       btn.disabled = false;
+       btn.textContent = 'Regenerate';
+     });
+   }
+
+    // Disable auth token — set to NULL in DB, no reconfig job
+    function disableAuthToken() {
+      var statusEl = document.getElementById('token-status');
+      var codeEl = document.getElementById('inst-auth-token');
+      var btn = event.target;
+      btn.disabled = true;
+      btn.textContent = 'Disabling...';
+      qrApi('/instances/{{ inst_id }}/disable-token', {method: 'POST'})
+      .then(function(d) {
+       if (d.status === 'ok') {
+         codeEl.textContent = '(disabled)';
+          statusEl.textContent = 'Auth disabled (DB updated). Click "Reconfig/Restart" to apply.';
+         setTimeout(function() { statusEl.textContent = ''; }, 5000);
+       } else {
+         statusEl.textContent = 'Error: ' + (d.message || 'unknown');
+       }
+     }).catch(function(e) {
+       statusEl.textContent = 'Error: ' + e.message;
+     }).finally(function() {
+       btn.disabled = false;
+       btn.textContent = 'Disable Auth';
+     });
+    }
+
+    // Expose to global scope for inline onclick handlers
+    window.regenerateToken = regenerateToken;
+    window.disableAuthToken = disableAuthToken;
+  })();
+  </script>

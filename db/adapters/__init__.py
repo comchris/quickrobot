@@ -33,6 +33,7 @@ from db.adapters.presets import (
 from db.adapters.models import (
     add_model, get_model, list_models, update_model_discovered,
     delete_model, scan_host_for_models,
+    consolidate_shard_fragments,
 )
 from db.adapters.configs import (
     set_engine_config, get_engine_config, delete_engine_config,
@@ -68,6 +69,7 @@ __all__ = [
     # models
     "add_model", "get_model", "list_models", "update_model_discovered",
     "delete_model", "scan_host_for_models",
+    "consolidate_shard_fragments",
     # configs
     "set_engine_config", "get_engine_config", "delete_engine_config",
     "get_all_engine_configs", "set_global_config", "get_global_config",
@@ -80,6 +82,8 @@ __all__ = [
     # logs
     "log_instance_action", "get_instance_logs_paginated",
     "cleanup_old_logs", "get_action_history",
+    # prompts
+    "increment_prompt_usage_counter", "increment_prompt_error_counter",
     # playbooks
     "register_playbook", "get_playbook_by_path",
     "register_all_core_playbooks", "resolve_playbook_by_tags",

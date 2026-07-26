@@ -78,13 +78,10 @@ def rotate_log_if_needed(log_path, engine_name="engine"):
         if size > _MAX_LOG_BYTES:
             with open(log_path, "w") as f:
                 pass  # truncate
-            print(
-                f"[qr] {engine_name} log rotated ({size:,}B → 0B)",
-                file=sys.stderr, flush=True,
-            )
+            logger.info("[qr-system] %s log rotated (%dB → 0B)", engine_name, size)
             return True
     except OSError as _e:
-        print(f"[qr] {engine_name} log rotation check failed: {_e}", file=sys.stderr)
+        logger.warning("[qr-system] %s log rotation check failed: %s", engine_name, _e)
     return False
 
 
@@ -153,11 +150,8 @@ def check_and_free_port(port, service_name):
                         proc = psutil.Process(stale_pid)
                         ppid = proc.ppid()
                         if ppid == 1 or proc.status() in ("zombie",):
-                            print(
-                                f"[qr] WARNING: Port {port} used by stale "
-                                f"{service_name} process (pid={stale_pid}, "
-                                f"PPID={ppid}). Killing."
-                            )
+                            logger.warning("[qr-system] Port %d used by stale %s process (pid=%d, PPID=%d). Killing.",
+                                          port, service_name, stale_pid, ppid)
                             proc.terminate()
                             # Wait briefly, force kill if needed
                             for _ in range(10):
@@ -168,7 +162,7 @@ def check_and_free_port(port, service_name):
                                             ).status() == "zombie":
                                         break
                                 except Exception as _e:
-                                    print(f"[qr] WARNING: Orphan kill loop error (pid={stale_pid}): {_e}")
+                                    logger.warning("[qr-system] Orphan kill loop error (pid=%d): %s", stale_pid, _e)
                                     break
                                 time.sleep(0.1)
                             if psutil.pid_exists(stale_pid):
@@ -305,7 +299,7 @@ def _mcp_binary_exists():
                 interp = str(row2["value"]).strip()
                 candidates.insert(0, interp)
     except Exception as _e:
-        print(f"[qr] WARN: MCP binary path lookup failed (using defaults): {_e}")
+        logger.warning("[qr-system] MCP binary path lookup failed (using defaults): %s", _e)
 
     # Default pipx MCP venv python
     default_python = os.path.expanduser("~/.local/share/pipx/venvs/mcp/bin/python")
@@ -362,7 +356,7 @@ def load_env_config(cwd=None):
                 continue
             # Split on first '='
             if "=" not in line:
-                print(f"[qr] WARN: .quickrobot.env line {line_no}: no '=' found, skipping: {raw_line.rstrip()}")
+                logger.warning("[qr-system] .quickrobot.env line %d: no '=' found, skipping: %s", line_no, raw_line.rstrip())
                 continue
             key, _, value = line.partition("=")
             key = key.strip()
@@ -413,7 +407,7 @@ def _validate_env_config(config, key_line_map):
     for key in ("QUICKROBOT_API_HOST", "QUICKROBOT_WEBUI_HOST", "QUICKROBOT_MCP_HOST"):
         if key not in config or not config[key]:
             line = key_line_map.get(key, "?")
-            print(f"[qr] ERROR: {key} is required but missing (line {line})")
+            logger.error("[qr-system] %s is required but missing (line %s)", key, line)
             sys.exit(1)
 
     # Required int keys (ports) — defaults from SOT QR_ENGINE_PORT_DEFAULTS
@@ -425,10 +419,10 @@ def _validate_env_config(config, key_line_map):
         try:
             n = int(val)
             if n < 1 or n > 65535:
-                print(f"[qr] ERROR: {key}={val} — expected integer 1-65535, got {n} (line {line})")
+                logger.error("[qr-system] %s=%s — expected integer 1-65535, got %d (line %s)", key, val, n, line)
                 sys.exit(1)
         except ValueError:
-            print(f"[qr] ERROR: {key}={val} — expected integer, got \"{val}\" (line {line})")
+            logger.error("[qr-system] %s=%s — expected integer, got '%s' (line %s)", key, val, val, line)
             sys.exit(1)
 
     # Optional int keys
@@ -445,10 +439,10 @@ def _validate_env_config(config, key_line_map):
         try:
             n = int(val)
             if n < min_val:
-                print(f"[qr] ERROR: {key}={val} — expected >= {min_val}, got {n} (line {line})")
+                logger.error("[qr-system] %s=%s — expected >= %d, got %d (line %s)", key, val, min_val, n, line)
                 sys.exit(1)
         except ValueError:
-            print(f"[qr] ERROR: {key}={val} — expected integer, got \"{val}\" (line {line})")
+            logger.error("[qr-system] %s=%s — expected integer, got '%s' (line %s)", key, val, val, line)
             sys.exit(1)
 
     # Optional string keys with allowed values
@@ -456,7 +450,7 @@ def _validate_env_config(config, key_line_map):
     if ansible_level is not None:
         line = key_line_map.get("QUICKROBOT_ANSIBLE_LOG_LEVEL", "?")
         if ansible_level not in ("errors", "warnings", "all"):
-            print(f"[qr] ERROR: QUICKROBOT_ANSIBLE_LOG_LEVEL={ansible_level} — expected one of: errors, warnings, all (line {line})")
+            logger.error("[qr-system] QUICKROBOT_ANSIBLE_LOG_LEVEL=%s — expected one of: errors, warnings, all (line %s)", ansible_level, line)
             sys.exit(1)
 
     # Optional bool keys — normalize in-place
@@ -475,7 +469,7 @@ def _validate_env_config(config, key_line_map):
         line = key_line_map.get(key, "?")
         normalized = _normalize_bool(val)
         if normalized is None:
-            print(f"[qr] ERROR: {key}={val} — expected true/false/yes/no/1/0 (line {line})")
+            logger.error("[qr-system] %s=%s — expected true/false/yes/no/1/0 (line %s)", key, val, line)
             sys.exit(1)
         config[key] = normalized
 
@@ -483,7 +477,7 @@ def _validate_env_config(config, key_line_map):
     for key in ("QUICKROBOT_SEED_CHECKSUM", "QUICKROBOT_SEED_FILESIZE"):
         if key not in config or not config[key]:
             line = key_line_map.get(key, "?")
-            print(f"[qr] ERROR: {key} is required but missing (line {line})")
+            logger.error("[qr-system] %s is required but missing (line %s)", key, line)
             sys.exit(1)
 
 
@@ -547,7 +541,7 @@ def _build_command(engine_name, env_config, api_host, api_port, extra_flags=None
         port = env_config.get("QUICKROBOT_MCP_PORT") or str(get_port_default("quickrobot-mcp"))
         # Strict host check — must not be a forbidden wildcard
         if host in QR_FORBIDDEN_HOSTS:
-            print(f"[qr] FATAL: MCP bind host is '{host}' — {QR_FORBIDDEN_HOSTS}")
+            logger.error("[qr-system] FATAL: MCP bind host is '%s' — %s", host, QR_FORBIDDEN_HOSTS)
             sys.exit(1)
 
         mcp_server_path = os.path.join(os.getcwd(), "engine", "qr_mcp_server.py")
@@ -599,10 +593,10 @@ def _log_lifecycle(engine_name, action, details=None):
             f.write(log_line + "\n")
     except Exception as _e:
         # File write failure is non-critical but worth noting
-        print(f"[qr] LOG WRITE FAILED: {_e}")
+        logger.warning("[qr-system] LOG WRITE FAILED: %s", _e)
 
-    # Also print to stdout for tmux visibility
-    print(f"[qr] {log_line}")
+    # Also log via module logger for tmux/consistency
+    logger.info("[qr-system] %s", log_line)
 
 
 def _get_pid_status(pid):
@@ -718,7 +712,7 @@ def _find_stale_schedulers():
                         pass
         return pids
     except Exception as exc:
-        print(f"[qr] WARN: stale scheduler scan failed ({exc})")
+        logger.warning("[qr-system] stale scheduler scan failed: %s", exc)
         return []
 
 
@@ -780,7 +774,7 @@ def start_system_engine(engine_name, env_config, api_host, api_port, python_exe=
                 my_pid = os.getpid()
                 if ppid == my_pid:
                     continue
-                print(f"[qr] scheduler: found stale process (pid={spid}, ppid={ppid}), killing")
+                logger.warning("[qr-system] scheduler: found stale process (pid=%d, ppid=%d), killing", spid, ppid)
                 try:
                     proc.kill()
                 except (_psutil.NoSuchProcess, _psutil.AccessDenied):
@@ -802,7 +796,7 @@ def start_system_engine(engine_name, env_config, api_host, api_port, python_exe=
                 adopt_env = _adopt_map.get(engine_name, "false")
             adopt = adopt_env.lower() in ("true", "1")
             if adopt:
-                print(f"[qr] {engine_name}: orphaned process (pid={old_pid}) — adopting (RESTART_ADOPT=true)")
+                logger.info("[qr-system] %s: orphaned process (pid=%d) — adopting (RESTART_ADOPT=true)", engine_name, old_pid)
                 try:
                     transition_state(db_path, inst_id, "deployed")
                 except Exception as _e:
@@ -810,7 +804,7 @@ def start_system_engine(engine_name, env_config, api_host, api_port, python_exe=
                     pass
                 return {"action": "start", "port": port, "pid": old_pid,
                         "status": "existing_process_alive", "engine": engine_name}
-            print(f"[qr] {engine_name}: orphaned process detected (pid={old_pid}), killing and restarting")
+            logger.info("[qr-system] %s: orphaned process detected (pid=%d), killing and restarting", engine_name, old_pid)
             _kill_orphaned_process(old_pid, engine_name)
             try:
                 update_instance(db_path, inst_id, pid_last_known=None)
@@ -879,14 +873,14 @@ def start_system_engine(engine_name, env_config, api_host, api_port, python_exe=
     # Whitelist verification: ensure test vars from env file don't leak
     _test_key = "QUICKROBOT_TEST_VAR"
     if _test_key in env_config and _test_key not in env:
-        print(f"[qr] ENV WHITELIST OK: {_test_key}={env_config[_test_key]} NOT in child env (whitelist working)")
+        logger.debug("[qr-system] ENV WHITELIST OK: %s=%s NOT in child env (whitelist working)", _test_key, env_config[_test_key])
     elif _test_key in env:
-        print(f"[qr] ENV WHITELIST FAIL: {_test_key} leaked into child env")
+        logger.warning("[qr-system] ENV WHITELIST FAIL: %s leaked into child env", _test_key)
     # Log env var count for comparison
     os_env_count = len(os.environ)
     child_env_count = len(env)
     if child_env_count < os_env_count:
-        print(f"[qr] ENV: subprocess env reduced {os_env_count} → {child_env_count} keys (was copy, now whitelist)")
+        logger.info("[qr-system] ENV: subprocess env reduced %d → %d keys (was copy, now whitelist)", os_env_count, child_env_count)
 
     try:
         proc = subprocess.Popen([exe_path] + cmd[1:], **popen_kwargs)
@@ -910,6 +904,116 @@ def start_system_engine(engine_name, env_config, api_host, api_port, python_exe=
 
     _log_lifecycle(engine_name, "start", {"pid": new_pid, "port": port, "api_host": api_host, "api_port": api_port})
     return {"action": "start", "port": port, "pid": new_pid, "status": "started", "engine": engine_name}
+
+
+def shutdown_subprocesses(env_config, timeout=10):
+    """Gracefully shut down running system engine subprocesses (WebUI, MCP, Scheduler).
+
+    Checks each engine's PID in DB, terminates if process is alive. Skips dead/stopped ones.
+    Used during API restart to cleanly stop child engines before execv replacement.
+
+    Args:
+        env_config: Dict from load_env_config() — read AUTOSTART flags but always stop running ones.
+        timeout: Seconds to wait for each process to exit (default 10).
+
+    Returns:
+        list of dicts: [{"engine": "webui", "pid": 123, "status": "terminated|already_dead|skipped"}]
+    """
+    from db.adapters.instances import get_instance as _gi, update_instance as _ui
+
+    results = []
+    engines = [("webui", 2), ("mcp", 3), ("scheduler", 4)]
+
+    # Read DB path — prefer _CONFIG if available, fallback to default location
+    db_path = None
+    if "_CONFIG" in globals():
+        db_path = _CONFIG.get("db_path")
+    if not db_path:
+        try:
+            qr_env = load_env_config(os.getcwd())
+            db_file_raw = qr_env.get("QUICKROBOT_DB_PATH", "data/quickrobot.db")
+            db_dir = os.path.dirname(db_file_raw)
+        except FileNotFoundError:
+            db_dir = "data"
+    else:
+        db_dir = os.path.dirname(db_path) if "/" in db_path else "data"
+
+    db_file = os.path.join(os.getcwd(), "quickrobot.db") if not os.path.exists(db_path) else db_path
+
+    for engine_name, inst_id in engines:
+        result = {"engine": engine_name}
+
+        # Look up PID from DB
+        try:
+            target_db = db_path if db_path and os.path.exists(db_path) else os.path.join(os.getcwd(), "data", "quickrobot.db")
+            inst = _gi(target_db, inst_id)
+        except Exception as _e:
+            logger.debug("shutdown_subprocesses: get_instance failed for %s (id=%d): %s", engine_name, inst_id, _e)
+            result["status"] = "skipped"
+            results.append(result)
+            continue
+
+        pid = inst.get("pid_last_known") if inst else None
+        result["pid"] = pid
+
+        if not pid:
+            result["status"] = "already_dead"
+            results.append(result)
+            continue
+
+        if not _get_pid_status(pid):
+            # Process already dead — clear PID from DB
+            try:
+                _ui(target_db, inst_id, pid_last_known=None)
+            except Exception as _e:
+                logger.debug("shutdown_subprocesses: pid_clear failed for %s (pid=%d): %s", engine_name, pid, _e)
+            result["status"] = "already_dead"
+            results.append(result)
+            continue
+
+        # Process alive — terminate it
+        try:
+            import psutil
+            psutil.Process(pid).terminate()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            result["status"] = "already_dead"
+            results.append(result)
+            continue
+
+        logger.info("shutdown_subprocesses: terminated %s (pid=%d)", engine_name, pid)
+
+        # Wait for process to exit
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if not _get_pid_status(pid):
+                # Successfully terminated — clear PID from DB
+                try:
+                    _ui(target_db, inst_id, pid_last_known=None)
+                except Exception as _e:
+                    logger.debug("shutdown_subprocesses: pid_clear after terminate failed for %s (pid=%d): %s", engine_name, pid, _e)
+                result["status"] = "terminated"
+                results.append(result)
+                continue  # Continue with remaining engines instead of returning early
+            time.sleep(0.5)
+
+        # Timeout — force kill
+        try:
+            import psutil
+            if _get_pid_status(pid):
+                psutil.Process(pid).kill()
+                time.sleep(0.5)
+        except Exception as _e:
+            logger.debug("shutdown_subprocesses: force kill failed for %s (pid=%d): %s", engine_name, pid, _e)
+
+        try:
+            _ui(target_db, inst_id, pid_last_known=None)
+        except Exception as _e:
+            logger.debug("shutdown_subprocesses: pid_clear after force kill failed for %s (pid=%d): %s", engine_name, pid, _e)
+
+        result["status"] = "force_killed"
+        results.append(result)
+
+    return results
 
 
 def stop_system_engine(engine_name, env_config):
@@ -1029,7 +1133,7 @@ def restart_system_engine(engine_name, env_config, api_host, api_port, timeout=N
 
     if not dead_verified:
         # Force kill
-        print(f"[qr] {engine_name} restart: old PID {old_pid} didn't exit within {timeout}s, force killing")
+        logger.warning("[qr-system] %s restart: old PID %d didn't exit within %ds, force killing", engine_name, old_pid, timeout)
         try:
             import psutil
             if _get_pid_status(old_pid):
@@ -1110,7 +1214,7 @@ def get_system_engine_pid(engine_name, env_config, _retried=False):
     if not _retried and pid:
         try:
             update_instance(db_path, inst_id, pid_last_known=None)
-            print(f"[qr] Stale PID for {engine_name} ({pid}) cleared, restarting...")
+            logger.info("[qr-system] Stale PID for %s (%d) cleared, restarting...", engine_name, pid)
             # Extract api_host/api_port from env_config for start_system_engine
             api_host = env_config.get("QUICKROBOT_API_HOST", "127.0.0.1") if isinstance(env_config, dict) else "127.0.0.1"
             api_port_raw = env_config.get("QUICKROBOT_API_PORT", str(QR_ENGINE_PORT_DEFAULTS["quickrobot-api"])) if isinstance(env_config, dict) else str(QR_ENGINE_PORT_DEFAULTS["quickrobot-api"])
@@ -1122,7 +1226,7 @@ def get_system_engine_pid(engine_name, env_config, _retried=False):
             # Recursive call to get the NEW PID after restart
             return get_system_engine_pid(engine_name, env_config, _retried=True)
         except Exception as exc:
-            print(f"[qr] WARNING: EIO prevention restart failed for {engine_name}: {exc}")
+            logger.warning("[qr-system] EIO prevention restart failed for %s: %s", engine_name, exc)
 
     return None
 
@@ -1171,6 +1275,8 @@ def build_subprocess_env(engine_name, env_config, api_host, api_port, instance_c
     if _pycache_prefix:
         env["PYTHONPYCACHEPREFIX"] = _pycache_prefix
     env["QUICKROBOT_API_BEARER_TOKEN"] = env_config.get("QUICKROBOT_API_BEARER_TOKEN", "")
+    # Auth token — passed to all system engine subprocesses for API authentication
+    env["QUICKROBOT_API_KEY"] = env_config.get("QUICKROBOT_API_KEY", "")
     env["QUICKROBOT_API_HOST"] = str(api_host)
     env["QUICKROBOT_API_PORT"] = str(api_port)
     # Operational mode — ensures subprocess always knows its mode regardless of _CONFIG import timing
@@ -1180,6 +1286,15 @@ def build_subprocess_env(engine_name, env_config, api_host, api_port, instance_c
     env["QUICKROBOT_ANSIBLE_LOG_LEVEL"] = env_config.get("QUICKROBOT_ANSIBLE_LOG_LEVEL", "errors")
     # Log path — used by health check for FATAL exit logging
     env["QUICKROBOT_LOG_PATH"] = get_engine_log_path(engine_name)
+    # Unified system engine health check retry count (all subprocesses)
+    _sys_retries = os.environ.get("QUICKROBOT_SYSTEM_RETRIES", "")
+    if _sys_retries:
+        try:
+            v = int(_sys_retries)
+            if 1 <= v <= 10:
+                env["QUICKROBOT_SYSTEM_RETRIES"] = str(v)
+        except (ValueError, TypeError):
+            pass
 
     # === LAYER 2: Engine-specific extras ===
     if engine_name == "webui":
@@ -1252,7 +1367,8 @@ def api_health_check_loop(api_host, api_port, max_retries=3, retry_delay=3, chec
     _api_url = f"http://{api_host}:{api_port}/api/v1/app/status"
     _consecutive_failures = 0
 
-    print(f"[qr] Health check starting: {_api_url} (interval={check_interval}s, retries={max_retries}, retry_delay={retry_delay}s)", flush=True)
+    logger.info("[qr-system] Health check starting: %s (interval=%ds, retries=%d, retry_delay=%ds)",
+                _api_url, check_interval, max_retries, retry_delay)
     # Startup grace period: give Flask time to bind and start accepting connections.
     import time as _time_mod
     _time_mod.sleep(QR_HEALTH_CHECK_SLEEP)
@@ -1262,25 +1378,25 @@ def api_health_check_loop(api_host, api_port, max_retries=3, retry_delay=3, chec
             _resp = _requests_lib.get(_api_url, timeout=10)
             if _resp.status_code == 200 and _resp.json().get("status") == "ok":
                 if _consecutive_failures > 0:
-                    print(f"[qr] Health check recovered after {_consecutive_failures} failure(s)", flush=True)
+                    logger.info("[qr-system] Health check recovered after %d failure(s)", _consecutive_failures)
                 _consecutive_failures = 0
                 _wait = check_interval  # Normal interval after recovery
             else:
                 _consecutive_failures += 1
-                print(f"[qr] Health check failed (attempt {_consecutive_failures}): HTTP {_resp.status_code}", flush=True)
+                logger.warning("[qr-system] Health check failed (attempt %d): HTTP %d", _consecutive_failures, _resp.status_code)
                 _wait = retry_delay  # Short delay between retries
 
         except _requests_lib.ConnectionError as _e:
             _consecutive_failures += 1
-            print(f"[qr] Health check connection error (attempt {_consecutive_failures}): {_e}", flush=True)
+            logger.warning("[qr-system] Health check connection error (attempt %d): %s", _consecutive_failures, _e)
             _wait = retry_delay
         except _requests_lib.Timeout as _e:
             _consecutive_failures += 1
-            print(f"[qr] Health check timeout (attempt {_consecutive_failures}): {_e}", flush=True)
+            logger.warning("[qr-system] Health check timeout (attempt %d): %s", _consecutive_failures, _e)
             _wait = retry_delay
         except Exception as _e:
             _consecutive_failures += 1
-            print(f"[qr] Health check error (attempt {_consecutive_failures}): {_e}", flush=True)
+            logger.warning("[qr-system] Health check error (attempt %d): %s", _consecutive_failures, _e)
             _wait = retry_delay
 
         # Exit if too many consecutive failures
@@ -1600,8 +1716,7 @@ def start_system_health_thread():
     )
     _thread.start()
     _SYSTEM_HEALTH_STARTED = True
-    print("[qr] system health check started (interval={}s)".format(
-        _SYSTEM_HEALTH_INTERVAL), flush=True)
+    logger.info("[qr-system] system health check started (interval=%ds)", _SYSTEM_HEALTH_INTERVAL)
     return _thread
 
 
@@ -1635,7 +1750,7 @@ def _log_system_health(engine_name, action, details=None):
 
     # Also print to stdout for tmux visibility (low frequency)
     if action in ("check_summary", "dead_restarted", "loop_error"):
-        print(f"[qr] {log_line}")
+        logger.info("[qr-system] %s", log_line)
 
 
 # Import _CONFIG at module level for DB path access

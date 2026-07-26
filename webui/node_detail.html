@@ -58,7 +58,7 @@
 <!-- Actions -->
 {% if node.id != 1 %}
 <div class="actions">
-  <button class="btn btn-success node-action" data-action="apt-update-upgrade" data-id="{{ node.id }}" data-label="Update & Upgrade">Update &amp; Upgrade (apt)</button>
+  <button class="btn btn-success node-action" data-action="apt" data-id="{{ node.id }}" data-label="Update &amp; Upgrade">Update &amp; Upgrade (apt)</button>
   <button class="btn btn-success node-action" data-action="reboot" data-id="{{ node.id }}" data-label="Reboot">Reboot</button>
   <button class="btn btn-danger node-action" data-action="shutdown" data-id="{{ node.id }}" data-label="Shutdown">Shutdown</button>
 </div>
@@ -149,7 +149,10 @@ document.querySelectorAll('.node-action').forEach(function(btn) {
     toast.textContent = label + 'ing node...';
     document.body.appendChild(toast);
 
-    qrApi('/nodes/' + id + '/' + action, {method:'POST'})
+    // EP-CONSOLIDATE P1: APT uses unified endpoint with action body, not path-based
+    var apiPath = action === 'apt' ? '/nodes/' + id + '/apt' : '/nodes/' + id + '/' + action;
+    var apiOpts = action === 'apt' ? {method:'POST', body: JSON.stringify({action: 'all'})} : {method:'POST'};
+    qrApi(apiPath, apiOpts)
     .then(function(data) {
     clearInterval(dotInterval);
     toast.style.opacity = '0';

@@ -12,12 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""quickrobot (v0.09) — Migration runner with idempotent tracking.
+"""quickrobot (v0.10) — Migration runner with idempotent tracking.
 
-Base schema (009_base.sql) is the definitive schema definition — always
+Base schema (010_base.sql) is the definitive schema definition — always
 applied on startup, idempotent via CREATE TABLE IF NOT EXISTS.
 
 Consolidated from: 008_base.sql + migrations 009-012 (prompts system).
+engine_configs moved from seed to base (v0.10 split).
 Incremental migration files are tracked in applied_migrations table and
 only run when first encountered. No wildcard glob: filenames are explicit
 constants, not discovered at runtime.
@@ -30,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 
 # Explicit schema and migration file names — no wildcard discovery
-BASE_SCHEMA_FILE = "009_base.sql"
+BASE_SCHEMA_FILE = "010_base.sql"
 
 # Incremental migration files (applied only once, tracked in DB)
 # Previous migrations 009-012 consolidated into 009_base.sql.

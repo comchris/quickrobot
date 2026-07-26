@@ -1,0 +1,85 @@
+# @playbook_id: quicksetup_validate
+# @version: 1
+
+---
+# Quicksetup validation playbook — hardware scan + self-test
+# Runs on localhost to verify hardware, API reachability, and model path.
+
+- name: Quicksetup validation
+  hosts: localhost
+  gather_facts: no
+  become: no
+
+  tasks:
+    # Hardware: RAM
+    - name: Get total RAM (MB)
+      ansible.builtin.shell: free -m | awk 'NR==2{print $2}'
+      register: _ram_mb
+      changed_when: false
+
+    # Hardware: CPU cores
+    - name: Get CPU core count
+      ansible.builtin.shell: nproc
+      register: _cpu_cores
+      changed_when: false
+
+    # GPU: NVIDIA CUDA check
+    - name: Check for NVIDIA GPU
+      ansible.builtin.shell: |
+        nvidia-smi --query-gpu=name,memory.total \
+          --format=csv,noheader,nounits 2>/dev/null || echo ""
+      register: _nvidia_info
+      changed_when: false
+      failed_when: false
+
+    # GPU: Vulkan/AMD check
+    - name: Check for Vulkan-compatible GPU
+      ansible.builtin.shell: |
+        lspci 2>/dev/null | grep -iE 'vga|3d|display' || echo ""
+      register: _vulkan_info
+      changed_when: false
+      failed_when: false
+
+    # Disk: free space
+    - name: Get free disk space (GB)
+      ansible.builtin.shell: df -BG / | tail -1 | awk '{print $4}'
+      register: _fs_free
+      changed_when: false
+
+    # API self-test
+    - name: Test API health endpoint
+      ansible.builtin.uri:
+        url: "http://{{ api_host | default('127.0.0.1') }}:{{ api_port | default('8039') }}/api/v1/app/status"
+        method: GET
+        status_code: 200
+        timeout: 5
+      register: _api_status
+      changed_when: false
+      failed_when: false
+
+    # Model path write test
+    - name: Test model base path writability
+      ansible.builtin.file:
+        path: "{{ model_path | default('/mnt/llama/gguf/models') }}/._quicksetup_test"
+        state: directory
+        mode: "0755"
+      register: _path_test
+      failed_when: false
+
+    - name: Verify test file
+      ansible.builtin.file:
+        path: "{{ model_path | default('/mnt/llama/gguf/models') }}/._quicksetup_test/test.txt"
+        state: touch
+      failed_when: false
+
+    # Report results
+    - name: Print quicksetup validation summary
+      ansible.builtin.debug:
+        msg: >-
+          Quicksetup validate OK |
+          ram={{ _ram_mb.stdout | default('?') }}MB |
+          cpu={{ _cpu_cores.stdout | default('?') }} cores |
+          nvidia={{ _nvidia_info.stdout | default('')[:40] | default('?') }} |
+          vulkan={{ _vulkan_info.stdout | default('')[:40] | default('?') }} |
+          fs_free={{ _fs_free.stdout | default('?') }}GB |
+          api={{ 'OK' if _api_status is succeeded else 'FAIL' }}

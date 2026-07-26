@@ -1,0 +1,21 @@
+# @playbook_id: TEMPLATE_TIMESTAMP_PROXY_SERVICE
+# @version: 1
+# systemd service unit for timestamp_proxy
+# QR_UUID={{ instance_uuid }}
+[Unit]
+Description=quickrobot timestamp proxy instance {{ instance_name }}
+After=network.target
+
+[Service]
+Type=simple
+User={{ remote_node_user }}
+WorkingDirectory=/opt/quickrobot/{{ unit_name }}
+EnvironmentFile={{ env_file }}
+ExecStart=/usr/bin/python3 /opt/quickrobot/{{ unit_name }}/timestamp_proxy_server.py --port {{ instance_port }} $QR_CLI_ARGS_JOINED
+Restart={{ restart_policy }}
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

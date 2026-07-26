@@ -33,13 +33,12 @@
     });
     if (Object.keys(changes).length === 0) { alert('No changes to save'); return; }
 
-    var fetchOpts = {
+    var saveOpts = {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({configs: changes})
     };
-    fetch(saveEndpoint, fetchOpts)
-     .then(function(res) { return res.json(); })
+    qrApi(saveEndpoint, saveOpts)
      .then(function(data) {
        if (data.status === 'ok') {
          var msg = isSystem ? 'Settings saved. Restart to apply.' : 'Saved ' + (data.data.saved_keys || 0) + ' keys';

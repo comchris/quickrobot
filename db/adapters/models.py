@@ -327,6 +327,161 @@ def delete_model(db_path, model_id):
         return cursor.rowcount > 0
 
 
+def clone_model(db_path, model_id):
+    """Clone a model entry: copy all fields with new id and _clN name suffix.
+
+    Args:
+        db_path: Path to the SQLite database.
+        model_id: Integer primary key of the source model to clone.
+
+    Returns:
+        dict with the new model's data.
+
+    Raises:
+        ModelError: If source not found or clone fails.
+    """
+    from db.sqlite import pool
+    src = get_model(db_path, model_id)
+    if src is None:
+        raise ModelError(f"Model {model_id} not found")
+
+    with pool(db_path) as conn:
+        # Generate unique name with _clN suffix
+        rows = conn.execute(
+            "SELECT name FROM engine_models WHERE name LIKE ?",
+            (f"{src['name']}_cl%",),
+        ).fetchall()
+        existing_names = {r[0] for r in rows}
+
+        base_name = src["name"]
+        cloned_name = None
+        for n in range(1, 100):
+            candidate = f"{base_name}_cl{n}"
+            if candidate not in existing_names:
+                cloned_name = candidate
+                break
+        if cloned_name is None:
+            cloned_name = f"{base_name}_cl{src['id']}"
+
+        # Insert new model row — unique _clN name prevents collisions.
+        conn.execute(
+            """INSERT INTO engine_models (
+                engine_type_id, name, model_path, mmproj_path,
+                draft_model_path, quantization, size_bytes, last_modified,
+                host_id, is_sharded, total_shards,
+                sha256_model, sha256_mmproj, sha256_draft,
+                sha256_verified_at_model, sha256_verified_at_mmproj,
+                sha256_verified_at_draft, is_active, model_params
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                src["engine_type_id"],
+                cloned_name,
+                src["model_path"],
+                src.get("mmproj_path"),
+                src.get("draft_model_path"),
+                src.get("quantization"),
+                src.get("size_bytes"),
+                src.get("last_modified"),
+                src.get("host_id"),
+                src.get("is_sharded", 0),
+                src.get("total_shards"),
+                src.get("sha256_model"),
+                src.get("sha256_mmproj"),
+                src.get("sha256_draft"),
+                src.get("sha256_verified_at_model"),
+                src.get("sha256_verified_at_mmproj"),
+                src.get("sha256_verified_at_draft"),
+                src.get("is_active", 1),
+                src.get("model_params"),
+            ),
+        )
+        new_id = conn.execute(
+            "SELECT last_insert_rowid()"
+        ).fetchone()[0]
+        row = conn.execute(
+            "SELECT * FROM engine_models WHERE id = ?", (new_id,)
+        ).fetchone()
+        return _row_to_dict(row)
+
+
+def consolidate_shard_fragments(db_path, engine_type_id, base_name):
+    """Consolidate fragmented shard entries into a single grouped model.
+
+    When a multi-file model was scanned multiple times with different primary
+    shards, each scan creates a separate DB row (INSERT OR IGNORE on
+    engine_type_id + model_path). This function finds all fragments matching
+    the base name and merges them into one entry using the largest shard's
+    path as the canonical model_path.
+
+    Args:
+        db_path: Path to the SQLite database.
+        engine_type_id: Filter models for this engine type.
+        base_name: Base model name (e.g., "DeepSeek-V4-Flash-UD-Q8_K_XL.gguf").
+
+    Returns:
+        dict with consolidation info: {"consolidated": int, "kept_ids": list}.
+    """
+    from db.sqlite import pool
+    try:
+        with pool(db_path) as conn:
+            # Extract the model stem (without extension) for broader matching.
+            import re
+            stem = re.sub(r'\.gguf$', '', base_name, flags=re.I)
+
+            # Find all entries matching this base name or variants.
+            # Matches:
+            # 1. Exact base_name match (grouped entry from current scan)
+            # 2. LIKE stem% (names starting with the stem, e.g. shard names)
+            # 3. INSTR > 0 (stem appears anywhere in name — handles prefixed
+            #    names like "BENDER:GLM-5.2..." where stem is "GLM-5.2...")
+            rows = conn.execute(
+                "SELECT id, name, model_path, size_bytes, quantization, "
+                "is_sharded, total_shards, mmproj_path, last_modified "
+                "FROM engine_models WHERE engine_type_id = ? AND ("
+                "    name = ? OR name LIKE ? OR INSTR(name, ?) > 0"
+                ") ORDER BY id",
+                (engine_type_id, base_name, f"{stem}%", stem),
+            ).fetchall()
+
+            if len(rows) < 2:
+                return {"consolidated": 0, "kept_ids": []}
+
+            # Prefer the entry with most total_shards (most complete scan).
+            # Tie-break on size_bytes (largest total size wins).
+            sorted_rows = sorted(
+                rows, key=lambda r: (r["total_shards"] or 0, r["size_bytes"] or 0), reverse=True
+            )
+            largest = sorted_rows[0]
+            keep_id = largest[0]
+            delete_ids = [r[0] for r in rows if r[0] != keep_id]
+
+            # Update the surviving entry's path to the canonical shard.
+            if len(delete_ids) > 0 and largest[2]:
+                conn.execute(
+                    "UPDATE engine_models SET model_path = ? WHERE id = ?",
+                    (largest[2], keep_id),
+                )
+                # Mark as sharded with total shards from the filename pattern.
+                import re
+                m = re.search(r'-(\d+)-of-(\d+)\.gguf$', largest[2])
+                if m:
+                    conn.execute(
+                        "UPDATE engine_models SET is_sharded = 1, "
+                        "total_shards = ? WHERE id = ?",
+                        (int(m.group(2)), keep_id),
+                    )
+
+            # Delete all fragment rows.
+            for del_id in delete_ids:
+                conn.execute("DELETE FROM engine_models WHERE id = ?", (del_id,))
+
+            return {"consolidated": len(delete_ids), "kept_ids": [keep_id]}
+    except Exception as exc:
+        import logging
+        logging.warning("Shard consolidation failed for %s: %s", base_name, exc)
+        return {"consolidated": 0, "kept_ids": []}
+
+
 def scan_host_for_models(db_path, host_id, engine_type_id):
     """Placeholder for host model scanning logic.
 

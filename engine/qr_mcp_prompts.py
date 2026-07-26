@@ -83,6 +83,46 @@ def _default_content(prompt_id):
     return defaults.get(prompt_id, f"[ERROR] Prompt '{prompt_id}' not found on disk")
 
 
+def _verify_file_integrity(prompt_id):
+    """Verify prompt file checksum and size match DB records.
+    
+    Both checksum AND size must match. If either differs, returns mismatch.
+    
+    Args:
+        prompt_id: Stable identifier of the prompt in prompts/ directory.
+    
+    Returns:
+        tuple — (intact: bool, reason: str)
+          intact=True → file verified, serve normally
+          intact=False → mismatch detected, block usage
+    """
+    project_root = _get_project_root()
+    from db.adapters.prompts import get_prompt_by_id as _get_prompt
+    
+    filepath = project_root / "prompts" / f"{prompt_id}.md"
+    
+    if not filepath.is_file():
+        return False, f"file checksum/size mismatch (FILE_MISSING: {filepath})"
+    
+    # Get stored checksum/size from DB
+    row = _get_prompt(_get_db_path(), prompt_id)
+    db_checksum = row.get("checksum_sha256", "") if row else ""
+    db_size = row.get("file_size") if row else None
+    
+    # Check size first (faster than hashing)
+    actual_size = filepath.stat().st_size
+    if db_size and actual_size != db_size:
+        return False, f"file checksum/size mismatch (size DB={db_size} disk={actual_size})"
+    
+    # Check checksum
+    import hashlib
+    actual_hash = hashlib.sha256(filepath.read_bytes()).hexdigest()
+    if db_checksum and actual_hash != db_checksum:
+        return False, f"file checksum/size mismatch (DB={db_checksum[:16]}... disk={actual_hash[:16]}...)"
+    
+    return True, "OK"
+
+
 def _safe_read_skill(skill_name):
     """Read a skill file from .opencode/skills/<skill_name>/SKILL.md.
 
@@ -209,21 +249,59 @@ def _register_dynamic_prompts(mcp):
                 db_args = []
             
             # Build the content function with correct signature based on DB arguments
+            # Wraps content retrieval with MCP usage/error counter tracking
             if not db_args:
-                # No arguments — use a parameterless async function
-                def make_content_func():
+                # No arguments — use a factory to capture prompt_id in outer scope
+                # so inner function has 0 params (FastMCP introspection sees none)
+                def _make(_pid=prompt_id):
                     async def _fn():
-                        cid = prompt_id
-                        c = _get_prompt_content(cid)
-                        return c or f"[ERROR] Prompt '{cid}' not found on disk"
+                        try:
+                            intact, reason = _verify_file_integrity(_pid)
+                            if not intact:
+                                logger.warning("[mcp-prompt] BLOCKED %s: %s", _pid, reason)
+                                from db.adapters.prompts import increment_prompt_error_counter
+                                increment_prompt_error_counter(_get_db_path(), _pid)
+                                return f"[CHECKSUM MISMATCH] {reason}. Verify and update checksum in edit screen."
+                            c = _get_prompt_content(_pid)
+                            if not c:
+                                from db.adapters.prompts import increment_prompt_error_counter
+                                increment_prompt_error_counter(_get_db_path(), _pid)
+                                return f"[ERROR] Prompt '{_pid}' not found on disk"
+                            from db.adapters.prompts import increment_prompt_usage_counter
+                            increment_prompt_usage_counter(_get_db_path(), _pid)
+                            return c
+                        except Exception as e:
+                            logger.error("[mcp-prompt] Invocation error for %s: %s", _pid, e)
+                            raise
                     return _fn
-                content_func = make_content_func()
+                content_func = _make()
+                # CRITICAL: Set __name__ so FastMCP uses prompt_id as internal key
+                # (FastMCP uses func.__name__ to deduplicate, not the `name` param)
+                content_func.__name__ = prompt_id
             else:
-                # Has arguments — use **kwargs to accept them all
-                async def content_func(**kwargs):
-                    cid = prompt_id
-                    c = _get_prompt_content(cid)
-                    return c or f"[ERROR] Prompt '{cid}' not found on disk"
+                # Has arguments — factory captures prompt_id, inner function uses **kwargs
+                def _make(_pid=prompt_id):
+                    async def _fn(**kwargs):
+                        try:
+                            intact, reason = _verify_file_integrity(_pid)
+                            if not intact:
+                                logger.warning("[mcp-prompt] BLOCKED %s: %s", _pid, reason)
+                                from db.adapters.prompts import increment_prompt_error_counter
+                                increment_prompt_error_counter(_get_db_path(), _pid)
+                                return f"[CHECKSUM MISMATCH] {reason}. Verify and update checksum in edit screen."
+                            c = _get_prompt_content(_pid)
+                            if not c:
+                                from db.adapters.prompts import increment_prompt_error_counter
+                                increment_prompt_error_counter(_get_db_path(), _pid)
+                                return f"[ERROR] Prompt '{_pid}' not found on disk"
+                            from db.adapters.prompts import increment_prompt_usage_counter
+                            increment_prompt_usage_counter(_get_db_path(), _pid)
+                            return c
+                        except Exception as e:
+                            logger.error("[mcp-prompt] Invocation error for %s: %s", _pid, e)
+                            raise
+                    return _fn
+                content_func = _make()
                 
             # Build PromptArgument objects from DB data (overrides introspection)
             arguments = []
@@ -324,9 +402,13 @@ def _register_skill_resources(mcp):
                 continue
             
             # Create content function that reads from disk using FunctionResource factory
-            def make_skill_reader(filepath):
+            def make_skill_reader(filepath, pid=prompt_id):
                 """Factory to capture the filepath in a closure."""
                 async def read_skill():
+                    intact, reason = _verify_file_integrity(pid)
+                    if not intact:
+                        logger.warning("[mcp-skill] BLOCKED %s: %s", pid, reason)
+                        return f"# CHECKSUM MISMATCH\n\n{reason}. Verify and update checksum in edit screen."
                     try:
                         return filepath.read_text(encoding="utf-8")
                     except Exception as e:

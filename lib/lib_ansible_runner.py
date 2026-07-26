@@ -104,7 +104,8 @@ def run_playbook(playbook_path, inventory_path=None, limit=None, extra_vars=None
     """
     # Debug output: show exact playbook call details (QUICKROBOT_DEBUG_LEVEL >= 10)
     if QUICKROBOT_DEBUG_LEVEL >= 10:
-        print(f"[qr] ANSIBLE RUN: playbook={playbook_path} limit={limit} extra_vars_keys={list(extra_vars.keys()) if extra_vars else '[]'}", flush=True)
+        logger.debug("[qr] ANSIBLE RUN: playbook=%s limit=%s extra_vars_keys=%s",
+                     playbook_path, limit, list(extra_vars.keys()) if extra_vars else '[]')
     import os as os
     env = os.environ.copy()
     # Use JSON stdout callback (Ansible 2.10+ style, replaces --json)
@@ -156,12 +157,15 @@ def run_playbook(playbook_path, inventory_path=None, limit=None, extra_vars=None
         # On failure with JSON output, still try to parse for task details
         if result.returncode != 0 and result.stdout.strip():
             try:
-                return parse_ansible_json(result.stdout)
+                parsed = parse_ansible_json(result.stdout)
+                parsed["hosts_matched"] = _detect_hosts_match(parsed)
+                return parsed
             except RecursionError:
                 # Jinja2 recursion during Ansible output parsing — treat as partial success
                 return {"changed": True, "failed": False,
                         "results": {"plays": [{"play": {"name": "deploy"}, "tasks": [
-                            {"task": {"name": "config updated"}, "results": [{"changed": True}]}]}]}}
+                            {"task": {"name": "config updated"}, "results": [{"changed": True}]}]}]},
+                        "hosts_matched": True}
         # On success with empty output, build a minimal valid structure
         stdout = result.stdout.strip()
         if not stdout:
@@ -586,7 +590,7 @@ def validate_node(db_path, node_id):
 def get_instance_logs(db_path, instance_id, lines=100):
     """Query journalctl for a deployed service's recent log entries.
 
-    Generates an inventory and runs journalctl -u qr-{instance_name}
+    Generates an inventory and runs journalctl -u qr-{instance_id}-{engine_type}
     on the target node via Ansible to retrieve recent service logs.
 
     Args:
@@ -612,6 +616,7 @@ def get_instance_logs(db_path, instance_id, lines=100):
     instance_name = inst.get("name", "unknown")
     node_name = inst.get("node_name", "unknown")
     node_id = inst.get("node_id")
+    engine_type = inst.get("engine_type_name", "unknown")
 
     # Get node details for Ansible connection
     node = _get_node(db_path, node_id) if node_id else None
@@ -620,7 +625,7 @@ def get_instance_logs(db_path, instance_id, lines=100):
     # Localhost fallback: use local journalctl directly
     if node_id == 1 or not hostname:
         import subprocess as _sub
-        svc_name = f"qr-{instance_name}"
+        svc_name = f"qr-{instance_id}-{engine_type}"
         try:
             result = _sub.run(
                 ["journalctl", "-u", svc_name, "--utc", "--no-pager", "-n", str(lines)],
@@ -639,9 +644,10 @@ def get_instance_logs(db_path, instance_id, lines=100):
     from qr_api import _execute_playbook as _ep
 
     try:
-        r = _ep("NODE_GET_INSTANCE_LOGS_V1", resolver_type="playbook_id",
+        r = _ep("get_instance_logs", resolver_type="playbook_id",
                 inventory_data=None, limit=hostname, action_type="get_logs",
-                extra_vars={"target_host": hostname, "log_instance": instance_name, "log_lines": lines})
+                extra_vars={"target_host": hostname, "log_instance_id": instance_id,
+                            "log_engine_type": engine_type, "log_lines": lines})
         if r["error"]:
             return {"instance_name": instance_name, "node_name": node_name,
                     "logs": "", "error": r["error"]}
@@ -702,7 +708,10 @@ def scan_models(playbook_id="scan_models_remote", engine_type_id=None, limit=Non
     from datetime import datetime, timezone as _tz
 
     from db.sqlite import pool
-    from db.adapters.models import add_model as _am, update_model as _um
+    from db.adapters.models import (
+        add_model as _am, update_model as _um,
+        consolidate_shard_fragments as _consolidate,
+    )
     from qr_api import _execute_playbook as _ep
 
     # Pre-load existing model paths and last_modified from DB for dedup + change detection
@@ -948,41 +957,40 @@ def scan_models(playbook_id="scan_models_remote", engine_type_id=None, limit=Non
 
        # Insert grouped (sharded) models
         for base_name, group in _shard_groups.items():
-            shards = len(group["files"])
-            if shards < 2:
-                fname, fp, file_size = group["files"][0]
-                quant = group["quant"]
-                mmproj_path = group["mmproj_path"] or None
-                lm_iso = None
-                try:
-                    model = _am(target_db, engine_type_id, name=fname, model_path=fp,
-                                size_bytes=file_size if file_size else None, quantization=quant,
-                                is_sharded=0, total_shards=None, mmproj_path=mmproj_path,
-                                last_modified=lm_iso)
-                    if model is not None and model.get("_new"):
-                        new_count += 1
-                        new_model_ids.append(model.get("id"))
-                except Exception as exc:
-                    logging.warning("Failed to insert single-shard model %s: %s", fname, exc)
-            else:
-                def shard_sort_key(item):
-                    fname = item[0]
-                    sm = re.match(r'.*-(\d+)-of-\d+', fname)
-                    return int(sm.group(1)) if sm else 99999
-                sorted_files = sorted(group["files"], key=shard_sort_key)
-                fname_primary, fp_primary, _ = sorted_files[0]
-                mmproj_path = group["mmproj_path"] or None
-                lm_iso = None
-                try:
-                    model = _am(target_db, engine_type_id, name=base_name, model_path=fp_primary,
-                                size_bytes=group["total_size"] if group["total_size"] else None,
-                                quantization=group["quant"], is_sharded=1, total_shards=shards,
-                                mmproj_path=mmproj_path, last_modified=lm_iso)
-                    if model is not None and model.get("_new"):
-                        new_count += 1
-                        new_model_ids.append(model.get("id"))
-                except Exception as exc:
-                    logging.warning("Failed to insert shard model group: %s", exc)
+            def shard_sort_key(item):
+                fname = item[0]
+                sm = re.match(r'.*-(\d+)-of-\d+', fname)
+                return int(sm.group(1)) if sm else 99999
+            sorted_files = sorted(group["files"], key=shard_sort_key)
+            fname_primary, fp_primary, _ = sorted_files[0]
+            quant = group["quant"]
+            mmproj_path = group["mmproj_path"] or None
+            lm_iso = None
+
+            # Parse true shard count from the "of-N" suffix in filename (not len(group))
+            true_total = None
+            for sf in sorted_files:
+                m = re.search(r'-\d+-of-(\d+)\.gguf$', sf[0])
+                if m:
+                    true_total = int(m.group(1))
+                    break
+
+            try:
+                model = _am(target_db, engine_type_id, name=base_name, model_path=fp_primary,
+                            size_bytes=group["total_size"] if group["total_size"] else None,
+                            quantization=quant, is_sharded=1, total_shards=true_total,
+                            mmproj_path=mmproj_path, last_modified=lm_iso)
+                if model is not None and model.get("_new"):
+                    new_count += 1
+                    new_model_ids.append(model.get("id"))
+            except Exception as exc:
+                logging.warning("Failed to insert shard model group %s: %s", base_name, exc)
+
+            # Consolidate after insert: remove any remaining fragmented rows from
+            # previous scans that have the same base_name but different model_paths.
+            # Since INSERT OR IGNORE may have skipped updating an existing row
+            # (different model_path), consolidation ensures only one canonical row exists.
+            _consolidate(target_db, engine_type_id, base_name)
 
       # Insert individual files
         for fname, fp, file_size, quant, mmproj_path, lm_iso in _individual_files:

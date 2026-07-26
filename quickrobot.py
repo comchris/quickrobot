@@ -13,6 +13,7 @@ After startup, launches the Flask app registered in ./quickrobot/ package.
 import sys
 import os
 import re
+import time
 import subprocess as _subp
 import atexit
 
@@ -40,6 +41,16 @@ if os.path.isfile(_env_file):
             os.environ[_k] = _v
 del _f, _line, _k, _v, _env_file  # clean up loop vars
 
+# Module-level logger for bare-except blocks at module scope (lines 237-243)
+import logging as _logging
+_qr_logger = _logging.getLogger("qr.main")
+_qr_logger.setLevel(_logging.DEBUG)
+if not _qr_logger.handlers:
+    _handler = _logging.StreamHandler(sys.stderr)
+    _handler.setFormatter(_logging.Formatter("[qr] %(asctime)s %(message)s",
+                                              datefmt="%H:%M:%S"))
+    _qr_logger.addHandler(_handler)
+
 
 def _pid_file_path():
     """Get the path to the PID file."""
@@ -64,12 +75,37 @@ def _remove_pid_file():
 atexit.register(_remove_pid_file)
 
 
-if __name__ == "__main__":
+def main():
+    """Entry point for the quickrobot API server (CLI + pipx install)."""
+    # Use standard logging from the start — no separate debug log file needed.
+    # Configure a basic console handler so we capture startup messages even
+    # before the Flask app's logger is fully set up.
+    import logging as _logging
+    _qr_logger = _logging.getLogger("qr.main")
+    _qr_logger.setLevel(_logging.DEBUG)
+    if not _qr_logger.handlers:
+        _handler = _logging.StreamHandler(sys.stderr)
+        _handler.setFormatter(_logging.Formatter("[qr] %(asctime)s %(message)s",
+                                                  datefmt="%H:%M:%S"))
+        _qr_logger.addHandler(_handler)
+
+    try:
+        _marker = os.path.join(os.getcwd(), "data", "_restart_marker")
+        if os.path.exists(_marker):
+            with open(_marker, "r") as _fm:
+                _qr_logger.debug("RESTART marker detected: %s", _fm.read().strip())
+            os.remove(_marker)
+    except Exception as _dm:
+        _qr_logger.debug("marker check failed: %s", _dm)
+    
+    _qr_logger.debug("main() starting")
     # Root guard — refuse to run as root (non-interactive HTTP server)
     if os.getuid() == 0:
+        _qr_logger.debug("root guard triggered")
         print("this robot won't run as root", file=sys.stderr)
         sys.exit(1)
 
+    _qr_logger.debug("pre-flight stale check starting")
     # Pre-flight: detect stale quickrobot.py processes from prior sessions.
     # A leftover --mode dev-update (or any other long-running mode) would still
     # hold the API port and serve requests — a fresh start would conflict.
@@ -130,10 +166,13 @@ if __name__ == "__main__":
 
     # Import app/register_routes BEFORE run_startup() so quickrobot resolves to PACKAGE
     # (After split, quickrobot/__init__.py owns Flask app + route registration)
+    _qr_logger.debug("importing app/routes")
     from qr_api import app, register_routes
+    _qr_logger.debug("imported app/routes")
     from lib.lib_constants import VERSION
     
     from lib.lib_startup_pipeline import run_startup
+    _qr_logger.debug("calling run_startup")
     
     # Print early banner so API startup appears before WebUI/MCP subprocess starts
     from lib.qr_engine_ids import QUICKROBOT_VERSION as _VERSION
@@ -141,7 +180,14 @@ if __name__ == "__main__":
     
     # Run the full startup pipeline (populates _CONFIG via package-level reference)
     config = run_startup()
-    
+    _qr_logger.debug("run_startup returned")
+
+    # Configure werkzeug logger with per-engine log level (LOG-CONSOLIDATE)
+    _engine_levels = config.get("engine_log_levels", {})
+    _api_debug = _engine_levels.get("api", 10)
+    import lib.lib_logging as _ll
+    _ll.get_werkzeug_logger(_api_debug)
+
     # Register routes (idempotent — already registered at package import time)
     register_routes(app)
     
@@ -160,16 +206,56 @@ if __name__ == "__main__":
     _qr_env = config.get("deferred_qr_env", {})
     _webui_as = config.get("deferred_webui_autostart", True)
     _mcp_as = config.get("deferred_mcp_autostart", False)
-    if _db_path and (_webui_as or _mcp_as or True):  # scheduler always runs
+    # Scheduler autostart controlled by QUICKROBOT_SCHEDULER_AUTOSTART env var (default: true)
+    _sched_as = str(_qr_env.get("QUICKROBOT_SCHEDULER_AUTOSTART", "true")).lower() in ("true", "1")
+    if _db_path and (_webui_as or _mcp_as or _sched_as):
         _threading.Thread(
             target=_dsse,
-            args=(_db_path, _qr_env, _webui_as, _mcp_as),
+            args=(_db_path, _qr_env, _webui_as, _mcp_as, _sched_as),
             daemon=True,
             name="system-engines-start",
         ).start()
     
-    app.run(
+    # Deferred quicksetup — runs after Flask binds so API is available
+    # Gated by QUICKROBOT_QUICKSETUP env flag (same as phase5 path)
+    _qs_flag = os.environ.get("QUICKROBOT_QUICKSETUP", "").strip().lower()
+    if config.get("deferred_quicksetup") and _qs_flag == "true":
+        import threading as _threading
+        def _deferred_quicksetup():
+            """Run quicksetup in a daemon thread after API is ready."""
+            time.sleep(2)  # Give Flask a moment to fully bind
+            try:
+                from quicksetup import run_quicksetup
+                run_quicksetup(config["deferred_quicksetup"])
+            except SystemExit as exc:
+                # quicksetup.py calls sys.exit() which would kill the whole process
+                # if not caught here — catch and log, let main Flask survive
+                code = exc.code if exc.code is not None else "?"
+                print(f"[qr] QUICKSETUP finished (exit code={code})")
+            except Exception as exc:
+                print(f"[qr] WARNING: deferred quicksetup failed: {exc}")
+        _threading.Thread(target=_deferred_quicksetup, daemon=True, name="quicksetup").start()
+
+    # Production WSGI server — waitress (single-process threaded)
+    _qr_logger.debug("starting waitress.serve")
+    print("[qr] starting waitress.serve()", flush=True)
+    from waitress import serve
+    serve(
+        app,
         host=config["host"],
         port=config["api_port"],
-        debug=False,
+        threads=4,
+        channel_timeout=30,
+        cleanup_interval=15,
     )
+    _qr_logger.debug("waitress exited")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as _e:
+        import traceback
+        _qr_logger.error("main() unhandled exception: %s", _e)
+        _qr_logger.debug(traceback.format_exc())
+        raise

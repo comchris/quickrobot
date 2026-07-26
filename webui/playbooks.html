@@ -221,29 +221,18 @@ if (checkBtn) {
       // Debug: log crypto availability
       console.log('crypto.subtle available:', typeof crypto !== 'undefined' && !!crypto.subtle);
 
-      // Use native fetch for content endpoint (needs raw Response for .text())
-         fetch(QR_API_BASE + '/playbooks/' + pbId + '/content')
-           .then(function(r) {
-             console.log('pbId=' + pbId + ' status:', r.status, 'url:', r.url);
-             return r.text();
+      // Use qrApi for auth, then parse response
+         qrApi('/playbooks/' + pbId + '/content').then(function(data) {
+           console.log('pbId=' + pbId + ' status:', data && data.status, 'hasData:', !!((data && data.data)));
+           if (data && data.status === 'ok' && data.data) {
+             return computeSHA256(data.data.content).then(function(h) {
+               return {hash:h, file_size:data.data.file_size, actual_file_size:data.data.actual_file_size};
+             });
+           }
+           throw new Error('API error: status=' + (data && data.status) + ' hasData=' + !!(data && data.data));
          })
-         .then(function(text) {
-            console.log('pbId=' + pbId + ' raw length:', text.length, 'first 100:', text.substring(0, 100));
-            try {
-              var data = JSON.parse(text);
-            } catch(e) {
-              throw new Error('JSON parse error: ' + e.message);
-            }
-            if (data && data.status === 'ok' && data.data) {
-               var content = data.data.content || '';
-               return computeSHA256(content).then(function(h) {
-                 return {hash:h, file_size:data.data.file_size, actual_file_size:data.data.actual_file_size};
-               });
-             }
-            throw new Error('API error: status=' + (data && data.status) + ' hasData=' + !!(data && data.data));
-          })
-        .then(function(result) {
-          // Get expected size from data attribute (DB-stored file size)
+         .then(function(result) {
+           // Get expected size from data attribute (DB-stored file size)
           var expectedSize = parseInt(row.getAttribute('data-size') || '0', 10);
           var actualSize = result.actual_file_size;
           var computedHash = result.hash;

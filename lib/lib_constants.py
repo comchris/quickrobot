@@ -27,7 +27,16 @@ POLLING_INTERVAL_LOCAL_SEC = 10      # 10s minimum for localhost instances
 POLLING_INTERVAL_REMOTE_SEC = 600    # 10m for remote instances
 
 # Console debug level — numeric, 0 = off, >= 10 = full debug output
+# (legacy single value; replaced by per-engine QUICKROBOT_<ENGINE>_LOG_LEVEL)
 QUICKROBOT_CONSOLE_DEBUG_LEVEL = 10
+
+# Per-engine log level defaults — LOG-CONSOLIDATE Phase 2
+# Numeric: >= 10 = DEBUG, < 10 = WARNING (quiet production).
+# Each engine reads its own key; falls back to QUICKROBOT_CONSOLE_DEBUG_LEVEL if absent.
+QUICKROBOT_SCHEDULER_LOG_LEVEL = 10    # debug level for scheduler
+QUICKROBOT_MCP_LOG_LEVEL = 0           # quiet production for MCP
+QUICKROBOT_WEBUI_LOG_LEVEL = 0         # quiet production for WebUI
+QUICKROBOT_API_LOG_LEVEL = 10          # debug level for API server
 
 # Ansible action log level — controls what gets persisted to ansible_actions table.
 # "errors" = only failures/timeouts (default, keeps table lean).
@@ -62,12 +71,6 @@ ANSIBLE_LOG_LEVELS = {
 
 # Debug level for ansible_runner — deprecated, use QUICKROBOT_CONSOLE_DEBUG_LEVEL instead
 QUICKROBOT_DEBUG_LEVEL = 10
-
-# Grace period before crash-detection kicks in for running instances (seconds).
-# DEPRECATED (2026-06-26): SSE endpoint + systemd fallback in query_status() provide
-# reliable alive detection. Grace period removed from api_query_status().
-# Kept for backward-compat import; may be removed in v0.08.
-GRACE_PERIOD_RUNNING = 300
 
 # Default playbook execution timeout in seconds (3600s = 1 hour).
 # Can be overridden per-playbook via # @timeout: N comment at top of YAML file.

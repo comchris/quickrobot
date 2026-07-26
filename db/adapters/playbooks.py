@@ -173,7 +173,7 @@ def register_playbook(db_path, file_path, checksum, file_type="core",
             (file_path,),
         ).fetchone()
 
-        if file_type == "core" and existing:
+        if existing:
             # UPDATE existing row — avoids FK constraint failures from DELETE
             cols = ["checksum_sha256", "file_type", "tags"]
             vals = [checksum, file_type, tags]
@@ -189,21 +189,15 @@ def register_playbook(db_path, file_path, checksum, file_type="core",
             sql = f"UPDATE playbook_registry SET {', '.join(c + ' = ?' for c in cols)} WHERE id = ?"
             params.append(existing["id"])
             conn.execute(sql, params)
-        elif file_type == "core":
-            conn.execute(
-                """INSERT INTO playbook_registry
-                   (file_path, checksum_sha256, file_type, tags, playbook_id, updated_at, file_size)
-                   VALUES (?, ?, ?, ?, ?, datetime('now'), ?)""",
-                (file_path, checksum, file_type, tags, playbook_id or "", file_size),
-            )
         else:
             # Guard: custom playbooks cannot overwrite core entries
-            core_existing = conn.execute(
-                "SELECT id FROM playbook_registry WHERE file_path = ? AND file_type = 'core'",
-                (file_path,),
-            ).fetchone()
-            if core_existing:
-                raise ValueError(f"Core playbook already registered: {file_path} (id={core_existing[0]})")
+            if file_type != "core":
+                core_existing = conn.execute(
+                    "SELECT id FROM playbook_registry WHERE file_path = ? AND file_type = 'core'",
+                    (file_path,),
+                ).fetchone()
+                if core_existing:
+                    raise ValueError(f"Core playbook already registered: {file_path} (id={core_existing[0]})")
 
             conn.execute(
                 """INSERT INTO playbook_registry

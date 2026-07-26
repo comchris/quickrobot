@@ -19,7 +19,10 @@ Content stored in prompts/*.md files; DB stores registry + checksums only.
 Mirrors playbook endpoint structure from routes_nodes.py.
 """
 
+import logging
 from flask import request
+
+logger = logging.getLogger(__name__)
 
 
 def _get_db_path():
@@ -197,7 +200,7 @@ def api_create_engine_prompt():
     record = _reg_prompt(_get_db_path(), prompt_id, title, description, content,
                          file_type=file_type, prompt_type=prompt_type, tags=tags, message_role=message_role)
 
-    print(f"[qr] Registered new prompt: {prompt_id} (id={record['id'] if record else 'N/A'}, type={file_type})")
+    logger.info("[qr] Registered new prompt: %s (id=%s, type=%s)", prompt_id, record.get("id", "N/A") if record else "N/A", file_type)
 
     return success_single({
         "action": "created",
@@ -260,7 +263,7 @@ def api_update_engine_prompt(prompt_id):
         tags=data.get("tags"),
     )
 
-    print(f"[qr] Updated prompt: {prompt_id} (id={updated['id']})")
+    logger.info("[qr] Updated prompt: %s (id=%s)", prompt_id, updated.get("id"))
 
     return success_single({
         "action": "updated",
@@ -284,7 +287,7 @@ def api_delete_engine_prompt(prompt_id):
     if not deleted:
         return error_response("NOT_FOUND", f"Prompt '{prompt_id}' not found")
 
-    print(f"[qr] Deleted prompt: {prompt_id}")
+    logger.info("[qr] Deleted prompt: %s", prompt_id)
 
     return success_single({
         "action": "deleted",
@@ -443,3 +446,22 @@ def api_reset_engine_prompt_counters(prompt_id=None):
         "action": "counters_reset",
         "reset_count": count,
     })
+
+
+def api_prompt_refresh():
+    """Hot-reload MCP prompts/resources from DB without restart.
+    
+    Usage: POST /api/v1/prompts/refresh
+    
+    Returns: {"status":"ok","data":{"refreshed":true,"reload_needed":true}}
+    
+    Note: Connected llama.cpp WebUI clients cache prompt list
+    from SSE init handshake. They will see updates after page reload.
+    """
+    try:
+        from engine.qr_mcp_refresh import refresh_prompts_resources
+        result = refresh_prompts_resources()
+        return success_single({"refreshed": result, "reload_needed": True})
+    except Exception as e:
+        logger.error("[qr-api] Prompt refresh failed: %s", e)
+        return error_response("REFRESH_FAILED", str(e))

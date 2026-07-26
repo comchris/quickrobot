@@ -29,7 +29,7 @@ Usage:
 """
 
 # ── Version ───────────────────────────────────────────────────────────
-QUICKROBOT_VERSION = "v0.09"
+QUICKROBOT_VERSION = "v0.10"
 
 # ── Default bind host (localhost loopback) ────────────────────────────
 # SSOT for "127.0.0.1" fallbacks across the codebase.
@@ -70,6 +70,7 @@ _QR_ENGINES = [
     # Infrastructure engines
     (11, "universal",       "infra"),
     (12, "subprocess",      "infra"),
+    (23, "timestamp_proxy", "infra"),
     (31, "iperf3",          "infra"),
 ]
 
@@ -93,6 +94,7 @@ QR_ENGINE_LLAMA_RPC_NAME           = "llama_rpc"
 QR_ENGINE_UNIVERSAL_NAME           = "universal"
 QR_ENGINE_IPERF3_NAME              = "iperf3"
 QR_ENGINE_SUBPROCESS_NAME          = "subprocess"
+QR_ENGINE_TIMESTAMP_PROXY_NAME     = "timestamp_proxy"
 QR_ENGINE_SCHEDULER_NAME           = "quickrobot-scheduler"
 
 # -- Auto-generated maps ----------------------------------------------------
@@ -154,7 +156,7 @@ _QR_NAV_LLAMA_NAMES = {
 
 # Engines without a per-instance config nav item.
 # Merged pages (rpccluster, iperf3) or per-instance only (subprocess).
-_QR_NAV_NO_CONFIG = {"subprocess", "universal", "iperf3", "llama_rpc"}
+_QR_NAV_NO_CONFIG = {"subprocess", "universal", "iperf3", "timestamp_proxy", "llama_rpc", "quickrobot-api", "quickrobot-webui", "quickrobot-mcp", "quickrobot-scheduler"}
 
 # Nav section assignment: engine_name → section key.
 # Engines not in this map go to "System" (default_section).
@@ -167,12 +169,13 @@ _QR_NAV_SECTION_MAP = {
 
 # -- Port defaults (engine-specific, NOT generic QR_DEFAULT_* names) --------
 QR_ENGINE_PORT_DEFAULTS = {
-    "quickrobot-api":    8040,
-    "quickrobot-webui":  8041,
-    "quickrobot-mcp":    8042,
+    "quickrobot-api":    8039,
+    "quickrobot-webui":  8038,
+    "quickrobot-mcp":    8040,
     "llama_server":      8080,
     "llama_rpc":         9000,
     "iperf3":            9900,
+    "timestamp_proxy":   8090,
 }
 
 # -- Helper functions -------------------------------------------------------
@@ -433,6 +436,11 @@ _QR_UNDEPLOY_CHAINS = {
         {"stage": "undeploy",      "playbook": "undeploy_iperf3"},
         {"stage": "verify",        "playbook": "check_undeploy"},
     ],
+    QR_ENGINE_TIMESTAMP_PROXY_NAME: [
+        {"stage": "stop",          "playbook": "service_stop"},
+        {"stage": "undeploy",      "playbook": "undeploy_timestamp_proxy"},
+        {"stage": "verify",        "playbook": "check_undeploy"},
+    ],
 }
 
 
@@ -449,15 +457,16 @@ QR_SSH_PORT_DEFAULT   = 22    # Default SSH port for node connections
 
 # ── MCP subprocess startup retry limits (configurable via .env) ──────
 # Overridden by QUICKROBOT_MCP_CONNECT_RETRIES / QUICKROBOT_MCP_CONNECT_DELAY in .env
-QR_MCP_CONNECT_RETRIES   = 8    # Startup retries before FATAL (~24s total for Flask init)
+QR_MCP_CONNECT_RETRIES   = 3    # Startup retries before FATAL (~9s total for Flask init)
 QR_MCP_CONNECT_DELAY     = 3    # Seconds between retry attempts
 
-# ── Subprocess health check defaults (configurable via .env) ──────────
-# Overridden by QUICKROBOT_MCP_MAX_RETRIES, etc. in .env or engine_configs
-QR_WEBUI_MAX_RETRIES     = 3    # Health check retries before self-kill
-QR_MCP_MAX_RETRIES       = 3
-QR_SCHEDULER_MAX_RETRIES = 3
-QR_HEALTH_CHECK_SLEEP          = 25   # Grace period sleep in health check loop (API needs ~20s to bind)
+# ── Unified system engine health check (configurable via .env) ────────
+# Controlled by QUICKROBOT_SYSTEM_RETRIES in .quickrobot.env
+# Applied to WebUI, MCP health check thread, and Scheduler (env layer).
+QR_SYSTEM_HEALTH_RETRIES = 3    # Health check retries before self-kill (all engines)
+# Dead code (removed 2026-07-18 by V): QR_WEBUI_MAX_RETRIES=3, QR_MCP_MAX_RETRIES=3,
+# QR_SCHEDULER_MAX_RETRIES=3 — superseded by QR_SYSTEM_HEALTH_RETRIES
+QR_HEALTH_CHECK_SLEEP          = 10   # Grace period sleep in health check loop (API binds in ~5-8s)
 QR_HEALTH_CHECK_SPACING_DELAY  = 3    # Seconds between health check queue ops (prevents burst storms)
 
 # ── Restart adopt flags (per-engine, via .env) ───────────────────────

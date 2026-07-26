@@ -39,6 +39,7 @@ from lib.qr_engine_ids import (
     QR_ENGINE_LLAMA_SERVER_NAME,
     QR_ENGINE_IPERF3_NAME,
     QR_ENGINE_LLAMA_RPC_NAME,
+    QR_ENGINE_TIMESTAMP_PROXY_NAME,
     QR_ENGINE_UNIVERSAL_NAME,
     QR_ENGINE_PORT_DEFAULTS,
     STAGE_STATE_MAP,
@@ -124,6 +125,13 @@ DEFAULT_STAGE_CHAINS = {
             {"stage": "config_env",  "playbook": "deploy_config_env"},
             {"stage": "start",       "playbook": "service_start"},
       ],
+        QR_ENGINE_TIMESTAMP_PROXY_NAME: [
+            {"stage": "preflight",   "playbook": "preflight_check"},
+            {"stage": "deploy",      "playbook": "deploy_timestamp_proxy"},
+            {"stage": "config_svc",  "playbook": "deploy_config_service"},
+            {"stage": "config_env",  "playbook": "deploy_config_env"},
+            {"stage": "start",       "playbook": "service_start"},
+      ],
         # Fast deploy — config_svc + config_env + start only (no source/compile)
         # Used for new instances when skip_build=True: still deploys service files,
         # assumes binary already exists or will be provided separately.
@@ -144,6 +152,11 @@ DEFAULT_STAGE_CHAINS = {
                 {"stage": "start",       "playbook": "service_start"},
             ],
             QR_ENGINE_UNIVERSAL_NAME: [
+                {"stage": "config_svc",  "playbook": "deploy_config_service"},
+                {"stage": "config_env",  "playbook": "deploy_config_env"},
+                {"stage": "start",       "playbook": "service_start"},
+            ],
+            QR_ENGINE_TIMESTAMP_PROXY_NAME: [
                 {"stage": "config_svc",  "playbook": "deploy_config_service"},
                 {"stage": "config_env",  "playbook": "deploy_config_env"},
                 {"stage": "start",       "playbook": "service_start"},
@@ -196,6 +209,34 @@ class PlaybookRunner:
         engine_name = inst.get("engine_type_name", "")
         stages = self._get_stage_chain(engine_name, job_type, inst)
 
+        # Compute merged env/cli_opts for config/start stages — needed for extra_vars
+        # during task creation (pre-computed in details_json).
+        merged_cli_opts = None
+        merged_env = None
+        if engine_name:
+            try:
+                from engine import get_engine_capabilities
+                cap = get_engine_capabilities(engine_name)
+                builder_name = cap.get("env_builder") if cap else None
+                if builder_name:
+                    from lib.lib_cluster_env_builder import (
+                        build_llama_server_env,
+                        build_rpc_server_env,
+                        build_timestamp_proxy_env,
+                    )
+                    _BUILDERS = {
+                        "build_llama_server_env": build_llama_server_env,
+                        "build_rpc_server_env": build_rpc_server_env,
+                        "build_timestamp_proxy_env": build_timestamp_proxy_env,
+                    }
+                    builder = _BUILDERS.get(builder_name)
+                    if builder:
+                        result = builder(self.db_path, instance_id)
+                        merged_cli_opts = result.get("cli_args")
+                        merged_env = result.get("env")
+            except Exception as _e:
+                logger.debug("create_chain_tasks: env builder failed for %s: %s", engine_name, _e)
+
         with pool(self.db_path) as conn:
             # Create the parent job-header row (parent_id=NULL)
             cursor = conn.execute(
@@ -229,7 +270,7 @@ class PlaybookRunner:
                 # Pre-compute SSOT extra_vars at creation time — avoids re-fetching
                 # instance + engine_configs during task execution (Issue 1B).
                 try:
-                    computed_vars = self._build_extra_vars(inst, s["stage"])
+                    computed_vars = self._build_extra_vars(inst, s["stage"], merged_cli_opts, merged_env)
                     details_payload = {"playbook": s["playbook"], "extra_vars": computed_vars}
                 except Exception as _e:
                     logger.debug("extra_vars build failed for stage %s: %s", s["stage"], _e)
@@ -507,10 +548,12 @@ class PlaybookRunner:
                     from lib.lib_cluster_env_builder import (
                         build_llama_server_env,
                         build_rpc_server_env,
+                        build_timestamp_proxy_env,
                     )
                     _BUILDERS = {
                         "build_llama_server_env": build_llama_server_env,
                         "build_rpc_server_env": build_rpc_server_env,
+                        "build_timestamp_proxy_env": build_timestamp_proxy_env,
                     }
                     builder = _BUILDERS.get(builder_name)
                     if builder:
@@ -945,7 +988,7 @@ class PlaybookRunner:
             new_state = pre_state
         else:
             if job_type not in JOB_FINAL_STATES:
-                print(f"[qr] DEBUG: Unknown job_type '{job_type}' for instance {instance_id} — expected one of {list(JOB_FINAL_STATES.keys())}")
+                logger.debug("[qr] DEBUG: Unknown job_type '%s' for instance %d — expected one of %s", job_type, instance_id, list(JOB_FINAL_STATES.keys()))
                 raise ValueError(f"Unknown job_type '{job_type}' not in JOB_FINAL_STATES")
             new_state = JOB_FINAL_STATES[job_type]
             # RPC: no /models/sse endpoint → no loading state needed
@@ -1124,9 +1167,9 @@ class PlaybookRunner:
                     start_system_engine("scheduler", env_cfg,
                                         _CONFIG.get("host", "127.0.0.1"),
                                         _CONFIG.get("api_port") or QR_ENGINE_PORT_DEFAULTS["quickrobot-api"])
-                    print(f"[qr] Stale scheduler PID ({sched_pid}) detected, auto-restarted")
+                    logger.info("[qr] Stale scheduler PID (%d) detected, auto-restarted", sched_pid)
                 except Exception as _re:
-                    print(f"[qr] Warning: stale scheduler restart failed: {_re}")
+                    logger.warning("[qr] Stale scheduler restart failed: %s", _re)
         except ImportError:
             pass  # psutil not available — skip check
         except Exception as _e:
@@ -1250,7 +1293,7 @@ class PlaybookRunner:
 
         with pool(self.db_path) as conn:
             rows = conn.execute(
-                "SELECT *, parent_id AS job_id FROM log_entries WHERE parent_id=? ORDER BY stage", (job_id,)
+                "SELECT *, parent_id AS job_id FROM log_entries WHERE parent_id=? ORDER BY task_stage", (job_id,)
             ).fetchall()
             return [dict(r) for r in rows]
 
@@ -1359,7 +1402,7 @@ class PlaybookRunner:
             if not job:
                 return None
             tasks = conn.execute(
-                "SELECT id, parent_id AS job_id FROM log_entries WHERE parent_id=? ORDER BY stage", (job_id,)
+                "SELECT id, parent_id AS job_id FROM log_entries WHERE parent_id=? ORDER BY task_stage", (job_id,)
             ).fetchall()
             return {"job": dict(job), "tasks": [t["id"] for t in tasks]}
 
@@ -1626,7 +1669,7 @@ class PlaybookRunner:
 
         if not (hash_ok and size_ok):
             issue_str = "; ".join(issues)
-            print(f"[qr] PLAYBOOK VERIFY FAIL: {playbook_path} — {issue_str}")
+            logger.warning("PLAYBOOK VERIFY FAIL: %s — %s", playbook_path, issue_str)
             if pb_mode != "dev":
                 raise PlaybookIntegrityError(
                     f"Playbook integrity mismatch: {os.path.basename(playbook_path)} — {issue_str}"

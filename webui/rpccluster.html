@@ -27,6 +27,12 @@
         <small style="color:#888;display:block;margin-top:4px;">Click a row to manage cluster bindings</small>
       </div>
       <div style="display:flex;gap:6px;align-items:center;margin-top:4px;">
+        <select id="herd-autorefresh-sel" style="padding:3px 6px;border:1px solid #ccc;border-radius:3px;font-size:0.8em;" title="Auto-refresh interval (off = manual only)">
+          <option value="0">Off</option>
+          <option value="30">30s</option>
+          <option value="60">1m</option>
+          <option value="120">2m</option>
+        </select>
         <button id="herd-refresh-btn" class="btn btn-primary" style="padding:3px 8px;font-size:0.8em;" title="Refresh herd data">Refresh page</button>
         <button id="herd-health-all-btn" class="btn" style="padding:2px 8px;font-size:0.85em;background:#90caf9;border:1px solid #64b5f6;color:#1565c0;" title="Run health check on all servers and bound RPCs">Health Check All</button>
       </div>
@@ -232,8 +238,9 @@
        <div style="display:flex;gap:8px;align-items:center;">
          <button class="btn btn-primary" onclick="showDeployPreview()" id="herd-preview-btn" style="width:auto;">CLI & Env Preview</button>
          <button class="btn btn-warning" onclick="showLayerBreakdown()" id="herd-layers-btn" style="width:auto;">Debug / Layers</button>
-          <button class="btn btn-success" onclick="herdDeploy()" id="herd-deploy-btn">Deploy Config & Restart</button>
-         <span id="herd-deploy-status" style="color:#888;font-size:0.85em;margin-left:8px;flex:1;"></span>
+          <button class="btn btn-success" onclick="herdDeploy()" id="herd-deploy-btn">Config & Restart</button>
+         <button class="btn btn-info" onclick="herdDeployAndShowLogs()" id="herd-deploy-log-btn" style="background:#26a69a;border-color:#00897b;color:#fff;">Config & Show Startup</button>
+          <span id="herd-deploy-status" style="color:#888;font-size:0.85em;margin-left:8px;flex:1;"></span>
        </div>
        <pre id="herd-preview-output" style="background:#1e1e1e;color:#d4d4d4;padding:12px;border-radius:4px;font-size:0.8em;max-height:300px;overflow:auto;display:none;white-space:pre-wrap;word-break:break-all;font-weight:normal;font-family:Cascadia Code,Consolas,Monaco,monospace;margin-top:8px;"></pre>
        <div id="herd-layers-output" style="display:none;margin-top:8px;">
@@ -245,11 +252,32 @@
       <span id="herd-restart-status" style="color:#888;font-size:0.85em;margin-left:8px;display:none;"></span>
       <small style="color:#888;margin-top:6px;display:block;">Updates systemd unit + env file (no rebuild). Restart server to apply changes.</small>
     </div>
-  </div>
-</div>
+   </div>
+ </div>
 
-<script>
+  <!-- Log overlay panel — terminal-style journalctl output -->
+  <style>
+    #herd-log-overlay { display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.85); z-index:10000; }
+    #herd-log-overlay .log-panel { display:flex; flex-direction:column; height:100%; max-width:none; width:100%; margin:0; }
+    #herd-log-overlay .log-header { display:flex; justify-content:space-between; align-items:center; padding:8px 16px; background:#333; color:#aaa; font-size:0.85em; flex-shrink:0; }
+    #herd-log-output { color:#d4d4d4; padding:12px; font-size:0.8em; overflow:auto; white-space:pre-wrap; word-break:break-all; font-family:Cascadia Code,Consolas,Monaco,monospace; flex:1; margin:0; min-height:0; }
+  </style>
+  <div id="herd-log-overlay" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.85);z-index:10000;">
+    <div class="log-panel">
+      <div class="log-header">
+        <span id="herd-log-title" style="color:#4fc3f7;">Service Logs</span>
+        <div style="display:flex;gap:6px;align-items:center;">
+          <button class="btn" onclick="herdToggleLogPause()" id="herd-log-pause-btn" style="font-size:0.75em;padding:2px 8px;background:#555;color:#ccc;border:1px solid #666;">Pause</button>
+          <button class="btn" onclick="closeHerdLogOverlay()" style="font-size:0.75em;padding:2px 8px;background:#f44336;color:#fff;border:none;">Close</button>
+        </div>
+      </div>
+      <pre id="herd-log-output"></pre>
+    </div>
+  </div>
+
+ <script>
 var herdCurrentLlamaId = null;
+var _herdServersCache = [];  // Cached server list from last /rpccluster/summary fetch
 
 // Available CLI flags for llama-server instances (Herd cluster setup)
 var HERD_CLI_FLAGS = [
@@ -258,14 +286,15 @@ var HERD_CLI_FLAGS = [
   {id: 'no-op-offload',    label: '--no-op-offload',     type: 'toggle'},
   {id: 'swa-full',         label: '--swa-full',          type: 'toggle'},
   {id: 'no-repack',        label: '--no-repack',         type: 'toggle'},
-  {id: 'no-mmap',          label: '--no-mmap',           type: 'toggle'},
-  {id: 'mlock',            label: '--mlock',             type: 'toggle'},
-  {id: 'direct-io',        label: '--direct-io',         type: 'toggle'},
+  {id: 'no-mmap',          label: '--no-mmap*',          type: 'toggle'},
+  {id: 'mlock',            label: '--mlock*',            type: 'toggle'},
+  {id: 'direct-io',        label: '--direct-io*',        type: 'toggle'},
+  {id: 'load-mode',        label: '--load-mode (-lm)',   type: 'toggle-select', options: ['auto','none','mmap','mlock','dio'], highlight: true},
   {id: 'cpu-moe',          label: '--cpu-moe',           type: 'toggle', highlight: true},
   {id: 'no-warmup',        label: '--no-warmup',         type: 'toggle'},
   {id: 'no-mmproj',        label: '--no-mmproj',         type: 'toggle'},
   {id: 'flash-attn',       label: '--flash-attn',        type: 'toggle-onoff', highlight: true},
-  {id: 'spec-type',        label: '--spec-type',         type: 'toggle-select', options: ['none','draft-simple','draft-eagle3','draft-mtp','ngram-simple','ngram-map-k','ngram-map-k4v','ngram-mod','ngram-cache']},
+   {id: 'spec-type',        label: '--spec-type',         type: 'toggle-select', options: ['none','draft-simple','draft-eagle3','draft-mtp','draft-dflash','ngram-simple','ngram-map-k','ngram-map-k4v','ngram-mod','ngram-cache']},
   {id: 'spec-draft-n-max', label: '--spec-draft-n-max',  type: 'toggle-select'},
   {id: 'spec-draft-n-min', label: '--spec-draft-n-min',  type: 'toggle-select'},
    {id: 'spec-draft-ngl',   label: '--spec-draft-ngl',    type: 'toggle-select'},
@@ -344,6 +373,10 @@ function buildFlagsGrid() {
               if (sel) { sel.value = nextVal; sel.style.display = 'inline'; }
               consumed.push(i + 1);
             } else if (cbs[j].classList.contains('herd-spec-cb')) {
+              var sel = document.querySelector('.herd-spec-val[data-parent="' + flag + '"]');
+              if (sel && nextVal) { sel.value = nextVal; sel.style.display = 'inline'; }
+              consumed.push(i + 1);
+            } else if (cbs[j].classList.contains('herd-lm-cb')) {
               var sel = document.querySelector('.herd-spec-val[data-parent="' + flag + '"]');
               if (sel && nextVal) { sel.value = nextVal; sel.style.display = 'inline'; }
               consumed.push(i + 1);
@@ -710,6 +743,13 @@ function collectCliFlags() {
         var sel = document.querySelector('.herd-spec-val[data-parent="' + flagLabel + '"]');
         if (sel && sel.value) {
           flags.push(sel.value);
+        }
+      }
+      // --load-mode: push "-lm <value>" for server compatibility
+      if (cb.classList.contains('herd-lm-cb')) {
+        var sel = document.querySelector('.herd-spec-val[data-parent="' + flagLabel + '"]');
+        if (sel && sel.value) {
+          flags.push('-lm ' + sel.value);
         }
       }
     }
@@ -1177,6 +1217,7 @@ function loadHerdServers() {
         return;
       }
       var servers = data.data.llama_servers || [];
+      _herdServersCache = servers;  // Cache for showHerdDetail to avoid re-fetch
       var tbody = document.getElementById('herd-servers-tbody');
       if (servers.length === 0) {
         tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:#888;">No llama-server instances found</td></tr>';
@@ -1206,17 +1247,16 @@ function loadHerdServers() {
     });
   }
 
-// Render action buttons for herd server rows (batch fetch statuses)
+// Render action buttons for herd server rows — uses actions pre-loaded from /rpccluster/summary
 function renderHerdActions(servers) {
   if (!servers || !servers.length) return;
-  // Fetch status for each instance and render actions
+  // Actions are now included in the summary response — no extra API calls needed
   servers.forEach(function(s) {
     var instId = s.id;
-    qrApi('/instances/' + instId + '/status').then(function(data) {
-      renderInstanceActions(instId, data, '.actions-render[data-inst-id="' + instId + '"]');
-    }).catch(function() {
-      // Silently skip if status fetch fails
-    });
+    var containerSelector = '.actions-render[data-inst-id="' + instId + '"]';
+    // Build a minimal statusData object with actions array for renderInstanceActions
+    var statusData = { data: { actions: (s.actions || []) } };
+    renderInstanceActions(instId, statusData, containerSelector);
   });
 }
 
@@ -1392,7 +1432,6 @@ function showHerdDetail(llamaId) {
           console.warn('deploy-preview status:', preview.status, preview.message);
           document.getElementById('herd-dev-flag').textContent = '-';
         }
-       })
        // Bindings table — now inside outer .then() callback where 'server' and 'data' are in scope
        var bindings = server.rpc_bindings || [];
        var tbody = document.getElementById('herd-bindings-tbody');
@@ -1429,6 +1468,7 @@ function showHerdDetail(llamaId) {
         console.error('deploy-preview fetch failed:', err);
         document.getElementById('herd-dev-flag').textContent = '-';
       });
+  });
 }
 
 // Load llama_server presets into preset selector dropdown
@@ -1760,7 +1800,7 @@ function herdAddBinding() {
       })
     .then(function(data) {
       if (data.status === 'ok') {
-        alert('RPC ' + rpcId + ' bound. Click "Deploy Config & Restart" when ready.');
+        alert('RPC ' + rpcId + ' bound. Click "Config & Restart" when ready.');
         // Refresh upper table + right panel detail to show new bindings
         loadHerdServers();
         showHerdDetail(herdCurrentLlamaId);
@@ -1778,7 +1818,7 @@ function herdRemoveBinding(llamaId, rpcId) {
     method: 'DELETE'
   }).then(function(data) {
       if (data.status === 'ok') {
-        alert('RPC ' + rpcId + ' unbound. Click "Deploy Config & Restart" when ready.');
+        alert('RPC ' + rpcId + ' unbound. Click "Config & Restart" when ready.');
         // Refresh upper table + right panel detail to reflect new bindings
         loadHerdServers();
         showHerdDetail(llamaId);
@@ -1955,23 +1995,139 @@ function showDeployPreview() {
       }).then(function(data) {
          if (data.status === 'ok') {
             status.textContent = 'Config applied and restarted successfully.';
-            btn.textContent = 'Deploy Config & Restart';
+            btn.textContent = 'Config & Restart';
             btn.disabled = false;
             setTimeout(function() {
                loadHerdServers();
                showHerdDetail(herdCurrentLlamaId);
              }, 3000);
-         } else {
-           status.textContent = 'Config apply failed: ' + (data.message || '');
-           btn.textContent = 'Deploy Config & Restart';
+          } else {
+            status.textContent = 'Config apply failed: ' + (data.message || '');
+            btn.textContent = 'Config & Restart';
            btn.disabled = false;
          }
        })
       .catch(function(e) {
         status.textContent = 'Request failed (network error)';
-        btn.textContent = 'Deploy Config & Restart';
+        btn.textContent = 'Config & Restart';
         btn.disabled = false;
       });
+     });
+   }
+
+   // Deploy + show journal logs in overlay panel
+   var _herdLogTimer = null;
+   var _herdLogPaused = false;
+   var _journalAbortCtrl = null;
+
+   // Timed fetch wrapper — enforces a hard timeout by aborting the underlying request
+   function timedFetch(path, opts, timeoutMs) {
+     return fetch(QR_API_BASE + path, Object.assign({}, opts, {
+       headers: Object.assign({}, opts.headers || {}, window.QR_API_TOKEN ? {'X-API-Key': window.QR_API_TOKEN} : {}),
+     })).then(function(r) {
+         var ct = r.headers.get('content-type') || '';
+         if (ct.indexOf('application/json') !== -1) return r.json().catch(function(e) { return {}; });
+         return r.text().then(function(t) { throw new Error(t); });
+       })
+       .catch(function(e) {
+         if (e.name === 'AbortError') throw new Error('Request timed out after ' + timeoutMs + 'ms');
+         throw new Error(e && e.message || 'Request failed');
+       });
+   }
+
+   function herdDeployAndShowLogs() {
+     if (!herdCurrentLlamaId) return;
+     var btn = document.getElementById('herd-deploy-log-btn');
+     var status = document.getElementById('herd-deploy-status');
+     btn.disabled = true;
+     btn.textContent = 'Configuring...';
+     status.textContent = '';
+
+     // Open overlay FIRST so user sees logs immediately (parallel with reconfigure)
+     openHerdLogOverlay();
+     pollHerdLogs(); // First poll to capture startup logs
+     _herdLogTimer = setInterval(pollHerdLogs, 5000); // Start interval polling
+
+     // Reconfigure uses qrApi (no custom timeout needed; QR_API handles its own)
+     qrApi('/instances/' + herdCurrentLlamaId + '/reconfigure', {
+       method: 'POST',
+       headers: {'Content-Type': 'application/json'}
+     }).then(function(data) {
+       if (data.status === 'ok') {
+         status.textContent = 'Config applied. Log stream active.';
+         btn.textContent = 'Config & Show Startup';
+         btn.disabled = false;
+       } else {
+         status.textContent = 'Config failed: ' + (data.message || '');
+         btn.textContent = 'Config & Show Startup';
+         btn.disabled = false;
+       }
+     }).catch(function(e) {
+       status.textContent = 'Config failed (network error or timeout)';
+       btn.textContent = 'Config & Show Startup';
+       btn.disabled = false;
+     });
+   }
+
+ function openHerdLogOverlay() {
+    document.getElementById('herd-log-overlay').style.display = 'block';
+    document.getElementById('herd-log-output').textContent = '';
+    _herdLogPaused = false;
+    document.getElementById('herd-log-pause-btn').textContent = 'Pause';
+  }
+
+  function closeHerdLogOverlay() {
+    document.getElementById('herd-log-overlay').style.display = 'none';
+    if (_herdLogTimer) { clearInterval(_herdLogTimer); _herdLogTimer = null; }
+    if (_journalAbortCtrl) { _journalAbortCtrl.abort(); _journalAbortCtrl = null; }
+  }
+
+  function herdToggleLogPause() {
+    _herdLogPaused = !_herdLogPaused;
+    var b = document.getElementById('herd-log-pause-btn');
+    b.textContent = _herdLogPaused ? 'Resume' : 'Pause';
+  }
+
+  function pollHerdLogs() {
+    if (_herdLogPaused) return;
+    var el = document.getElementById('herd-log-output');
+    // Show loading indicator WITHOUT clearing existing content to avoid blinking
+    // Only prepend on first fetch cycle — subsequent polls keep last successful output
+    var wasLoading = el.getAttribute('data-loading') === '1';
+    if (!wasLoading) {
+      el.setAttribute('data-loading', '1');
+      // Prepend loading indicator, preserve existing content after it
+      var oldContent = el.textContent.replace(/\[connecting\.\.\.\]\n?/g, '');
+      el.textContent = '[connecting...]\n' + (oldContent || '');
+    }
+    // Abort previous journal poll to prevent socket leakage
+    if (_journalAbortCtrl) { _journalAbortCtrl.abort(); }
+    var journalCtrl = new AbortController();
+    _journalAbortCtrl = journalCtrl;
+    fetch(QR_API_BASE + '/instances/' + herdCurrentLlamaId + '/journal?lines=200', {
+      method: 'GET',
+      headers: window.QR_API_TOKEN ? {'X-API-Key': window.QR_API_TOKEN} : {},
+      signal: journalCtrl.signal
+    }).then(function(r) {
+      var ct = r.headers.get('content-type') || '';
+      if (ct.indexOf('application/json') !== -1) return r.json();
+      return r.text().then(function(t) { throw new Error(t); });
+    }).then(function(data) {
+      el.removeAttribute('data-loading');
+      if (data.status === 'ok' && data.logs) {
+        el.textContent = data.logs;
+        el.scrollTop = el.scrollHeight;
+      } else if (data.error) {
+        el.textContent = '[ERROR] ' + data.error;
+      }
+    }).catch(function(e) {
+      el.removeAttribute('data-loading');
+      var err = e && e.message ? e.message : 'Unknown error';
+      if (err.indexOf('timed out') === 0) {
+        el.textContent = '[LOG DELAY] journalctl on remote node still running (may take 30-60s under load).\nWill retry in 5s. Error: ' + err;
+      } else {
+        el.textContent = '[ERROR] journalctl call failed.\n' + err;
+      }
     });
   }
 
@@ -2058,9 +2214,31 @@ function herdHealthCheckAll() {
 
 // Refresh button handler — manual only
 document.addEventListener('DOMContentLoaded', function() {
+  var refreshTimer = null;
+
+  // Auto-refresh toggle handler
+  var autoRefreshSel = document.getElementById('herd-autorefresh-sel');
+  if (autoRefreshSel) {
+    autoRefreshSel.value = qrSettings.get('herd', 'autorefresh', '0');
+    autoRefreshSel.addEventListener('change', function() {
+      qrSettings.set('herd', 'autorefresh', this.value);
+      clearInterval(refreshTimer);
+      refreshTimer = null;
+      if (parseInt(this.value, 10) > 0) {
+        var interval = parseInt(this.value, 10) * 1000;
+        refreshTimer = setInterval(function() {
+          loadHerdServers();
+          if (herdCurrentLlamaId) showHerdDetail(herdCurrentLlamaId);
+        }, interval);
+      }
+    });
+  }
+
   var btn = document.getElementById('herd-refresh-btn');
   if (btn) {
     btn.addEventListener('click', function() {
+      clearInterval(refreshTimer);
+      refreshTimer = null;
       loadHerdServers();
       if (herdCurrentLlamaId) showHerdDetail(herdCurrentLlamaId);
     });
@@ -2081,3 +2259,7 @@ document.addEventListener('DOMContentLoaded', function() {
   loadHerdServers();
 });
 </script>
+<div style="padding:12px 16px;border-top:1px solid #ddd;text-align:right;font-size:0.8em;color:#888;">
+  <a href="https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md" target="_blank" rel="noopener">llama.cpp server README</a>
+  &nbsp;&nbsp;|&nbsp;&nbsp;* Flags deprecated in llama.cpp PR&nbsp;<a href="https://github.com/ggml-org/llama.cpp/pull/20834" target="_blank" rel="noopener">#20834</a> — consolidated into <code>--load-mode</code> (<code>-lm</code>)
+</div>

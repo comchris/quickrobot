@@ -37,18 +37,24 @@ import argparse as _argparse
 
 # Fix: when run from project root, engine/ subdir shadows stdlib subprocess.
 # Remove 'engine' from sys.path[0] so stdlib modules resolve correctly.
+# Then add project root to sys.path so sibling packages (lib/, db/, qr_api/) resolve.
+_project_root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 _sys_path_0 = _sys.path[0] if _sys.path[0] else _os.getcwd()
 if _sys_path_0.endswith("/engine") or _sys_path_0.endswith("engine"):
     del _sys.path[0]
+if _project_root not in _sys.path:
+    _sys.path.insert(0, _project_root)
 
 import asyncio
 import json
-import logging
+import logging as _logging
 import os
 import sys
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+# LOG-CONSOLIDATE: use shared dual logger (console + file) with runtime level control
+import lib.lib_logging as _ll
+logger = _ll.create_logger("mcp")
 
 
 
@@ -92,6 +98,11 @@ def _mcp_bool(primary, fallback, default="false"):
 ALLOW_READS = _mcp_bool("QUICKROBOT_MCP_READ", "MCP_ALLOW_READS", QR_MCP_DEFAULT_READS)
 ALLOW_WRITES = _mcp_bool("QUICKROBOT_MCP_WRITE", "MCP_ALLOW_WRITES", QR_MCP_DEFAULT_WRITES)
 ALLOW_PROXY = _mcp_bool("QUICKROBOT_MCP_FULLPROXY", "MCP_ALLOW_PROXY", QR_MCP_DEFAULT_PROXY)
+
+# API auth token — enables X-API-Key header on all proxy calls to the quickrobot API.
+# Uses the shared gatekeeper token (QUICKROBOT_API_KEY).
+_mcp_api_token_raw = os.environ.get("QUICKROBOT_API_KEY", "").strip()
+MCP_API_TOKEN = _mcp_api_token_raw or None  # None = no auth for this proxy
 
 # Single-toggle security — all values from .env, no hardcoded strings or branching.
 _disable = os.getenv("QUICKROBOT_MCP_DISABLE_DNS_REBINDING", "false").lower() in ("true", "1", "yes")
@@ -138,6 +149,9 @@ def _api_call(method, path, body=None, timeout=None):
     path = path.removeprefix("/api/v1").removeprefix("/api/v1/")
     url = f"{API_BASE}{path}"
     headers = {"Content-Type": "application/json"} if body else {}
+    # Inject API auth token if configured
+    if MCP_API_TOKEN:
+        headers["X-API-Key"] = MCP_API_TOKEN
 
     # Default timeouts per method (can be overridden via timeout param)
     _default_timeouts = {
@@ -169,6 +183,12 @@ def _api_call(method, path, body=None, timeout=None):
             r = _requests.patch(url, headers=headers, timeout=req_timeout, **_body_kw)
         else:
             return json.dumps({"error": f"Unknown method: {method}"})
+        if r.status_code == 401:
+            print(f"[mcp] AUTH FAIL: {method} {path} → 401 (token={MCP_API_TOKEN[:10] if MCP_API_TOKEN else 'none'}...)", file=sys.stderr)
+            logger.warning("AUTH FAIL: %s %s → 401", method, path)
+        elif r.status_code >= 400:
+            print(f"[mcp] ERROR: {method} {path} → {r.status_code}", file=sys.stderr)
+            logger.warning("ERROR: %s %s → %d", method, path, r.status_code)
         if r.status_code >= 400:
             return json.dumps({"status": "error", "code": r.status_code, "message": r.text[:500]})
         return r.text
@@ -827,6 +847,45 @@ if ALLOW_PROXY:
 # ============================================================================
 
 
+def refresh_prompts_resources():
+    """Hot-reload prompts and resources from DB.
+    
+    Called via POST /api/v1/prompts/refresh from WebUI.
+    Clears existing registrations, re-reads DB, re-registers.
+    Connected clients see changes on next prompts/list call.
+    Note: llama.cpp WebUI caches list from SSE init handshake,
+    so a page reload is needed for visible update.
+    
+    Returns: True on success, False on failure.
+    """
+    global _mcp_instance
+    if not _mcp_instance:
+        logger.warning("[qr-mcp] No mcp instance available for refresh")
+        return False
+    
+    try:
+        from engine.qr_mcp_prompts import register_prompts as _register_prompts
+        from engine.qr_mcp_prompts import register_skill_resources as _register_skill_resources
+    except ImportError as e:
+        logger.warning("[qr-mcp] Refresh imports failed (mcp not in API env): %s", e)
+        # Clear managers anyway — MCP server will re-register on next connection
+        _mcp_instance._prompt_manager._prompts.clear()
+        _mcp_instance._resource_manager._resources.clear()
+        logger.info("[qr-mcp] Cleared registrations (refresh requested, mcp-server restart needed)")
+        return True
+    
+    # Clear existing registrations
+    _mcp_instance._prompt_manager._prompts.clear()
+    _mcp_instance._resource_manager._resources.clear()
+    
+    # Re-register from DB
+    _register_prompts(_mcp_instance)
+    _register_skill_resources(_mcp_instance)
+    
+    logger.info("[qr-mcp] Prompts/resources refreshed from DB")
+    return True
+
+
 # ============================================================================
 # Main
 if __name__ == "__main__":
@@ -834,21 +893,25 @@ if __name__ == "__main__":
     try:
         from engine.qr_mcp_prompts import register_prompts as _register_prompts
         _register_prompts(mcp)
-        print("[mcp] Prompts registered", flush=True)
+        logger.info("[qr-mcp] Prompts registered")
     except Exception as exc:
-        print(f"[mcp] Prompt registration skipped: {exc}", flush=True)
+        logger.warning("[qr-mcp] Prompt registration skipped: %s", exc)
 
     # Register skill resources from DB (SKILLS-MIGRATION, 2026-07-13)
     try:
         from engine.qr_mcp_prompts import register_skill_resources as _register_skill_resources
         _register_skill_resources(mcp)
-        print("[mcp] Skill resources registered from DB", flush=True)
+        logger.info("[qr-mcp] Skill resources registered from DB")
     except Exception as exc:
-        print(f"[mcp] Skill resource registration skipped: {exc}", flush=True)
+        logger.warning("[qr-mcp] Skill resource registration skipped: %s", exc)
+
+    # Store global reference for runtime refresh
+    global _mcp_instance
+    _mcp_instance = mcp
 
     # Root guard — refuse to run as root (non-interactive HTTP server)
     if _os.getuid() == 0:
-        print("this robot won't run as root", file=_sys.stderr)
+        logger.error("[qr-mcp] this robot won't run as root")
         _sys.exit(1)
 
     parser = _argparse.ArgumentParser(description="Quickrobot MCP SSE Server")
@@ -877,14 +940,14 @@ if __name__ == "__main__":
     _reads_implied = (ALLOW_WRITES or ALLOW_PROXY) and not ALLOW_READS
     if _reads_implied:
         ALLOW_READS = True
-        print("[qr] MCP started with WRITE/PROXY flag — READ is implied", flush=True)
+        logger.info("[qr-mcp] MCP started with WRITE/PROXY flag — READ is implied")
 
     # Set bind host: CLI arg takes priority over env var
     host = args.host or os.getenv("QUICKROBOT_MCP_HOST")
     if not host:
         raise RuntimeError("MCP host not set: use --host CLI arg or QUICKROBOT_MCP_HOST env var")
     if host in QR_FORBIDDEN_HOSTS:
-        print(f"[mcp] FATAL: Bind host '{host}' is forbidden.", flush=True)
+        logger.error("[qr-mcp] FATAL: Bind host '%s' is forbidden.", host)
         sys.exit(1)
 
     # Read port: CLI arg first, then env var. Ensure it's always an int (not None).
@@ -902,14 +965,11 @@ if __name__ == "__main__":
     else:
         cors_origins = ["*"]
 
-    # Log rotation (vC): truncate oversized log files on startup
-    from lib.lib_system_engine import get_engine_log_path as _eng_log, rotate_log_if_needed as _rot
-    _rot(_eng_log("mcp"), "mcp")
-    # Structured startup log — single line with all config info minus tokens
+    # Structured startup log (shared logger handles rotation + dual output)
     _pid = os.getpid()
-    _log_path = os.getenv("QUICKROBOT_LOG_PATH", "")
-    _log_suffix = f" log_path={_log_path}" if _log_path else ""
-    print(f"[mcp] STARTUP: pid={_pid} host={host} port={port_val} api={_api_base} read={_mcp_mod.ALLOW_READS} write={_mcp_mod.ALLOW_WRITES} proxy={_mcp_mod.ALLOW_PROXY} cors={cors_origins}{_log_suffix}", flush=True)
+    logger.info("[qr-mcp] STARTUP: pid=%d host=%s port=%d api=%s read=%s write=%s proxy=%s cors=%s",
+                _pid, host, port_val, _api_base, _mcp_mod.ALLOW_READS, _mcp_mod.ALLOW_WRITES,
+                _mcp_mod.ALLOW_PROXY, cors_origins)
 
     # === Startup API connectivity validation with retries ===
     import time as _time_mod
@@ -917,10 +977,10 @@ if __name__ == "__main__":
     _api_connect_retries = int(os.getenv("QUICKROBOT_MCP_CONNECT_RETRIES", str(QR_MCP_CONNECT_RETRIES)))
     _api_connect_delay = int(os.getenv("QUICKROBOT_MCP_CONNECT_DELAY", str(QR_MCP_CONNECT_DELAY)))
     _api_url = f"{_api_base}/app/status"
-    
-    print(f"[mcp] Checking API connectivity at {_api_url}...", flush=True)
+
+    logger.info("[qr-mcp] Checking API connectivity at %s...", _api_url)
     _api_reachable = False
-    
+
     for _retry in range(1, _api_connect_retries + 1):
         try:
             _resp = _requests_lib.get(_api_url, timeout=10)
@@ -928,43 +988,57 @@ if __name__ == "__main__":
                 _data = _resp.json()
                 if _data.get("status") == "ok":
                     _api_reachable = True
-                    print(f"[mcp] API reachable on attempt {_retry}/{_api_connect_retries}", flush=True)
+                    logger.info("[qr-mcp] API reachable on attempt %d/%d", _retry, _api_connect_retries)
                     break
                 else:
-                    print(f"[mcp] API returned non-OK status on attempt {_retry}: {_data.get('status', 'unknown')}", flush=True)
+                    logger.warning("[qr-mcp] API returned non-OK status on attempt %d: %s", _retry, _data.get('status', 'unknown'))
             else:
-                print(f"[mcp] API HTTP error {_resp.status_code} on attempt {_retry}", flush=True)
+                logger.warning("[qr-mcp] API HTTP error %d on attempt %d", _resp.status_code, _retry)
         except _requests_lib.ConnectionError as _e:
-            print(f"[mcp] Connection error (attempt {_retry}/{_api_connect_retries}): {_e}", flush=True)
+            logger.warning("[qr-mcp] Connection error (attempt %d/%d): %s", _retry, _api_connect_retries, _e)
         except _requests_lib.Timeout as _e:
-            print(f"[mcp] Timeout (attempt {_retry}/{_api_connect_retries}): {_e}", flush=True)
+            logger.warning("[qr-mcp] Timeout (attempt %d/%d): %s", _retry, _api_connect_retries, _e)
         except Exception as _e:
-            print(f"[mcp] Unexpected error (attempt {_retry}/{_api_connect_retries}): {_e}", flush=True)
-        
+            logger.warning("[qr-mcp] Unexpected error (attempt %d/%d): %s", _retry, _api_connect_retries, _e)
+
         if _retry < _api_connect_retries:
-            print(f"[mcp] Retrying in {_api_connect_delay}s...", flush=True)
+            logger.info("[qr-mcp] Retrying in %ds...", _api_connect_delay)
             _time_mod.sleep(_api_connect_delay)
-    
+
     if not _api_reachable:
-        print(f"[mcp] FATAL: API unreachable after {_api_connect_retries} attempts. "
-              f"Checking: http://{api_host_val}:{api_port_val}/api/v1/app/status", flush=True)
+        logger.error("[qr-mcp] FATAL: API unreachable after %d attempts. "
+                     "Checking: http://%s:%s/api/v1/app/status",
+                     _api_connect_retries, api_host_val, api_port_val)
         sys.exit(1)
 
     # === Start periodic health check thread ===
     from lib.lib_system_engine import start_health_check_thread as _start_health
+    # Read retry count from env whitelist (set by API process) — default 2
+    _mcp_retries = 2
+    _raw = os.getenv("QUICKROBOT_SYSTEM_RETRIES", "")
+    if _raw:
+        try:
+            _v = int(_raw)
+            if 1 <= _v <= 10:
+                _mcp_retries = _v
+        except (ValueError, TypeError):
+            pass
     _health_thread = _start_health(
         api_host=api_host_val,
         api_port=api_port_val,
-        max_retries=1,
+        max_retries=_mcp_retries,
         retry_delay=5,
         check_interval=10
     )
-    print(f"[mcp] Health check thread started (interval=10s, kill=10s)", flush=True)
+    logger.info("[qr-mcp] Health check thread started (interval=10s, kill=10s)")
 
     # MCP server — SSE transport only (reverted from broken dual transport, 2026-07-14).
     # The dual transport (sse_app + streamable_http mounted on custom Starlette)
     # broke session management: initialize returns 202 "Accepted" but subsequent
     # messages to the same session get "Could not find session".
     # FastMCP.run(transport="sse") uses host/port from constructor, not run() args.
-    print(f"[mcp] Transport: SSE only (llama.cpp UI). Reverted 2026-07-14.", flush=True)
+    logger.info("[qr-mcp] Transport: SSE only (llama.cpp UI). Reverted 2026-07-14.")
     mcp.run(transport="sse")
+
+# Global mcp reference for runtime refresh (set during startup in __main__)
+_mcp_instance = None

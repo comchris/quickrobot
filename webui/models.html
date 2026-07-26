@@ -19,13 +19,14 @@
      </select>
    </div>
    <div style="display:flex;gap:6px;align-items:center;margin-left:auto;">
-    <label style="font-size:0.8em;color:#666;">Scan host:</label>
-    <select id="scan-node" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
-      {% for n in nodes %}<option value="{{ n.id }}" data-path="{{ n.model_base_path or '/mnt/llama/gguf/models' }}">{{ n.name }}</option>{% endfor %}
-    </select>
-    <button class="btn btn-success" id="scan-btn" style="padding:4px 10px;font-size:0.85em;">Scan</button>
-   <button class="btn btn-secondary" id="clear-highlight-btn" style="padding:4px 10px;font-size:0.85em;display:none;">Clear highlights</button>
-  </div>
+     <label style="font-size:0.8em;color:#666;">Scan host:</label>
+     <select id="scan-node" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+       {% for n in nodes %}<option value="{{ n.id }}" data-path="{{ n.model_base_path or '/mnt/llama/gguf/models' }}">{{ n.name }}</option>{% endfor %}
+     </select>
+     <button class="btn btn-success" id="scan-btn" style="padding:4px 10px;font-size:0.85em;">Scan</button>
+    <button class="btn btn-warning" id="remove-missing-btn" style="padding:4px 10px;font-size:0.85em;display:none;">Remove Missing</button>
+    <button class="btn btn-secondary" id="clear-highlight-btn" style="padding:4px 10px;font-size:0.85em;display:none;">Clear highlights</button>
+   </div>
 </div>
 <div id='scan-result' style='margin:8px 0;padding:8px;'></div>
 <div id='scan-countdown'>
@@ -253,10 +254,11 @@ function _fmtDraft(val) {
              '</td>' +
               '<td class="age-cell" data-sort="' + (m.created_at || '') + '">' + qrFmtRelative(m.created_at) + '</td>' +
 '<td style="white-space:nowrap;">' +
-                 '<a href="/webui/models/' + m.id + '/edit" class="btn btn-secondary btn-sm" style="font-size:0.8em;padding:1px 6px;" title="Edit">Edit</a> ' +
-                 '<button class="btn btn-secondary btn-sm model-preset-btn" data-id="' + m.id + '" data-engine="' + encodeURIComponent(etName) + '" style="font-size:0.8em;padding:1px 6px;" title="Create preset from this model">+Preset</button> ' +
-                 '<button class="btn btn-danger model-delete-btn" data-id="' + m.id + '" data-engine="' + encodeURIComponent(etName) + '" style="font-size:1.1em;padding:2px 5px;line-height:1;" title="Remove">\u00d7</button>' +
-              '</td></tr>';
+                  '<a href="/webui/models/' + m.id + '/edit" class="btn btn-secondary btn-sm" style="font-size:0.8em;padding:1px 6px;" title="Edit">Edit</a> ' +
+                  '<button class="btn btn-success btn-xs model-clone-btn" data-id="' + m.id + '" data-engine="' + encodeURIComponent(etName) + '" style="font-size:0.8em;padding:1px 6px;" title="Clone this model">Clone</button> ' +
+                  '<button class="btn btn-secondary btn-sm model-preset-btn" data-id="' + m.id + '" data-engine="' + encodeURIComponent(etName) + '" style="font-size:0.8em;padding:1px 6px;" title="Create preset from this model">+Preset</button> ' +
+                  '<button class="btn btn-danger model-delete-btn" data-id="' + m.id + '" data-engine="' + encodeURIComponent(etName) + '" style="font-size:0.8em;padding:1px 6px;line-height:1;" title="Remove">\u00d7</button>' +
+               '</td></tr>';
          }
          document.getElementById('models-tbody').innerHTML = rows;
 
@@ -307,11 +309,19 @@ function _fmtDraft(val) {
                       }
                     }
                   }
-                  // Show clear button if there are highlights
-                  if (_newIds.length > 0 || _missIds.length > 0 || _modIds.length > 0 || _draftIds.length > 0) {
-                    var _chb = document.getElementById('clear-highlight-btn');
-                    if (_chb) _chb.style.display = '';
-                  }
+                   // Show clear button if there are highlights
+                   if (_newIds.length > 0 || _missIds.length > 0 || _modIds.length > 0 || _draftIds.length > 0) {
+                     var _chb = document.getElementById('clear-highlight-btn');
+                     if (_chb) _chb.style.display = '';
+                   }
+                   // Show remove-missing button only when there are missing models
+                   if (_missIds.length > 0) {
+                     var _rmb = document.getElementById('remove-missing-btn');
+                     if (_rmb) _rmb.style.display = '';
+                   } else {
+                     var _rmb2 = document.getElementById('remove-missing-btn');
+                     if (_rmb2) _rmb2.style.display = 'none';
+                   }
                 } catch(e) { /* invalid data, ignore */ }
               }
 
@@ -334,16 +344,40 @@ function _fmtDraft(val) {
              }
 
             // Attach +Preset handlers
-             var presetBtns = document.querySelectorAll('.model-preset-btn');
-             for (var j = 0; j < presetBtns.length; j++) {
-               presetBtns[j].addEventListener('click', function() {
+              var presetBtns = document.querySelectorAll('.model-preset-btn');
+              for (var j = 0; j < presetBtns.length; j++) {
+                presetBtns[j].addEventListener('click', function() {
+                  var id = this.getAttribute('data-id');
+                  var engine = this.getAttribute('data-engine');
+                  window.location.href = '/webui/engine/' + encodeURIComponent(engine) + '/presets/create?model=' + id;
+                });
+              }
+
+             // Attach Clone handlers
+             var cloneBtns = document.querySelectorAll('.model-clone-btn');
+             for (var j = 0; j < cloneBtns.length; j++) {
+               cloneBtns[j].addEventListener('click', function() {
                  var id = this.getAttribute('data-id');
                  var engine = this.getAttribute('data-engine');
-                 window.location.href = '/webui/engine/' + encodeURIComponent(engine) + '/presets/create?model=' + id;
+                 // Find the model name from the row's Edit link text
+                 var row = this.closest('tr');
+                 var editLink = row ? row.querySelector('a.row-link') : null;
+                 var modelName = editLink ? editLink.textContent : 'model ' + id;
+                 if (!confirm('Clone model "' + modelName + '" (ID ' + id + ')?\n\nA duplicate will be created with a new ID and "_clN" suffix.')) return;
+                 qrApi('/engine/' + encodeURIComponent(engine) + '/models/' + id + '/clone', {method: 'POST'})
+                    .then(function(data) {
+                      if (data.status === 'ok') {
+                        var newId = data.data ? data.data.id : '?';
+                        alert('Model cloned as ID ' + newId + '. Redirecting to edit page...');
+                        setTimeout(function() { window.location.href = '/webui/models/' + newId + '/edit'; }, 600);
+                      } else {
+                        alert('Clone failed: ' + (data.message || 'Unknown'));
+                      }
+                    }).catch(function(e) { alert('Error: ' + e.message); });
                });
              }
 
-            // Attach active/inactive toggle handlers
+             // Attach active/inactive toggle handlers
             var toggleBtns = document.querySelectorAll('.model-toggle-btn');
             for (var j = 0; j < toggleBtns.length; j++) {
               toggleBtns[j].addEventListener('click', function() {
@@ -634,8 +668,49 @@ qrApi('/models/clear-all', {method: 'POST', headers: {'Content-Type': 'applicati
       for (var i = 0; i < _allRows.length; i++) {
         _allRows[i].classList.remove('scan-new-row', 'scan-missing-row', 'scan-modified-row', 'scan-unresolved-draft-row');
       }
-      // Hide button
+      // Hide buttons
       this.style.display = 'none';
+      var _rmb = document.getElementById('remove-missing-btn');
+      if (_rmb) _rmb.style.display = 'none';
+    });
+  }
+
+// Remove Missing button handler — deletes models with missing files from DB
+  var _rmb = document.getElementById('remove-missing-btn');
+  if (_rmb) {
+    _rmb.addEventListener('click', function() {
+      var _missIds = JSON.parse(localStorage.getItem('qr_scan_missing_ids') || '[]');
+      if (!_missIds || _missIds.length === 0) return;
+      if (!confirm('Remove ' + _missIds.length + ' missing model(s) from DB?\n\nThese models have files that no longer exist on their host node. The DB entries will be deleted but files on disk are unaffected.')) return;
+      var btn = this;
+      btn.disabled = true;
+      btn.textContent = 'Removing...';
+      qrApi('/models/remove-missing/confirm', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({model_ids: _missIds})})
+         .then(function(data) {
+           if (data.status === 'ok') {
+             // Clear all highlight storage
+             localStorage.removeItem('qr_scan_new_ids');
+             localStorage.removeItem('qr_scan_missing_ids');
+             localStorage.removeItem('qr_scan_modified_ids');
+             localStorage.removeItem('qr_scan_unresolved_draft_ids');
+             localStorage.removeItem('qr_scan_ts');
+             // Remove highlight classes from DOM
+             var _allRows = document.querySelectorAll('#models-tbody tr[data-id]');
+             for (var i = 0; i < _allRows.length; i++) {
+               _allRows[i].classList.remove('scan-new-row', 'scan-missing-row', 'scan-modified-row', 'scan-unresolved-draft-row');
+             }
+             alert('Removed ' + (data.data ? data.data.deleted_count : _missIds.length) + ' model(s).');
+             setTimeout(function() { location.reload(); }, 500);
+           } else {
+             btn.disabled = false;
+             btn.textContent = 'Remove Missing';
+             alert('Remove failed: ' + (data.message || 'Unknown'));
+           }
+         }).catch(function(e) {
+           btn.disabled = false;
+           btn.textContent = 'Remove Missing';
+           alert('Error: ' + e.message);
+         });
     });
   }
 

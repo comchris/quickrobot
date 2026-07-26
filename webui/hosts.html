@@ -32,12 +32,12 @@
     <th class="sortable" data-col="2">Hostname</th>
     <th class="sortable" data-col="3">Capabilities</th>
     <th class="sortable" data-col="4">GPU</th>
-    <th class="sortable" data-col="5">FS Free</th>
-    <th class="sortable" data-col="6">Build</th>
-    <th class="sortable" data-col="7">Age</th>
-    <th class="sortable" data-col="8">INST.</th>
-    <th class="sortable" data-col="9">PING</th>
-    <th>Actions</th>
+     <th class="sortable" data-col="5">FS Free</th>
+     <th class="sortable" data-col="6">Age</th>
+     <th class="sortable" data-col="7">INST.</th>
+     <th class="sortable" data-col="8">PING</th>
+     <th class="sortable" data-col="9">ACTIVE</th>
+     <th>Actions</th>
   </tr>
 </thead>
 <tbody>
@@ -49,57 +49,52 @@
   <td>{% set cap_parts = [] %}{% if n.cpu_cores %}{% set _ = cap_parts.append(n.cpu_cores ~ 'c') %}{% endif %}{% if n.ram_mb %}{% if n.ram_mb >= 1024 %}{% set _ = cap_parts.append((n.ram_mb // 1024) ~ 'GB') %}{% else %}{% set _ = cap_parts.append(n.ram_mb ~ 'MB') %}{% endif %}{% endif %}{% if n.os %}{% set _ = cap_parts.append(n.os) %}{% endif %}{{ cap_parts|join(', ') if cap_parts else '\u2014' }}</td>
   <td>{% set gt = (n.gpu_type or '')|trim %}{% set gn = (n.gpu_name or '')|trim %}{% if gt and gt not in ['None','none',''] %}{% if gt == 'CUDA' %}<span style="color:#76b900;">CUDA</span>{% else %}<span style="color:#00bcd4;">Vulkan</span>{% endif %}{% if gn and gn not in ['None','none',''] and gn != gt %} {{ gn[:20] ~ (gn[20:] and '...') }}{% endif %}{% if n.gpu_memory_mb %} ({{ (n.gpu_memory_mb // 1024) }}GB){% endif %}{% else %}none detected{% endif %}</td>
   <td>{{ '%.0f GB' % n.fs_free_gb if n.fs_free_gb else '—' }}</td>
-  <td class="build-cell" data-sort="{{ build_states.get(n.id, {}).get('state', 'idle') }}">
-    {% set bs = build_states.get(n.id, {}) %}
-    {% if bs.get('compiling') %}
-      <span style="color:#e67e22;">&#9881;</span> {{ bs.compiling|join(', ') }}
-    {% elif bs.get('state') == 'running' %}
-      <span style="color:#e67e22;">&#9881;</span> compiling
-    {% else %}
-      idle
-    {% endif %}
-    <button class="btn btn-sm btn-outline-danger reset-build-btn" data-node-id="{{ n.id }}" title="Reset build state" style="margin-left:8px;font-size:0.7em;padding:1px 5px;">&#10227;</button>
-  </td>
   <td class="age-cell" data-sort="{{ n.created_at or '' }}" data-ts-utc="{{ n.created_at or '' }}">{{ n.created_at or '-' }}</td>
-  <td class="inst-count-cell" data-sort="{{ instance_counts.get(n.id, 0) }}">{{ instance_counts.get(n.id, 0) }}</td>
-   <td style="text-align:center;min-width:90px;">
-      {% if n.id != 1 %}
-        {% set ps = n.ping_state or 'disabled' %}
-        {% set ia = n.is_active | default(1) %}
-        {% if ia == 0 %}
-          <span title="Host inactive (not being pinged){% if ps != 'disabled' %} | last known: {{ ps }}{% endif %}" class="ping-dot" data-id="{{ n.id }}" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#9e9e9e;vertical-align:middle;margin-right:6px;"></span>
-        {% elif ps == 'online' %}
-          <span title="Reachable (ping OK)" class="ping-dot" data-id="{{ n.id }}" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#4caf50;vertical-align:middle;margin-right:6px;"></span>
-        {% elif ps == 'offline' %}
-          <span title="Unreachable (ping failed)" class="ping-dot" data-id="{{ n.id }}" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#f44336;vertical-align:middle;margin-right:6px;"></span>
-        {% else %}
-          <span title="Ping state: {{ ps }}" class="ping-dot" data-id="{{ n.id }}" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#9e9e9e;vertical-align:middle;margin-right:6px;"></span>
-        {% endif %}
-        <select class="host-active-toggle" data-id="{{ n.id }}" title="Click to toggle active/inactive filter state" style="font-size:0.72em;padding:2px 4px;border:1px solid #bbb;border-radius:3px;background:#f5f5f5;">
-          {% if ia == 1 %}
-            <option value="1" selected>Active</option>
-            <option value="0">Inactive</option>
-          {% else %}
-            <option value="1">Active</option>
-            <option value="0" selected>Inactive</option>
-          {% endif %}
-        </select>
-      {% else %}
-        <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#4caf50;"></span>
-      {% endif %}
+   <td class="inst-count-cell" data-sort="{{ instance_counts.get(n.id, 0) }}">{{ instance_counts.get(n.id, 0) }}</td>
+    <td style="text-align:center;min-width:50px;">
+       {% if n.id != 1 %}
+         {% set ps = n.ping_state or 'disabled' %}
+         {% if ps == 'online' %}
+           <span title="Reachable (ping OK)" class="ping-dot" data-id="{{ n.id }}" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#4caf50;vertical-align:middle;"></span>
+         {% elif ps == 'offline' %}
+           <span title="Unreachable (ping failed)" class="ping-dot" data-id="{{ n.id }}" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#f44336;vertical-align:middle;"></span>
+         {% elif n.is_active | default(1) == 0 %}
+           <span title="Host inactive (not being pinged){% if ps != 'disabled' %} | last known: {{ ps }}{% endif %}" class="ping-dot" data-id="{{ n.id }}" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#9e9e9e;vertical-align:middle;"></span>
+         {% else %}
+           <span title="Ping state: {{ ps }}" class="ping-dot" data-id="{{ n.id }}" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#9e9e9e;vertical-align:middle;"></span>
+         {% endif %}
+       {% else %}
+         <span title="Always online" class="ping-dot" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#4caf50;vertical-align:middle;"></span>
+       {% endif %}
+    </td>
+    <td style="text-align:center;min-width:80px;">
+       {% if n.id != 1 %}
+         {% set ia = n.is_active | default(1) %}
+         <select class="host-active-toggle" data-id="{{ n.id }}" title="Click to toggle active/inactive filter state" style="font-size:0.72em;padding:2px 4px;border:1px solid #bbb;border-radius:3px;background:#f5f5f5;">
+           {% if ia == 1 %}
+             <option value="1" selected>Active</option>
+             <option value="0">Inactive</option>
+           {% else %}
+             <option value="1">Active</option>
+             <option value="0" selected>Inactive</option>
+           {% endif %}
+         </select>
+       {% else %}
+         —
+       {% endif %}
     </td>
  {% if n.id != 1 %}
-   <td style="display:inline-block;margin-left:6px;">
-      {% if n.status != 'active' %}
-      <button class="btn btn-success node-action" data-action="discover" data-id="{{ n.id }}" title="Discover" style="font-size:0.65em;padding:1px 4px;">&#9870;</button>
-      {% endif %}
-      <button class="btn btn-primary node-action node-action-regular" data-action="reboot" data-id="{{ n.id }}" title="Reboot" style="font-size:0.65em;padding:1px 4px;">&#8635;</button>
-      <button class="btn btn-danger node-action node-action-regular" data-action="shutdown" data-id="{{ n.id }}" title="Shutdown" style="font-size:0.65em;padding:1px 4px;">&#9000;</button>
-      <button class="btn btn-danger node-action node-action-regular" data-action="delete" data-id="{{ n.id }}" title="Remove host" style="font-size:0.65em;padding:1px 4px;">&#10006;</button>
-    </td>
-  {% else %}
-  <td>-</td>
-  {% endif %}
+    <td style="display:inline-block;margin-left:6px;">
+       {% if n.status != 'active' %}
+       <button class="btn btn-success node-action" data-action="discover" data-id="{{ n.id }}" title="Discover" style="font-size:0.65em;padding:1px 4px;">&#9870;</button>
+       {% endif %}
+       <button class="btn btn-primary node-action node-action-regular" data-action="reboot" data-id="{{ n.id }}" title="Reboot" style="font-size:0.65em;padding:1px 4px;">&#8635;</button>
+       <button class="btn btn-danger node-action node-action-regular" data-action="shutdown" data-id="{{ n.id }}" title="Shutdown" style="font-size:0.65em;padding:1px 4px;">&#9000;</button>
+       <button class="btn btn-danger node-action node-action-regular" data-action="delete" data-id="{{ n.id }}" title="Remove host" style="font-size:0.65em;padding:1px 4px;">&#10006;</button>
+     </td>
+   {% else %}
+   <td>-</td>
+   {% endif %}
 </tr>
 {% else %}
  <tr><td colspan="11" style="text-align:center;color:#888;">No hosts registered</td></tr>
@@ -107,7 +102,7 @@
 </tbody>
 </table>
 
-<!-- Column sorting JS — sortable columns: 0(ID),1(Name),2(Hostname),3(Capabilities),4(GPU),5(FS Free),6(Build),7(Age),8(Instances),9(Ping Status),10(Status) -->
+<!-- Column sorting JS — sortable columns: 0(ID),1(Name),2(Hostname),3(Capabilities),4(GPU),5(FS Free),6(Age),7(Instances),8(Ping Status),9(Status) -->
 <script>
 // Compact timestamp display — page-specific for node age column
 // < 24h: relative only (e.g. "2h 30m")
@@ -393,28 +388,7 @@ refreshSelect.addEventListener('change', function() {
   startAutoRefresh(stored ? parseInt(stored, 10) : 30);
 })();
 
-refreshOnceBtn.addEventListener('click', function() { window.location.reload(); });
-
- // Reset build state button: prompt confirmation, then POST to API
- document.querySelectorAll('.reset-build-btn').forEach(function(btn) {
-   btn.addEventListener('click', function(e) {
-     e.stopPropagation();
-     var nodeId = this.getAttribute('data-node-id');
-     if (!confirm('Really remove build state for this host? This allows a new build to start.')) return;
-     fetch('/api/v1/nodes/' + nodeId + '/reset-build-state', {method: 'POST'})
-       .then(function(r) { return r.json(); })
-       .then(function(data) {
-         if (data.status === 'ok') {
-           alert('Build state reset. Page will reload.');
-           window.location.reload();
-         } else {
-           alert('Reset failed: ' + (data.message || JSON.stringify(data)));
-         }
-       }).catch(function(err) {
-         alert('Request failed: ' + err);
-       });
-   });
- });
+ refreshOnceBtn.addEventListener('click', function() { window.location.reload(); });
 
 // Host filtering: show/inactive hosts + hostname search
 var hostSearchInput = document.getElementById('host-search');

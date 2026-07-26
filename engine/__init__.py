@@ -39,7 +39,8 @@ _ENGINES_MAP = {}
 from lib.qr_engine_ids import (QR_ENGINE_API, QR_ENGINE_WEBUI, QR_ENGINE_MCP,
                                QR_ENGINE_UNIVERSAL, QR_ENGINE_SUBPROCESS,
                                QR_ENGINE_IPERF3, QR_ENGINE_IPERF3_NAME,
-                               QR_ENGINE_LLAMA_SERVER, QR_ENGINE_LLAMA_RPC)
+                               QR_ENGINE_LLAMA_SERVER, QR_ENGINE_LLAMA_RPC,
+                               QR_ENGINE_TIMESTAMP_PROXY)
 _ENGINE_ID_MAP = {
     "quickrobot_api": QR_ENGINE_API,
     "quickrobot_webui": QR_ENGINE_WEBUI,
@@ -49,6 +50,7 @@ _ENGINE_ID_MAP = {
     "iperf3": QR_ENGINE_IPERF3,
     "llama_server": QR_ENGINE_LLAMA_SERVER,
     "llama_rpc": QR_ENGINE_LLAMA_RPC,
+    "timestamp_proxy": QR_ENGINE_TIMESTAMP_PROXY,
 }
 
 

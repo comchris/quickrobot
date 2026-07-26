@@ -426,12 +426,13 @@ def start_benchmark(db_path, run_id, instance_id, prompt_id, override=False):
     node_hostname = inst.get("node_hostname") or inst.get("ipv4_address", QR_DEFAULT_LOCALHOST)
     port = inst["port_assigned"]
     preset_name = inst.get("preset_name")
+    auth_token = inst.get("auth_token")
 
     # Try to resolve expected model name from DB (preset config, models table)
     expected_model = _resolve_model_name(db_path, instance_id, node_hostname, port)
 
     # Pre-flight: check model availability on remote llama-server
-    available_models = _check_model_availability(node_hostname, port)
+    available_models = _check_model_availability(node_hostname, port, auth_token)
     if not available_models:
         raise RuntimeError("MODEL_NOT_AVAILABLE")
 
@@ -455,7 +456,7 @@ def start_benchmark(db_path, run_id, instance_id, prompt_id, override=False):
         target=_benchmark_thread,
         args=(db_path, run_id, instance_id, prompt_id, node_hostname,
               port, prompt_content, preset_name, model_name,
-              prompt_max_tokens),
+              prompt_max_tokens, auth_token),
         daemon=True,
     )
     t.start()
@@ -468,8 +469,9 @@ def start_benchmark(db_path, run_id, instance_id, prompt_id, override=False):
 
 def _benchmark_thread(db_path, run_id, instance_id, prompt_id,
                       node_hostname, port, prompt_content,
-                      preset_name, model_name, max_tokens=20):
-    """Background thread: call llama.cpp /completion and capture result.
+                      preset_name, model_name, max_tokens=20,
+                      auth_token=None):
+    """Background thread: call llama.cpp /v1/completions and capture result.
 
     Args:
         db_path: Path to the SQLite database.
@@ -482,14 +484,11 @@ def _benchmark_thread(db_path, run_id, instance_id, prompt_id,
         preset_name: Preset name for metadata (may be None).
         model_name: Model name for metadata (may be None).
         max_tokens: Max tokens to generate (default 20 for quick tests).
+        auth_token: Optional auth token from instances.auth_token column.
     """
     from db.sqlite import pool
     import time as _time
     import urllib.error as _ure
-
-    started_at = None
-    from db.sqlite import pool
-    import time as _time
 
     started_at = None
     try:
@@ -502,16 +501,18 @@ def _benchmark_thread(db_path, run_id, instance_id, prompt_id,
             if row:
                 prompt_content = row["content"]
 
-        # Build request body — use llama.cpp /completion endpoint
+        # Build request body — use llama.cpp /v1/completions endpoint
         req_body = {
             "prompt": prompt_content,
             "n_predict": max_tokens,
         }
         body = json.dumps(req_body).encode("utf-8")
 
-        url = f"http://{node_hostname}:{port}/completion"
+        url = f"http://{node_hostname}:{port}/v1/completions"
         req = _urq.Request(url, data=body, method="POST")
         req.add_header("Content-Type", "application/json")
+        if auth_token:
+            req.add_header("Authorization", f"Bearer {auth_token}")
 
         # Record start time
         started_at = _time.time()
@@ -660,12 +661,13 @@ def _resolve_model_name(db_path, instance_id, node_hostname, port):
     return None
 
 
-def _check_model_availability(node_hostname, port):
+def _check_model_availability(node_hostname, port, auth_token=None):
     """Check which models are available on the remote llama-server.
 
     Args:
         node_hostname: Remote host to connect to.
         port: Port of the llama-server.
+        auth_token: Optional auth token from instances.auth_token column.
 
     Returns:
         List of model name strings, or empty list on error.
@@ -673,6 +675,8 @@ def _check_model_availability(node_hostname, port):
     try:
         url = f"http://{node_hostname}:{port}/v1/models"
         req = _urq.Request(url)
+        if auth_token:
+            req.add_header("Authorization", f"Bearer {auth_token}")
         resp = _urq.urlopen(req, timeout=5)
         data = json.loads(resp.read().decode("utf-8"))
         models = []

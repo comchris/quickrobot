@@ -121,11 +121,18 @@ def _generate_expert_split_flags(inst, rpc_bindings, expert_config):
     """Generate -ot CLI flags from per-RPC expert-split configuration.
 
     For each RPC with experts > 0, generates -ot flags based on mode:
-      A (stride)  — 1 flag per RPC, interleaved expert indices
-      B (block)   — 1 flag per RPC, contiguous index blocks
+      A (stride)   — 1 flag per RPC, interleaved expert indices
+      B (block)    — 1 flag per RPC, contiguous index blocks
       C (load-dist) — 1 flag per RPC, greedy distance-maximization
+      D (decouple) — 1 flag per RPC, expert block reversed (separate from attention)
       S (staggered) — 3 flags per RPC (up/gate/down), staggered indices
       F (freeform) — uses stored index_pattern as literal -ot string
+
+    Mode D (decouple): like Block mode but shifts expert indices to the end of the pool.
+      RPC0 gets experts [total-N .. total-1], RPC1 gets [total-2N .. total-N-1], etc.
+      This separates attention layers from expert layers across different RPC nodes,
+      so each node handles a distinct range of both — no overlap between attention
+      and expert compute on the same RPC.
 
     CRITICAL: The "RPC0" in the -ot flag is a FIXED LITERAL, not a positional index.
     llama.cpp's -ot syntax uses RPC0 as the protocol role name for all entries.
@@ -228,40 +235,39 @@ def _generate_expert_split_flags(inst, rpc_bindings, expert_config):
             # Block mode: consecutive indices starting after previous RPCs' blocks.
             indices = list(range(block_offset, block_offset + experts_val))
             block_offset += experts_val
-        elif rpc_mode == "c":
-            pass  # Mode C already has indices from pre-computed allocation above
-        elif rpc_mode == "f":
-            pass  # Mode F uses stored index_pattern directly (set above)
+        elif rpc_mode == "d":
+            # Mode D (decouple): expert block reversed — earlier RPCs get later experts.
+            # This separates attention layers from expert layers across different RPC nodes.
+            start_idx = max(0, total_experts - block_offset - experts_val)
+            indices = list(range(start_idx, start_idx + experts_val))
+            block_offset += experts_val
         elif rpc_mode == "a":
             # Mode A (stride): greedy allocation respecting per-RPC quotas.
             # Uses pre-computed allocation which distributes indices across
             # the expert pool with distance-maximization for clean stride.
             indices = _expert_allocation.get(rpc_id, [])
         elif rpc_mode == "s":
-            # Mode S (staggered): round-robin FFN sub-layer distribution across RPCs.
+            # Mode S (staggered): quota-aware round-robin FFN sub-layer distribution.
             # Each RPC generates 3 -ot flags, one per FFN sub-layer (up/gate/down).
-            # Indices follow stride pattern with rotation based on RPC position:
-            #   up    → (idx - rpc_idx) % 3 == 0
-            #   gate  → (idx - rpc_idx - 2) % 3 == 0
-            #   down  → (idx - rpc_idx - 1) % 3 == 0
-            # This ensures each block's FFN layers are spread across different RPCs.
+            # Pool size = experts_val * count_with_experts (per-RPC: N*RPCs).
+            # Stride-3 rotation ensures each sub-layer gets N indices from this pool.
 
             sub_layer_types = ["up", "gate", "down"]
+            pool_size = experts_val * count_with_experts
 
             for sl_idx, sub_type in enumerate(sub_layer_types):
                 # Determine which residue class this RPC handles for this sub-layer.
-                # up: target (rpc_idx % 3), gate: target ((rpc_idx + 2) % 3), down: target ((rpc_idx + 1) % 3)
-                target_mod = (sub_layer_types.index(sub_type) + idx) % count_with_experts if count_with_experts > 0 else 0
+                target_mod = (sl_idx + idx) % count_with_experts if count_with_experts > 0 else 0
 
-                # Generate indices from the full expert pool with stride 3.
-                # Each sub-layer gets every Nth expert where N = total RPCs, starting at target_mod.
-                indices = [i for i in range(total_experts) if i % count_with_experts == target_mod] if count_with_experts > 0 else []
+                # Generate indices from this RPC's expanded pool with stride rotation.
+                indices = [i for i in range(pool_size)
+                           if i % count_with_experts == target_mod] if count_with_experts > 0 and pool_size > 0 else []
 
                 if skip_n_first > 0:
                     indices = [x + skip_n_first for x in indices]
 
-                # Deduplicate and sort
-                indices = sorted(set(s for s in indices if s >= 0))
+                # Sort indices
+                indices = sorted(indices)
                 if not indices:
                     continue
 
@@ -631,6 +637,11 @@ def build_llama_server_env(db_path, instance_id):
         elif base_dev is not None and base_dev != "none":
             cli_parts.extend(["-dev", base_dev])
 
+    # Log level: append --verbose flag when LLAMA_ARG_LOG_LEVEL is info or debug
+    log_level = chain_result.get("env", {}).get("LLAMA_ARG_LOG_LEVEL", "off")
+    if log_level in ("info", "debug"):
+        cli_parts.append("--verbose")
+
     # Instance-level custom CLI flags from config_override (unified herd state), fallback to column
     co_raw = inst.get("config_override") or "{}"
     imported_flags = []
@@ -747,6 +758,12 @@ def build_llama_server_env(db_path, instance_id):
     # reflects the actual allocated port instead of the engine_configs default.
     if port:
         final_merged["env"]["LLAMA_ARG_PORT"] = str(port)
+
+    # Inject per-instance auth token into merged env.
+    # NULL/empty auth_token → skip LLAMA_API_KEY entirely (no auth on server).
+    _token = inst.get("auth_token")
+    if _token:
+        final_merged["env"]["LLAMA_API_KEY"] = _token
 
     return {
         "env": final_merged["env"],
@@ -1107,6 +1124,13 @@ def get_cluster_summary(db_path, llama_id):
             if isinstance(d, int) and d > 0:
                 draft_devices.append(f"RPC{idx}")
 
+        # Compute available actions for this instance state
+        try:
+            from lib.lib_engine_actions import get_available_actions
+            actions = get_available_actions("llama_server", inst.get("state") or "unknown")
+        except Exception as _e:
+            actions = []
+
         return {
             "id": inst["id"],
             "name": inst["name"],
@@ -1124,6 +1148,7 @@ def get_cluster_summary(db_path, llama_id):
             "cli_flags": instance_cli_flags,
             "draft_devices": draft_devices,
             "gpu_override": gpu_override,
+            "actions": actions,
         }
 
 
@@ -1189,3 +1214,160 @@ def rpc_binding_warnings(db_path, llama_instance_id):
                 )
 
     return warnings
+
+
+# ============================================================
+# Timestamp Proxy Environment Builder
+# ============================================================
+
+
+def resolve_target_instances(db_path, target_ids):
+    """Resolve target instance IDs to host, port, and auth_token.
+
+    Looks up each target instance from the DB and extracts:
+    - hostname (node_hostname or ipv4_address)
+    - port_assigned
+    - auth_token (for proxying requests with the target's token)
+
+    Args:
+        db_path: Path to SQLite database.
+        target_ids: List of integer instance IDs.
+
+    Returns:
+        List of dicts: [{instance_id, name, hostname, port_assigned, auth_token}]
+        Skips targets that are not found or have no valid host/port.
+    """
+    from db.sqlite import pool
+    results = []
+    if not target_ids:
+        return results
+
+    with pool(db_path) as conn:
+        placeholders = ','.join('?' for _ in target_ids)
+        rows = conn.execute(
+            f"SELECT id, name, node_hostname, port_assigned, "
+            f"config_override, auth_token FROM instances "
+            f"WHERE id IN ({placeholders})",
+            target_ids,
+        ).fetchall()
+
+    for row in rows:
+        rid = row["id"]
+        hostname = row["node_hostname"] or ""
+        port = row["port_assigned"]
+
+        if not hostname or not port:
+            continue  # incomplete target — skip
+
+        # Parse config_override to get LLAMA_ARG_HOST (bind address override)
+        co_data = row["config_override"] or "{}"
+        if isinstance(co_data, str):
+            try:
+                co_data = json.loads(co_data)
+            except (json.JSONDecodeError, TypeError):
+                co_data = {}
+
+        # Use LLAMA_ARG_HOST from config_override if set, otherwise use node_hostname
+        host = co_data.get("LLAMA_ARG_HOST", "") or hostname
+        auth_token = row["auth_token"] or ""
+
+        results.append({
+            "instance_id": rid,
+            "name": row["name"],
+            "hostname": host,
+            "port_assigned": port,
+            "auth_token": auth_token,
+        })
+
+    return results
+
+
+def build_timestamp_proxy_env(db_path, instance_id):
+    """Build complete environment dict for a timestamp_proxy deployment.
+
+    Resolution chain:
+      L1: Engine configs (ts_proxy_inject_*, ts_proxy_timestamp_*)
+      L2: Instance config_override (overrides L1 defaults)
+      L3: Resolved target instances (from target_instance_ids column)
+          → TS_PROXY_TARGET_N_HOST, TS_PROXY_TARGET_N_PORT, TS_PROXY_TARGET_N_TOKEN
+
+    Args:
+        db_path: Path to SQLite database.
+        instance_id: Integer primary key of the timestamp_proxy instance.
+
+    Returns:
+        dict with keys:
+            env:      Complete merged env dict (ready for playbook template)
+            cli_args: Empty string (timestamp_proxy uses env-driven config only)
+    """
+    from db.sqlite import pool
+    from lib.lib_config_merge import _parse_config_override
+
+    with pool(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM instances WHERE id = ?", (instance_id,)
+        ).fetchone()
+        if row is None:
+            raise ClusterEnvError(f"Instance {instance_id} not found")
+        inst = dict(row)
+
+        engine_type_id = inst["engine_type_id"]
+        port = inst.get("port_assigned")
+
+    # ===== L1: Engine config defaults =====
+    chain = LayeredMergeChain()
+    layer1_env = {}
+    with pool(db_path) as conn:
+        ec_rows = conn.execute(
+            "SELECT key, value FROM engine_configs WHERE engine_type_id = ?",
+            (engine_type_id,),
+        ).fetchall()
+        for r in ec_rows:
+            layer1_env[r["key"]] = r["value"]
+
+    if layer1_env:
+        chain.append(ConfigLevel(1, "engine_configs", env_vars=layer1_env))
+
+    # ===== L2: Instance config_override (TS_PROXY_* keys) =====
+    co_raw = inst.get("config_override") or "{}"
+    co_dict = _parse_config_override(co_raw)
+    if co_dict:
+        # Only extract TS_PROXY_* keys for the env layer
+        ts_env = {k: v for k, v in co_dict.get("env", {}).items()
+                  if k.startswith("TS_PROXY_") or k.startswith("ts_proxy_")}
+        if ts_env:
+            chain.append(ConfigLevel(2, "config_override", env_vars=ts_env))
+
+    # ===== L3: Resolve target instances =====
+    target_ids = inst.get("target_instance_ids") or []
+    if isinstance(target_ids, str):
+        try:
+            target_ids = json.loads(target_ids)
+        except (json.JSONDecodeError, TypeError):
+            target_ids = []
+
+    targets = resolve_target_instances(db_path, target_ids)
+
+    # Add resolved targets to merged env
+    target_env = {}
+    for i, t in enumerate(targets):
+        prefix = f"TS_PROXY_TARGET_{i}"
+        target_env[f"{prefix}_HOST"] = t["hostname"]
+        target_env[f"{prefix}_PORT"] = str(t["port_assigned"])
+        if t["auth_token"]:
+            target_env[f"{prefix}_TOKEN"] = t["auth_token"]
+
+    if target_env:
+        chain.append(ConfigLevel(3, "target_resolution", env_vars=target_env))
+
+    # ===== Merge =====
+    merged, _ = chain.get_merged()
+
+    # Inject port_assigned as TS_PROXY_PORT
+    if port:
+        merged["env"]["TS_PROXY_PORT"] = str(port)
+
+    return {
+        "env": merged["env"],
+        "cli_args": "",
+    }

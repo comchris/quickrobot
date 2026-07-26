@@ -77,3 +77,50 @@ System instances now respect `.env` AUTOSTART flags (WebUI: `QUICKROBOT_WEBUI_AU
 
 **Housekeeping & Code Quality**
 Migrations consolidated — only `008_base.sql` remains (old files moved to OLD_ignore). All `__pycache__/` directories removed (14 across lib/, engine/, db/, qr_api/). Seed file fixed: renamed stale v009 → v008, removed 301 runtime log entries from static seed data. Dead code cleanup: removed duplicate function definitions in routes_nodes.py, dead `QR_ENV_MCP_ALLOWED_HOSTS` constant, simplified `_resolve_engine_playbook_id()`. SSOT compliance: 7 hardcoded `"llama_server"` strings in MCP tools replaced with `QR_ENGINE_LLAMA_SERVER_NAME` constant.
+
+---
+
+### v0.09 (2026-07-13 — 2026-07-17)
+
+**Route Split**
+Split monolithic `qr_api/__init__.py` (~9,600 lines) into two feature-group subdirectories: `routes_instances/` (7 files: status, deploy, config, RPC cluster, jobs/tasks, health, misc) and `routes_nodes/` (13 files: lifecycle, status, config, APT, engine management, presets, models, benchmarks, system/mcp/webui mgmt, playbooks, misc). All 176 route registrations preserved. Post-split import chain fixed across 17 files — missing `json`, `logging`, `_project_root`, and cross-file utility imports were the primary failure mode.
+
+**Expert Split Mode S (Staggered)**
+New expert distribution mode for MoE models: each RPC generates 3 `-ot` flags (one per FFN sub-layer: up/gate/down) with global stride-3 round-robin across the full expert pool. Enables ~3x per-node VRAM reduction at cost of increased inter-RPC communication. Added `extra_ot_flags[]` config for manual `-ot` entries, dedicated `PATCH /instances/<id>/expert-split` atomic endpoint, and WebUI textarea for extra flag editing. Mode S index bug fixed (was using local per-RPC allocation instead of global round-robin).
+
+**Port Resolution Fix + Seed Base Split**
+llama_server `base_port` added to `engine_configs` table (previously only in engine_types capabilities JSON), fixing stale port values in env files for new instances. Engine configs (66 rows) moved from seed file into base migration `010_base.sql`, separating infrastructure defaults from user content (presets, models). Seed file reduced from 321 to 292 rows; fresh DB now produces clean state with localhost auto-provisioned and zero remote nodes.
+
+**Model Scan v3 + Multipart Model Consolidation**
+Expanded mmproj detection: case-insensitive grep, 4 additional glob fallback patterns, quantization-strip sed widens for more variants. Multipart GGUF models now correctly grouped via `total_shards` parsed from filename `of-N` suffix (was wrong when scan catches only a subset of shards). Shard consolidation removes fragment duplicates — 31 fragments merged across live scans.
+
+**WebUI Fixes**
+Preset/model edit pages aligned to consistent `<id>/edit` URL pattern. Previous/next navigation simplified to adjacent ID (removed buggy "used-ID" smart nav). CSS grid layout replaces flexbox for button alignment. Stale job detection extended to catch stuck queued children (parent marked error when any child stuck, not just all-done). RPC binding display fixed: stopped/error servers no longer show "unbound" despite intact DB bindings.
+
+**Scheduler & Runtime Hardening**
+Stale task detection extended: Phase 3 now catches both "all children done" AND "stuck queued children" patterns. Instance state reset added to Phase 3 for consistency. SQL parameterization fixed across all scheduler queries (was using f-string interpolation). `SO_REUSEADDR` added to port check for restart resilience (prevents TIME_WAIT conflicts).
+
+---
+
+### v0.10 (2026-07-17 — 2026-07-22)
+
+**Engine Code Split — Shared Libs**
+Extracted ~405 lines of duplicated code from 4 engine `__init__.py` files into 8 shared libraries: `lib_engine_health.py` (remote service check), `lib_engine_status.py` (instance status builder), `lib_engine_actions.py` (action map lookup), `lib_engine_states.py` (state machine builder), `lib_engine_config.py` (config CRUD), `lib_engine_command.py` (execute/forward), `lib_engine_resources.py` (resource listing), `lib_engine_status_query.py` (systemd status query). Engines now 280-360 lines each (down from 430-590). Remaining bulk: inline CAPABILITIES dict, custom query_status(), list_resources().
+
+**Endpoint Consolidation (EP-CONSOLIDATE — v0.10)**
+Completed remaining consolidation phases: P3 merged 2 health/status endpoints into unified `GET /instances/<id>/status` (removed `/health` and `/query-status`). P4 consolidated 5 split/expert endpoints into single `PUT /instances/<id>/config` (removed 5 thin wrappers). Total API endpoints reduced by ~14% from original monolithic count. All removed endpoints return 404; kept endpoints verified working via WebUI/MCP callers.
+
+**Single-Token Auth Model**
+Replaced 3-token model (API_KEY, WEBUI_TOKEN, MCP_TOKEN) with single `QUICKROBOT_API_KEY` gatekeeper. Removed unused token env vars from `.quickrobot.env`. Auth middleware accepts only this key in prod mode. Per-instance llama_server auth tokens retained for model-serving API authentication.
+
+**Waitress WSGI Production Server**
+Swapped Flask dev server (`app.run()`) to `waitress.serve()` for both API and WebUI. Single-process threading (4 threads), built-in SSL support, identical concurrency to 4 gunicorn workers without external binary dependency. Channel timeout 30s, cleanup interval 15s.
+
+**Quicksetup Auto-Deploy**
+New `QUICKROBOT_QUICKSETUP=true` flag triggers automated hardware scan + instance creation + deploy on fresh DB startup. Hardware-aware tier selection (T4>=56GB, T3>=28GB, T2>=13GB, T1>=8GB GPU RAM). Dynamic preset creation (no hardcoded ID), context sizing from available RAM, GPU offload via `LLAMA_ARG_N_GPU_LAYERS`. Idempotent: skips if any instance has `quicksetup_done=1`.
+
+**Timestamp Proxy Engine (ID 23)**
+New infra-level HTTP proxy engine for in-prompt timestamp injection. Transparent `/v1/chat/completions` proxy that injects timestamps into user messages and captures response timing. Supports multi-target binding (`target_instance_ids`), per-client inject toggles, and configurable timestamp position/format. Deploy chain: preflight → deps → deploy → config_svc → config_env → start.
+
+**Build Infrastructure & Testing**
+`pyproject.toml` created with setuptools build system, editable install (`pip install -e .`), and CLI entry point. All 12 direct dependencies pinned to exact versions. Full pytest suite: 105 tests across 6 tiers (86 pass, 16 fail, 3 skip — failures are pre-existing route bugs surfaced by new test harness). CORS middleware added to API server with configurable origins via `QUICKROBOT_API_CORS_ORIGINS`.

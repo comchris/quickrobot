@@ -20,7 +20,7 @@ discovery by the engine loader.
 
 from engine.base import BaseEngine
 
-from lib.qr_engine_ids import QR_DEFAULT_LOCALHOST, QR_ENGINE_PORT_DEFAULTS
+from lib.qr_engine_ids import QR_DEFAULT_LOCALHOST, QR_ENGINE_PORT_DEFAULTS, QR_ENGINE_LLAMA_SERVER_NAME
 from lib.lib_constants import DEFAULT_ANSIBLE_USER
 
 
@@ -39,6 +39,7 @@ CAPABILITIES = {
     # --- engine config defaults (SSOT — replaces seed file INSERTs) ---
     "config_defaults": {
         "LLAMA_ARG_FIT": ("off", "Fit mode off for production (on=enable fit)"),
+        "LLAMA_ARG_LOG_LEVEL": ("off", "Log verbosity: off (production), info (standard), debug (verbose stderr output via --verbose)"),
         "LLAMA_ARG_HOST": ("0.0.0.0", "Host to bind llama-server (0.0.0.0=all interfaces)"),
         "LLAMA_ARG_MMAP": ("false", "Memory map models"),
         "LLAMA_ARG_MODELS_DIR": ("", "Model directory for router mode — preset 1 (no model ID) uses this"),
@@ -46,6 +47,7 @@ CAPABILITIES = {
         "LLAMA_ARG_SEED": ("1337", "Random seed for sampling (LLAMA_ARG_SEED)"),
         "LLAMA_ARG_UI": ("true", "Enable llama.cpp built-in Web UI (valid: on/enabled/true/1 or off/disabled/false/0)"),
         "LLAMA_ARG_UI_MCP_PROXY": ("true", "Enable MCP CORS proxy in Web UI (valid: on/enabled/true/1 or off/disabled/false/0)"),
+        "LLAMA_API_KEY": ("", "API key for llama.cpp server authentication (env: LLAMA_API_KEY)"),
         "binary_path": ("/opt/quickrobot/llama.cpp/build/bin/llama-server", "Path to llama-server binary (shared per-node)"),
         "git_clone_url": ("https://github.com/ggml-org/llama.cpp.git", "Source git repository URL"),
         "model_root_path": ("/mnt/llama/gguf/models", "Root path for model scan (searches this directory for .gguf files)"),
@@ -65,6 +67,11 @@ CAPABILITIES = {
     # llama_rpc have these; other engines (iperf3, universal, subprocess) use
     # their own extra_vars paths and skip the config merge chain.
     "env_builder": "build_llama_server_env",
+    "undeploy_chain": [
+        {"stage": "stop", "playbook": "service_stop"},
+        {"stage": "undeploy", "playbook": "undeploy_llama_server"},
+        {"stage": "verify", "playbook": "check_undeploy"},
+    ],
 }
 
 
@@ -75,6 +82,20 @@ class LlamaServerEngine(BaseEngine):
     (limited to 5 concurrent instances per node due to GPU memory).
     """
 
+    STATE_EXTENSIONS = {
+        "deployed": ["updating", "compiling", "stopping"],
+        "running": ["updating", "compiling", "configuring"],
+        "error": ["updating", "compiling"],
+        "stopped": ["updating"],
+        "updating": ["deployed", "build_error", "error", "timeout", "unconfigured", "running"],
+        "compiling": ["deployed", "error", "timeout"],
+        "build_error": ["updating", "running"],
+        "starting": ["loading"],
+        "loading": ["running", "error"],
+        "deploying": ["running"],
+        "configuring": ["running"],
+    }
+
     def __init__(self):
         self._name = "llama_server"
         self._base_port = CAPABILITIES["base_port"]
@@ -84,26 +105,11 @@ class LlamaServerEngine(BaseEngine):
     def get_state_machine(cls):
         """State machine for llama_server engine.
 
-        Extends base machine with build/update states (updating, compiling)
+        Extends base with build/update states (updating, compiling)
         and allows configuring from running (BC-1: config-only updates).
         """
-        sm = super().get_state_machine()
-        # Add build-related states
-        sm["deployed"].extend(["updating", "compiling", "stopping"])
-        sm["running"].extend(["updating", "compiling", "configuring"])
-        sm["error"].extend(["updating", "compiling"])
-        sm["stopped"].extend(["updating"])
-        sm["updating"] = ["deployed", "build_error", "error", "timeout", "unconfigured", "running"]
-        sm["compiling"] = ["deployed", "error", "timeout"]
-        # Allow recovery from build_error to running when health check confirms alive
-        sm["build_error"].extend(["updating", "running"])
-        # Loading state: model load in progress after start/restart for llama_server.
-        sm["starting"].append("loading")
-        sm["loading"] = ["running", "error"]
-        # Allow recovery from deploying/configuring to running when health check confirms alive
-        sm["deploying"].append("running")
-        sm["configuring"].append("running")
-        return sm
+        from lib.lib_engine_states import build_state_machine as _bsm
+        return _bsm(cls.STATE_EXTENSIONS)
 
     def get_status(self, instance_id, db_path=None):
         """Get remote status of a llama.cpp server instance.
@@ -111,58 +117,17 @@ class LlamaServerEngine(BaseEngine):
         Queries the systemd service state and process stats on the remote node.
 
         Returns:
-            dict with keys:
-                engine (str): engine name
-                instance_id (int): instance ID
-                unit_name (str): systemd unit name
-                service_state (str): active/inactive/activating/degrading
-                service_substate (str): detailed substate
-                main_pid (int|None): PID of the main process
-                restart_count (int): number of times the service has restarted
-                memory_mb (float|None): RSS memory in MB
-                error (str|None): error message if query failed
+            dict with keys: engine, instance_id, unit_name, service_state,
+                main_pid, memory_mb, restart_count, error.
         """
         if db_path is None:
             return {"engine": self._name, "instance_id": instance_id,
                     "error": "db_path required for remote get_status"}
 
-        import json as _json
-        from db.sqlite import pool
-
         try:
-            with pool(db_path) as conn:
-                # Get instance info
-                row = conn.execute(
-                    """SELECT i.port_assigned, i.state, i.name,
-                              n.hostname as node_host, n.ansible_user as node_user,
-                              e.name as engine_type_name
-                       FROM instances i
-                       LEFT JOIN nodes n ON i.node_id = n.id
-                       JOIN engine_types e ON i.engine_type_id = e.id
-                       WHERE i.id = ?""",
-                    (instance_id,),
-                ).fetchone()
-
-                if not row:
-                    return {"engine": self._name, "instance_id": instance_id,
-                            "error": f"Instance {instance_id} not found"}
-
-                unit_name = f"qr-{instance_id}-{row['engine_type_name']}"
-                node_host = row["node_host"] or QR_DEFAULT_LOCALHOST
-                node_user = (row["node_user"] if row["node_user"] else None) or DEFAULT_ANSIBLE_USER
-                engine_type = row["engine_type_name"]
-
-                # Use ssh to check systemd service + process stats
-                result = self._check_remote_service(node_host, unit_name, node_user)
-
-                return {
-                    "engine": self._name,
-                    "instance_id": instance_id,
-                    "unit_name": unit_name,
-                    "node_host": node_host,
-                    "port_assigned": row["port_assigned"],
-                } | result
-
+            from lib.lib_engine_status_query import query_systemd_status as _qs
+            unit_builder = lambda row: f"qr-{instance_id}-{row['engine_type_name']}"
+            return _qs(db_path, self._name, instance_id, unit_builder)
         except Exception as exc:
             return {"engine": self._name, "instance_id": instance_id,
                     "service_state": "unknown", "error": str(exc),
@@ -172,79 +137,19 @@ class LlamaServerEngine(BaseEngine):
     def _check_remote_service(self, node_host, unit_name, node_user=None):
         """Check remote systemd service and process stats via ansible playbook.
 
-        Uses instance_health_check playbook for unified, interlock-aware health checks.
+        Delegates to shared lib_engine_health.check_remote_service().
 
         Args:
             node_host: Hostname or IP of the remote node.
             unit_name: Name of the systemd unit (e.g., 'qr-19-rpc').
-            node_user: SSH username for the remote node (defaults to DEFAULT_ANSIBLE_USER).
+            node_user: SSH username for the remote node.
 
         Returns:
             dict with keys: service_state, service_substate, main_pid,
                 memory_mb, restart_count, error.
         """
-        import json as _json
-
-        try:
-            from qr_api import _execute_playbook as _ep
-            r = _ep("instance_health_check", resolver_type="playbook_id",
-                    limit=node_host,
-                    extra_vars={"inventory_host": node_host, "unit_name": unit_name},
-                    action_type="health_check")
-
-            if r.get("error"):
-                return {
-                    "service_state": "unknown", "service_substate": "ansible_error",
-                    "main_pid": None, "memory_mb": 0.0, "restart_count": 0,
-                    "error": r["error"],
-                }
-
-            # Parse JSON from playbook debug msg
-            svc_result = r.get("result", {})
-            json_str = ""
-            for play in svc_result.get("results", {}).get("plays", []):
-                for task in play.get("tasks", []):
-                    if "Output health check result" in task.get("task", {}).get("name", ""):
-                        entry = task.get("results", [{}])[0]
-                        json_str = entry.get("msg", "")
-
-            if not json_str:
-                return {
-                    "service_state": "unknown", "service_substate": "no_output",
-                    "main_pid": None, "memory_mb": 0.0, "restart_count": 0,
-                    "error": "Playbook returned no output",
-                }
-
-            data = _json.loads(json_str)
-            memory_kb = int(data.get("memory_kb", 0))
-            main_pid = int(data["main_pid"]) if data.get("main_pid") and data["main_pid"] not in ("0",) else None
-
-            error = None
-            state = data.get("service_state", "unknown")
-            if state == "unknown" and main_pid is None:
-                error = f"Service {unit_name} not found on {node_host}"
-
-            return {
-                "service_state": state,
-                "service_substate": data.get("sub_state", "unknown"),
-                "main_pid": main_pid,
-                "memory_mb": round(memory_kb / 1024, 2) if memory_kb else 0.0,
-                "restart_count": int(data.get("restart_count", 0)),
-                "error": error,
-            }
-
-        except _json.JSONDecodeError:
-            return {
-                "service_state": "unknown", "service_substate": "parse_error",
-                "main_pid": None, "memory_mb": 0.0, "restart_count": 0,
-                "error": f"Failed to parse playbook output: {json_str!r}",
-            }
-        except Exception as exc:
-            return {
-                "service_state": "unknown", "service_substate": "error",
-                "main_pid": None, "memory_mb": 0.0, "restart_count": 0,
-                "error": str(exc),
-            }
+        from lib.lib_engine_health import check_remote_service as _check
+        return _check(node_host, unit_name, node_user)
 
     def query_status(self, instance_id, db_path=None):
         """Remote health check for a llama.cpp server instance.
@@ -324,48 +229,7 @@ class LlamaServerEngine(BaseEngine):
             return {"alive": False, "latency_ms": None,
                     "error": str(exc)}
 
-    def set_config(self, instance_id, config_dict, db_path=None):
-        """Apply configuration to a llama.cpp server instance.
-
-        Args:
-            instance_id: Integer primary key of the instance.
-            config_dict: dict of configuration parameters
-                (gpu_layers, ctx_size, threads, model_path, etc.).
-            db_path: Optional database path for system-managed engines.
-
-        Returns:
-            dict with the updated configuration.
-        """
-        return {"engine": self._name, "instance_id": instance_id,
-                "config": config_dict, "applied": True}
-
-    def get_config(self, instance_id, db_path=None):
-        """Get current running config for a llama.cpp server instance.
-
-        Args:
-            instance_id: Integer primary key of the instance.
-            db_path: Optional database path for system-managed engines.
-
-        Returns:
-            dict with current configuration.
-        """
-        return {"engine": self._name, "instance_id": instance_id,
-                "config": {}}
-
-    def execute(self, instance_id, command, db_path=None, **kwargs):
-        """Execute a command on a llama.cpp server instance.
-
-        Args:
-            instance_id: Integer primary key of the instance.
-            command: Command string or dict.
-            db_path: Optional database path for system-managed engines.
-            **kwargs: Additional parameters.
-
-        Returns:
-            dict with execution result.
-        """
-        return {"engine": self._name, "instance_id": instance_id,
-                "command": command, "result": "executed"}
+    # set_config, get_config, execute inherited from BaseEngine (shared lib)
 
     def list_resources(self, instance_id, db_path=None):
         """List available models and presets for the llama_server engine.
@@ -441,140 +305,83 @@ class LlamaServerEngine(BaseEngine):
             return {"engine": self._name, "instance_id": instance_id,
                     "models": [], "presets": [], "_error": str(exc)}
 
-    def get_presets(self, engine_type_id, db_path=None):
-        """Get presets for the llama_server engine type.
+    # get_presets, set_active_preset inherited from BaseEngine (shared lib)
 
-        Args:
-            engine_type_id: Integer primary key of the engine type.
-            db_path: Optional database path for system-managed engines.
-
-        Returns:
-            list of preset dicts (loaded from DB at runtime).
-        """
-        return []
-
-    def set_active_preset(self, instance_id, preset_id, db_path=None):
-        """Set the active preset for a llama.cpp server instance.
-
-        Args:
-            instance_id: Integer primary key of the instance.
-            preset_id: Integer primary key of the target preset.
-            db_path: Optional database path for system-managed engines.
-
-        Returns:
-            dict with updated preset assignment.
-        """
-        return {"engine": self._name, "instance_id": instance_id,
-                "preset_id": preset_id, "applied": True}
-
-    def forward_request(self, instance_id, method, params=None, db_path=None):
-        """Forward a request to a running llama.cpp server instance.
-
-        Args:
-            instance_id: Integer primary key of the instance.
-            method: Request method name string.
-            params: Optional dict of parameters.
-            db_path: Optional database path for system-managed engines.
-
-        Returns:
-            dict with the response from the llama.cpp server.
-        """
-        return {"engine": self._name, "instance_id": instance_id,
-                "method": method, "params": params or {}, "result": None}
+    # forward_request inherited from BaseEngine (shared lib)
 
     @classmethod
     def get_instance_status(cls, db_path, instance_id):
         """Unified status endpoint for llama_server instances (STATUS-1).
 
-        Returns a standardized dict with engine_data, available actions,
-        warnings, and meta info for WebUI rendering.
-
-        Args:
-            db_path: Path to the SQLite database.
-            instance_id: Integer primary key of the instance.
-
-        Returns:
-            dict with keys: id, state, engine_type_name, engine_data,
-                actions, warnings, _meta.
+        Delegates to shared build_instance_status(), then adds llama_server
+        specific data extras (running_job from log_entries) and warnings.
         """
+        result = cls.build_instance_status(db_path, instance_id)
+        if not result:
+            return None
+
+        # Engine-specific: running job status
         from db.sqlite import pool
 
         with pool(db_path) as conn:
-            inst = conn.execute(
-                """SELECT i.id, i.name, i.state, i.port_assigned,
-                          i.node_id, i.config_override,
-                          e.name as engine_type_name,
-                          n.hostname as node_hostname
-                   FROM instances i
-                   JOIN engine_types e ON i.engine_type_id = e.id
-                   LEFT JOIN nodes n ON i.node_id = n.id
-                   WHERE i.id = ?""",
-                (instance_id,),
-            ).fetchone()
-
-            # Get recent job status for running builds
             job = conn.execute(
                 "SELECT status FROM log_entries WHERE instance_id=? AND status='running' AND parent_id IS NULL ORDER BY created_at DESC LIMIT 1",
                 (instance_id,),
             ).fetchone()
 
-        if not inst:
+        if job:
+            result["engine_data"]["running_job"] = job["status"]
+
+        # Engine-specific: node hostname warning
+        if result["engine_data"].get("node_hostname"):
+            result["warnings"].append(
+                {"type": "info", "message": f"Running on {result['engine_data']['node_hostname']}"}
+            )
+
+        return result
+
+    @classmethod
+    def build_instance_status(cls, db_path, instance_id):
+        """Shared STATUS-1 base response (lib/lib_engine_status.build_instance_status).
+
+        llama_server-specific: merges remote systemd service health + running_job.
+        """
+        from lib.lib_engine_status import build_instance_status as _shared_build
+        result = _shared_build(cls, db_path, instance_id)
+        if not result:
             return None
 
-        engine_data = {
-            "port_assigned": inst["port_assigned"],
-            "node_hostname": inst["node_hostname"],
-        }
+        # Merge remote systemd service health into engine_data
+        from lib.lib_engine_status_query import query_systemd_status as _qs
+        svc = _qs(
+            db_path, QR_ENGINE_LLAMA_SERVER_NAME, instance_id,
+            unit_name_builder=lambda r: f"qr-{instance_id}-llama_server",
+        )
+        if svc and not svc.get("error"):
+            result["engine_data"].update({
+                "service_state": svc.get("service_state"),
+                "main_pid": svc.get("main_pid"),
+                "memory_mb": svc.get("memory_mb"),
+                "restart_count": svc.get("restart_count"),
+            })
 
-        # Add model info if available
-
-        # Note about running job (build in progress)
+        # Engine-specific: running job status
+        from db.sqlite import pool
+        with pool(db_path) as conn:
+            job = conn.execute(
+                "SELECT status FROM log_entries WHERE instance_id=? AND status='running' AND parent_id IS NULL ORDER BY created_at DESC LIMIT 1",
+                (instance_id,),
+            ).fetchone()
         if job:
-            engine_data["running_job"] = job["status"]
+            result["engine_data"]["running_job"] = job["status"]
 
-        # Build available actions from state machine
-        actions = cls._get_available_actions(inst["state"])
-        warnings = []
-        if inst["node_hostname"] and inst["state"] in ("running", "deployed"):
-            warnings.append({"type": "info", "message": f"Running on {inst['node_hostname']}"})
-
-        state_machine = cls.get_state_machine()
-        valid_next = state_machine.get(inst["state"], [])
-
-        return {
-            "id": inst["id"],
-            "state": inst["state"],
-            "engine_type_name": inst["engine_type_name"],
-            "engine_data": engine_data,
-            "actions": actions,
-            "warnings": warnings,
-            "_meta": {
-                "valid_next_states": valid_next,
-                "is_transitioning": inst["state"] in ("configuring", "deploying", "updating", "compiling", "starting", "stopping"),
-            },
-        }
+        return result
 
     @classmethod
     def _get_available_actions(cls, state):
-        """Map instance state to available actions."""
-        action_map = {
-            "unconfigured":   [{"name": "deploy", "label": "Deploy"}, {"name": "delete", "label": "Delete"}],
-            "deployed":       [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "deploy", "label": "Deploy"}, {"name": "undeploy", "label": "Undeploy"}, {"name": "delete", "label": "Delete"}],
-            "starting":       [{"name": "stop", "label": "Stop"}],
-            "loading":        [{"name": "stop", "label": "Stop"}],
-            "running":        [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "stop", "label": "Stop"}],
-            "stopping":       [{"name": "start", "label": "Start"}],
-            "stopped":        [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "deploy", "label": "Deploy"}, {"name": "undeploy", "label": "Undeploy"}],
-            "error":          [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "deploy", "label": "Deploy"}, {"name": "undeploy", "label": "Undeploy"}, {"name": "delete", "label": "Delete"}],
-            "configuring":    [{"name": "stop", "label": "Stop"}],
-            "deploying":      [{"name": "stop", "label": "Stop"}],
-            "updating":       [],
-            "compiling":      [],
-            "build_error":    [{"name": "deploy", "label": "Deploy"}, {"name": "start", "label": "Start"}, {"name": "undeploy", "label": "Undeploy"}, {"name": "delete", "label": "Delete"}],
-            "timeout":        [{"name": "deploy", "label": "Deploy"}],
-            "test_mode":      [{"name": "stop", "label": "Stop"}],
-        }
-        return action_map.get(state, [])
+        """Map instance state to available actions (shared lib module)."""
+        from lib.lib_engine_actions import get_action_map
+        return get_action_map(CAPABILITIES["name"]).get(state, [])
 
     @classmethod
     def _get_warnings(cls, instance, service_info):

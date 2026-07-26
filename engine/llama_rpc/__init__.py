@@ -20,7 +20,7 @@ discovery by the engine loader.
 
 import logging
 
-from lib.qr_engine_ids import QR_DEFAULT_LOCALHOST, QR_ENGINE_PORT_DEFAULTS
+from lib.qr_engine_ids import QR_DEFAULT_LOCALHOST, QR_ENGINE_PORT_DEFAULTS, QR_ENGINE_LLAMA_RPC_NAME
 from engine.base import BaseEngine
 
 logger = logging.getLogger(__name__)
@@ -56,6 +56,11 @@ CAPABILITIES = {
     # merged_env + cli_args for config/start stages. Only llama_server and
     # llama_rpc have these; other engines use their own extra_vars paths.
     "env_builder": "build_rpc_server_env",
+    "undeploy_chain": [
+        {"stage": "stop", "playbook": "service_stop"},
+        {"stage": "undeploy", "playbook": "undeploy_rpc"},
+        {"stage": "verify", "playbook": "check_undeploy"},
+    ],
 }
 
 
@@ -65,6 +70,18 @@ class RpcEngine(BaseEngine):
     Instances communicate via JSON-RPC over HTTP. Port range: 9000-9098.
     """
 
+    STATE_EXTENSIONS = {
+        "deployed": ["updating", "compiling", "stopping"],
+        "running": ["updating", "compiling", "configuring"],
+        "error": ["updating", "compiling"],
+        "stopped": ["updating"],
+        "updating": ["deployed", "build_error", "error", "timeout", "unconfigured", "running"],
+        "compiling": ["deployed", "error", "timeout"],
+        "build_error": ["updating", "running"],
+        "deploying": ["running"],
+        "configuring": ["running"],
+    }
+
     def __init__(self):
         self._name = "llama_rpc"
         self._base_port = CAPABILITIES["base_port"]
@@ -73,71 +90,23 @@ class RpcEngine(BaseEngine):
     @classmethod
     def get_state_machine(cls):
         """State machine for rpc engine (same as llama_server — build-based)."""
-        sm = super().get_state_machine()
-        sm["deployed"].extend(["updating", "compiling", "stopping"])
-        sm["running"].extend(["updating", "compiling", "configuring"])
-        sm["error"].extend(["updating", "compiling"])
-        sm["stopped"].extend(["updating"])
-        sm["updating"] = ["deployed", "build_error", "error", "timeout", "unconfigured", "running"]
-        sm["compiling"] = ["deployed", "error", "timeout"]
-        # Allow recovery from build_error to running when health check confirms alive
-        sm["build_error"].extend(["updating", "running"])
-        # Allow recovery from deploying/configuring to running when health check confirms alive
-        sm["deploying"].append("running")
-        sm["configuring"].append("running")
-        return sm
+        from lib.lib_engine_states import build_state_machine as _bsm
+        return _bsm(cls.STATE_EXTENSIONS)
 
     def get_status(self, instance_id, db_path=None):
         """Get current status of an RPC engine instance.
 
         Returns canonical shape: {engine, instance_id, service_state, error}
         plus optional subsystem keys (unit_name, port_assigned, etc.).
-
-        Args:
-            instance_id: Integer primary key of the instance.
-            db_path: Optional database path for system-managed engines.
-
-        Returns:
-            dict with canonical status shape.
         """
         if db_path is None:
             return {"engine": self._name, "instance_id": instance_id,
                     "service_state": None, "error": "db_path required for remote get_status"}
 
-        import json as _json
-        from engine.base import build_canonical_status as _bcs
-        from lib.lib_constants import DEFAULT_ANSIBLE_USER
-        from db.sqlite import pool
-
         try:
-            with pool(db_path) as conn:
-                row = conn.execute(
-                    """SELECT i.port_assigned, i.state, i.name,
-                               n.hostname as node_host, n.ansible_user as node_user,
-                               e.name as engine_type_name
-                        FROM instances i
-                        LEFT JOIN nodes n ON i.node_id = n.id
-                        JOIN engine_types e ON i.engine_type_id = e.id
-                        WHERE i.id = ?""",
-                    (instance_id,),
-                ).fetchone()
-
-                if not row:
-                    return {"engine": self._name, "instance_id": instance_id,
-                            "service_state": None, "error": f"Instance {instance_id} not found"}
-
-                unit_name = f"qr-{instance_id}-{row['engine_type_name']}"
-                node_host = row["node_host"] or QR_DEFAULT_LOCALHOST
-                node_user = (row["node_user"] if row["node_user"] else None) or DEFAULT_ANSIBLE_USER
-
-                result = self._check_remote_service(node_host, unit_name, node_user)
-
-                return _bcs(self._name, instance_id,
-                            service_state=result.get("service_state"),
-                            error=result.get("error") or None,
-                            unit_name=unit_name, node_host=node_host,
-                            port_assigned=row["port_assigned"]) | result
-
+            from lib.lib_engine_status_query import query_systemd_status as _qs
+            unit_builder = lambda row: f"qr-{instance_id}-{row['engine_type_name']}"
+            return _qs(db_path, self._name, instance_id, unit_builder)
         except Exception as exc:
             return {"engine": self._name, "instance_id": instance_id,
                     "service_state": "unknown", "error": str(exc),
@@ -263,240 +232,74 @@ class RpcEngine(BaseEngine):
             return {"alive": False, "latency_ms": None,
                     "error": "_check_rpc_systemd failed"}
 
-    def set_config(self, instance_id, config_dict, db_path=None):
-        """Apply configuration to an RPC engine instance.
-
-        Args:
-            instance_id: Integer primary key of the instance.
-            config_dict: dict of configuration parameters.
-            db_path: Optional database path for system-managed engines.
-
-        Returns:
-            dict with the updated configuration.
-        """
-        return {"engine": self._name, "instance_id": instance_id,
-                "config": config_dict, "applied": True}
-
-    def get_config(self, instance_id, db_path=None):
-        """Get current running config for an RPC instance.
-
-        Args:
-            instance_id: Integer primary key of the instance.
-            db_path: Optional database path for system-managed engines.
-
-        Returns:
-            dict with current configuration.
-        """
-        return {"engine": self._name, "instance_id": instance_id,
-                "config": {}}
+    # set_config, get_config inherited from BaseEngine (shared lib)
 
     def _check_remote_service(self, node_host, unit_name, node_user=None):
         """Check remote systemd service and process stats via ansible playbook.
 
-        Uses instance_health_check playbook for unified, interlock-aware health checks.
+        Delegates to shared lib_engine_health.check_remote_service().
 
         Args:
             node_host: Hostname or IP of the remote node.
             unit_name: Name of the systemd unit (e.g., 'qr-19-rpc').
-            node_user: SSH username for the remote node (defaults to DEFAULT_ANSIBLE_USER).
+            node_user: SSH username for the remote node.
 
         Returns:
             dict with keys: service_state, service_substate, main_pid,
                 memory_mb, restart_count, error.
         """
-        import json as _json
+        from lib.lib_engine_health import check_remote_service as _check
+        return _check(node_host, unit_name, node_user)
 
-        try:
-            from qr_api import _execute_playbook as _ep
-            r = _ep("instance_health_check", resolver_type="playbook_id",
-                    limit=node_host,
-                    extra_vars={"inventory_host": node_host, "unit_name": unit_name},
-                    action_type="health_check")
-
-            if r.get("error"):
-                return {
-                    "service_state": "unknown", "service_substate": "ansible_error",
-                    "main_pid": None, "memory_mb": 0.0, "restart_count": 0,
-                    "error": r["error"],
-                }
-
-            svc_result = r.get("result", {})
-            json_str = ""
-            for play in svc_result.get("results", {}).get("plays", []):
-                for task in play.get("tasks", []):
-                    if "Output health check result" in task.get("task", {}).get("name", ""):
-                        entry = task.get("results", [{}])[0]
-                        json_str = entry.get("msg", "")
-
-            if not json_str:
-                return {
-                    "service_state": "unknown", "service_substate": "no_output",
-                    "main_pid": None, "memory_mb": 0.0, "restart_count": 0,
-                    "error": "Playbook returned no output",
-                }
-
-            data = _json.loads(json_str)
-            memory_kb = int(data.get("memory_kb", 0))
-            main_pid = int(data["main_pid"]) if data.get("main_pid") and data["main_pid"] not in ("0",) else None
-
-            error = None
-            state = data.get("service_state", "unknown")
-            if state == "unknown" and main_pid is None:
-                error = f"Service {unit_name} not found on {node_host}"
-
-            return {
-                "service_state": state,
-                "service_substate": data.get("sub_state", "unknown"),
-                "main_pid": main_pid,
-                "memory_mb": round(memory_kb / 1024, 2) if memory_kb else 0.0,
-                "restart_count": int(data.get("restart_count", 0)),
-                "error": error,
-            }
-
-        except _json.JSONDecodeError:
-            return {
-                "service_state": "unknown", "service_substate": "parse_error",
-                "main_pid": None, "memory_mb": 0.0, "restart_count": 0,
-                "error": f"Failed to parse playbook output: {json_str!r}",
-            }
-        except Exception as exc:
-            return {
-                "service_state": "unknown", "service_substate": "error",
-                "main_pid": None, "memory_mb": 0.0, "restart_count": 0,
-                "error": str(exc),
-            }
-
-    def execute(self, instance_id, command, db_path=None, **kwargs):
-        """Execute a command on the RPC engine.
-
-        Args:
-            instance_id: Integer primary key of the instance.
-            command: Command string or dict.
-            db_path: Optional database path for system-managed engines.
-            **kwargs: Additional parameters.
-
-        Returns:
-            dict with execution result.
-        """
-        return {"engine": self._name, "instance_id": instance_id,
-                "command": command, "result": "executed"}
-
-    def list_resources(self, instance_id, db_path=None):
-        """List available resources for an RPC instance.
-
-        Args:
-            instance_id: Integer primary key of the instance.
-            db_path: Optional database path for system-managed engines.
-
-        Returns:
-            dict with models and presets listings.
-        """
-        return {"engine": self._name, "instance_id": instance_id,
-                "models": [], "presets": []}
-
-    def get_presets(self, engine_type_id, db_path=None):
-        """Get presets for the RPC engine type.
-
-        Args:
-            engine_type_id: Integer primary key of the engine type.
-            db_path: Optional database path for system-managed engines.
-
-        Returns:
-            list of preset dicts (empty in Phase 1 -- loaded from DB at runtime).
-        """
-        return []
-
-    def set_active_preset(self, instance_id, preset_id, db_path=None):
-        """Set the active preset for an RPC instance.
-
-        Args:
-            instance_id: Integer primary key of the instance.
-            preset_id: Integer primary key of the target preset.
-            db_path: Optional database path for system-managed engines.
-
-        Returns:
-            dict with updated preset assignment.
-        """
-        return {"engine": self._name, "instance_id": instance_id,
-                "preset_id": preset_id, "applied": True}
-
-    def forward_request(self, instance_id, method, params=None, db_path=None):
-        """Forward an RPC request to a running instance.
-
-        Args:
-            instance_id: Integer primary key of the instance.
-            method: RPC method name string.
-            params: Optional dict of parameters.
-            db_path: Optional database path for system-managed engines.
-
-        Returns:
-            dict with the response from the remote engine.
-        """
-        return {"engine": self._name, "instance_id": instance_id,
-                "method": method, "params": params or {}, "result": None}
+    # execute, list_resources, get_presets, set_active_preset, forward_request inherited from BaseEngine (shared lib)
 
     @classmethod
     def get_instance_status(cls, db_path, instance_id):
-        """Unified status endpoint for llama_rpc instances (STATUS-1)."""
-        from db.sqlite import pool
+        """Unified status endpoint for llama_rpc instances (STATUS-1).
 
-        with pool(db_path) as conn:
-            inst = conn.execute(
-                """SELECT i.id, i.name, i.state, i.port_assigned,
-                          i.node_id, i.config_override,
-                          e.name as engine_type_name,
-                          n.hostname as node_hostname
-                   FROM instances i
-                   JOIN engine_types e ON i.engine_type_id = e.id
-                   LEFT JOIN nodes n ON i.node_id = n.id
-                   WHERE i.id = ?""",
-                (instance_id,),
-            ).fetchone()
-
-        if not inst:
+        Delegates to shared build_instance_status() with rpc-specific extras.
+        """
+        result = cls.build_instance_status(db_path, instance_id)
+        if not result:
             return None
 
-        engine_data = {"port_assigned": inst["port_assigned"], "node_hostname": inst["node_hostname"]}
+        # Engine-specific: node hostname warning
+        if result["engine_data"].get("node_hostname"):
+            result["warnings"].append(
+                {"type": "info", "message": f"Running on {result['engine_data']['node_hostname']}"}
+            )
 
-        actions = cls._get_available_actions(inst["state"])
-        warnings = []
-        if inst["node_hostname"] and inst["state"] in ("running", "deployed"):
-            warnings.append({"type": "info", "message": f"Running on {inst['node_hostname']}"})
+        return result
 
-        state_machine = cls.get_state_machine()
-        valid_next = state_machine.get(inst["state"], [])
+    @classmethod
+    def build_instance_status(cls, db_path, instance_id):
+        """Shared STATUS-1 base response (lib/lib_engine_status.build_instance_status).
 
-        return {
-            "id": inst["id"],
-            "state": inst["state"],
-            "engine_type_name": inst["engine_type_name"],
-            "engine_data": engine_data,
-            "actions": actions,
-            "warnings": warnings,
-            "_meta": {
-                "valid_next_states": valid_next,
-                "is_transitioning": inst["state"] in ("configuring", "deploying", "updating", "compiling", "starting", "stopping"),
-            },
-        }
+        llama_rpc-specific: merges remote systemd service health into engine_data.
+        """
+        from lib.lib_engine_status import build_instance_status as _shared_build
+        result = _shared_build(cls, db_path, instance_id)
+        if not result:
+            return None
+
+        # Merge remote systemd service health into engine_data
+        from lib.lib_engine_status_query import query_systemd_status as _qs
+        svc = _qs(
+            db_path, QR_ENGINE_LLAMA_RPC_NAME, instance_id,
+            unit_name_builder=lambda r: f"qr-{instance_id}-llama_rpc",
+        )
+        if svc and not svc.get("error"):
+            result["engine_data"].update({
+                "service_state": svc.get("service_state"),
+                "main_pid": svc.get("main_pid"),
+                "memory_mb": svc.get("memory_mb"),
+                "restart_count": svc.get("restart_count"),
+            })
+
+        return result
 
     @classmethod
     def _get_available_actions(cls, state):
-        """Map instance state to available actions."""
-        action_map = {
-            "unconfigured":   [{"name": "deploy", "label": "Deploy"}, {"name": "delete", "label": "Delete"}],
-            "configuring":    [{"name": "stop", "label": "Stop"}],
-            "deployed":       [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "deploy", "label": "Deploy"}, {"name": "undeploy", "label": "Undeploy"}, {"name": "delete", "label": "Delete"}],
-            "starting":       [{"name": "stop", "label": "Stop"}],
-            "loading":        [{"name": "stop", "label": "Stop"}],
-            "running":        [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "stop", "label": "Stop"}],
-            "stopping":       [{"name": "start", "label": "Start"}],
-            "stopped":        [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "deploy", "label": "Deploy"}, {"name": "undeploy", "label": "Undeploy"}],
-            "error":          [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "deploy", "label": "Deploy"}, {"name": "undeploy", "label": "Undeploy"}, {"name": "delete", "label": "Delete"}],
-            "deploying":      [{"name": "stop", "label": "Stop"}],
-            "updating":       [],
-            "compiling":      [],
-            "build_error":    [{"name": "deploy", "label": "Deploy"}, {"name": "start", "label": "Start"}, {"name": "undeploy", "label": "Undeploy"}, {"name": "delete", "label": "Delete"}],
-            "timeout":        [{"name": "deploy", "label": "Deploy"}],
-            "test_mode":      [{"name": "stop", "label": "Stop"}],
-        }
-        return action_map.get(state, [])
+        """Map instance state to available actions (shared lib module)."""
+        from lib.lib_engine_actions import get_action_map
+        return get_action_map(CAPABILITIES["name"]).get(state, [])

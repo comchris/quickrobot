@@ -7,12 +7,12 @@
      version: 1
      arguments: [] -->
 **CRITICAL PRE-FLIGHT COMMAND:** Your very first actions, in order, MUST be:
-1. Use the `Read` tool to read '/CORE/projects/quickrobot/QUICKROBOT.md'
-2. Use the `Read` tool to read '/CORE/projects/quickrobot/CHANGELOG.md'
-4. Use the `Read` tool to read '/CORE/projects/quickrobot/docs/TODO.md'
-5. Use the `Read` tool to read '/CORE/projects/quickrobot/docs/LOCALHOSTS.md' — local LAN hostnames/IPs (if file exists)
+1. Use the `Read` tool to read '/CORE/projects/quickrobot/QUICKROBOT.md' — no limit, read fully
+2. Use the `Read` tool to read '/CORE/projects/quickrobot/CHANGELOG.md' with limit=20
+4. Use the `Read` tool to read '/CORE/projects/quickrobot/docs/TODO.md' — no limit
+5. Use the `Read` tool to read '/CORE/projects/quickrobot/docs/LOCALHOSTS.md' — local LAN hostnames/IPs (if file exists), no limit
 6. Run `date && cat /CORE/projects/quickrobot/.quickrobot.env` to get the current session timestamp and CURRENT local configuration used by quickrobot as SSOT
-7. Check `./manifest.log` — read last 10 lines; fetch more on demand if needed for context
+7. Check `./manifest.log` with limit=20; fetch more on demand if needed for context
 8. Create full project backup: `tar -czf /CORE/BACKUPS/quickrobot_backup_TIMESTAMP.tar.gz --exclude='OLD_ignore' --exclude='__pycache__' --exclude='.opencode/node_modules' -C /CORE/projects quickrobot`
 9. Verify backup integrity: `SOURCE_FILES=$(find /CORE/projects/quickrobot -not -path '*/OLD_ignore/*' -not -path '*/__pycache__/*' -not -path '*/.opencode/node_modules/*' -type f | wc -l) && BACKUP_FILES=$(tar -tzf /CORE/BACKUPS/quickrobot_backup_TIMESTAMP.tar.gz | grep -v '/$' | wc -l)` — confirm BACKUP_FILES >= SOURCE_FILES (allow for .opencode/ dynamic files like sessions/cache not archived; critical: all .opencode/agents/*.md present).
 10. Log backup in `./manifest.log`: append `<backup_filename> | <timestamp> | designer | N/A | session start full project backup`
@@ -344,3 +344,32 @@ Reports all findings as FATAL and aborts startup. Agent reads report, kills conf
 - scheduler: no port, scan `quickrobot_scheduler` / `engine.quickrobot_scheduler`
 
 **Key files:** `lib_system_engine.py` (new function), `lib_startup_pipeline.py` (`_start_system_engine()` calls pre-flight before engine.execute).
+
+---
+
+### 18. Instance Management Patterns — Reuse Over Creation (2026-07-22)
+
+**CRITICAL LEARNING:** Quickrobot's design power is **preset switching**, not instance proliferation. When agents see users wanting to test different models/presets, they should recommend `PUT /instances/<id>/config` + `POST /instances/<id>/reconfig_restart`, NOT spawning new instances.
+
+**Decision matrix:**
+| Use case | Action | Why |
+|----------|--------|-----|
+| Test different presets/models on same node | Change preset on existing instance, reconfig_restart | One process, zero port conflicts, instant |
+| Benchmark preset A vs B on same hardware | Same instance, switch preset, run bench, switch back | No deploy overhead, clean comparison |
+| Compare cluster configs (RPC bindings, expert split) | Create new instance | Needs separate server process with different config |
+| Different node for same model | Create new instance | Physical separation |
+| RPC offload test | Create `llama_rpc` instance on RPC-capable node, bind to llama_server | Different engine type, different CLI args |
+
+**Agent rule:** If the user says "test preset X" or "run benchmark with Y model", first check if there's already a suitable running instance on that node. Reuse it via preset switch. Only create new instances when you need a **different server process** (different config, different node topology).
+
+**Preset ↔ Engine feedback:** `POST /instances` now returns `_warnings` array when preset's `engine_type_id` doesn't match the instance's engine type. Example:
+```json
+{"status":"ok","data":{...,"_warnings":["Preset engine_type_id=21 (llama_server) does not match instance engine_type_id=22 (llama_rpc)"]}}
+```
+Agents MUST check `_warnings` in create_instance response and auto-correct by selecting an RPC preset (IDs 10-14) for `engine_type_id=22` instances.
+
+**Preset inventory:**
+| Engine | Preset IDs | Count | Purpose |
+|--------|-----------|-------|---------|
+| llama_server (21) | 100+ | 51 | Model-loaded inference, GPU support |
+| llama_rpc (22) | 10-14 | 6 | CPU gRPC serving, thread pool config |

@@ -7,7 +7,7 @@ import sys
 
 logger = logging.getLogger(__name__)
 from engine.base import BaseEngine
-from lib.qr_engine_ids import QR_ENGINE_SCHEDULER_NAME
+from lib.qr_engine_ids import QR_ENGINE_SCHEDULER_NAME, QR_JOB_START, QR_JOB_STOP, QR_JOB_RESTART
 
 
 CAPABILITIES = {
@@ -93,7 +93,7 @@ class SchedulerEngine(BaseEngine):
             raise KeyError("QUICKROBOT_API_PORT not in .quickrobot.env")
         api_port = int(raw_port)
 
-        if command == "start":
+        if command == QR_JOB_START:
             old_pid = inst.get("pid_last_known")
             if old_pid and _get_pid_status(old_pid):
                 import psutil
@@ -139,7 +139,7 @@ class SchedulerEngine(BaseEngine):
                 import ctypes as _ctypes
                 _ctypes.CDLL("libc.so.6").prctl(1, 15)
             except OSError as exc:
-                _log_lifecycle("scheduler", "start", {"error": str(exc)})
+                _log_lifecycle(QR_ENGINE_SCHEDULER_NAME, "start", {"error": str(exc)})
                 return {"error": f"Failed to start scheduler: {exc}", "action": command}
 
             import time as _time; _time.sleep(1)
@@ -147,7 +147,7 @@ class SchedulerEngine(BaseEngine):
             if retcode is not None:
                 stdout, stderr = proc.communicate()
                 _err = (stderr or b"").decode("utf-8", errors="replace").strip()[:500]
-                _log_lifecycle("scheduler", "start", {"crashed": True, "returncode": retcode, "error": _err})
+                _log_lifecycle(QR_ENGINE_SCHEDULER_NAME, "start", {"crashed": True, "returncode": retcode, "error": _err})
                 return {"error": f"Scheduler crashed immediately (rc={retcode}): {_err}",
                         "action": command}
 
@@ -163,10 +163,10 @@ class SchedulerEngine(BaseEngine):
             except Exception as _e:
                 logger.debug("state transition chain for scheduler start failed: %s", _e)
                 pass
-            _log_lifecycle("scheduler", "start", {"pid": new_pid, "api_host": api_host, "api_port": api_port})
+            _log_lifecycle(QR_ENGINE_SCHEDULER_NAME, "start", {"pid": new_pid, "api_host": api_host, "api_port": api_port})
             return {"action": "start", "pid": new_pid, "status": "started"}
 
-        elif command == "stop":
+        elif command == QR_JOB_STOP:
             pid = inst.get("pid_last_known")
             if pid and _get_pid_status(pid):
                 try:
@@ -175,10 +175,10 @@ class SchedulerEngine(BaseEngine):
                 except (_psutil.NoSuchProcess, _psutil.AccessDenied):
                     pass
             update_instance(db_path, instance_id, pid_last_known=None)
-            _log_lifecycle("scheduler", "stop", {"pid": pid})
+            _log_lifecycle(QR_ENGINE_SCHEDULER_NAME, "stop", {"pid": pid})
             return {"action": "stop", "pid": pid}
 
-        elif command == "restart":
+        elif command == QR_JOB_RESTART:
             try:
                 transition_state(db_path, instance_id, "stopping")
             except Exception as _e:
@@ -203,7 +203,7 @@ class SchedulerEngine(BaseEngine):
                 if not _get_pid_status(old_pid):
                     break
                 _time.sleep(0.5)
-            result = self.execute(instance_id, "start", db_path)
+            result = self.execute(instance_id, QR_JOB_START, db_path)
             if old_pid and isinstance(result, dict):
                 result["old_pid"] = old_pid
                 result["pid_changed"] = result.get("pid") != old_pid

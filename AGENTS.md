@@ -4,7 +4,7 @@
 These rules apply to **all agents** operating within the project directory.
 Agent-specific roles and workflows are defined in `.opencode/agents/*.md`.
 
-> **See also:** `SKILL.md` for API usage; `QUICKROBOT.md` for architecture and design patterns.
+> **See also:** `prompts/skill.md` for API usage; `QUICKROBOT.md` for architecture and design patterns.
 
 ### AGENTS.md Session Rule
 
@@ -49,7 +49,7 @@ Before writing code that references engine types, ports, versions, or job states
 1. **Read `lib/qr_engine_ids.py`** — single source of truth for ALL entity constants
 2. **Read `lib/lib_constants.py`** — runtime defaults (not entity definitions)
 3. **Use SSOT constants** — see list below
-4. **Never hardcode** string literals like `"rpc"`, `"8040"`, `"v0.07"` in code
+4. **Never hardcode** string literals like `"rpc"`, `"8040"`, `"v0.10"` in code
 
 **SSOT Constant Reference (all from `lib/qr_engine_ids.py`):**
 
@@ -65,7 +65,7 @@ Before writing code that references engine types, ports, versions, or job states
 | Skipable stages | `SKIPABLE_STAGES` = `{QR_STAGE_SOURCE, QR_STAGE_COMPILE}` | Binary-exists skip logic |
 | Timeout defaults | `QR_TIMEOUT_COMPILE` = 1800, `QR_TIMEOUT_SOURCE` = 600, `QR_TIMEOUT_DEFAULT` = 300 | Playbook execution timeouts |
 | Final states per job | `JOB_FINAL_STATES["deploy"]` → `"running"` | Post-job state resolution |
-| Version | `QUICKROBOT_VERSION` = `"v0.07"` | Display versions, not hardcoded strings |
+| Version | `QUICKROBOT_VERSION` = `"v0.10"` | Display versions, not hardcoded strings |
 | Localhost fallback | `QR_DEFAULT_LOCALHOST` = `"127.0.0.1"` | Bind address fallbacks |
 | System instance ID lookup | `get_system_instance_id("webui")` → 2 | Use this function, not hardcoded instance IDs like `2`, `3`, `4` |
 | ID ↔ name conversion | `get_name_by_id(21)` → `"llama_server"` / `get_id_by_name("llama_rpc")` → 22 | Bidirectional lookup, handles hyphen/underscore aliases |
@@ -209,17 +209,21 @@ After editing any file that supports syntax checking, you MUST run a single-comm
 - **Development:** Use tmux sessions exclusively. Every long-running process gets a named tmux session.
 - **Production:** systemd unit files handle lifecycle (start/stop/restart/status). Agents use API endpoints → systemd takes over.
 
-**API Server — tmux Session (`qr_api`)**
-Socket: `-S /tmp/qr.sock`. Session: `qr_api`. `remain-on-exit on` — survives process crashes.
+**API Server — Detached Session (`qr_api`)**
+Session name: `qr_api`. Set `remain-on-exit on` — survives process crashes.
 
-Create session: `tmux -S /tmp/qr.sock new-session -d -s qr_api`  
-Check status: `tmux -S /tmp/qr.sock has-session -t qr_api 2>&1` (exit 0 = exists)  
-Start: `tmux -S /tmp/qr.sock send-keys -t qr_api 'cd /CORE/projects/quickrobot && python3 quickrobot.py' C-m`  
+> **Note:** We do NOT use a dedicated tmux server on the host. All sessions share
+> the default tmux server (no `-S /tmp/qr.sock`). This avoids socket-path mismatches
+> when multiple agents or scripts try to attach/detach from different sockets.
+
+Create detached session: `tmux new-session -d -s qr_api`  
+Check status: `tmux has-session -t qr_api 2>&1` (exit 0 = exists)  
+Send keys (start): `tmux send-keys -t qr_api 'cd /CORE/projects/quickrobot && python3 quickrobot.py' C-m`  
 Stop: Query PID via `ps aux`, then `kill <PID>`, wait 1s, verify dead.
 
-**Reading output:** Use `-S -` to scrape full scrollback buffer, not just visible screen:
+**Reading output:** Use `-S -` to scrape the full scrollback buffer, not just visible screen:
 ```bash
-tmux -S /tmp/qr.sock capture-pane -t qr_api -p -S - | tail -60
+tmux capture-pane -t qr_api -p -S - | tail -60
 ```
 
 ### 5a.1. Kill + Restart Preflight Sequence
@@ -521,6 +525,46 @@ Only use `POST /instances/<id>/deploy` when:
 - Node IP changed or config_override changed
 - Instance in "unconfigured" state after manual creation with `start_after_deploy=false`
 
+### Preset Change vs Instance Creation — Critical Distinction (2026-07-21)
+
+**Changing preset on existing instance:** Triggers `reconfig_restart` → stops old llama-server → starts new one with different model. ONE model loaded at a time per node. This is the correct way to test different presets/models.
+
+**Creating new instance:** Spawns a NEW llama-server process that loads ANOTHER model. If created on a node that already has a running instance, BOTH models are loaded simultaneously, potentially exceeding available RAM/VRAM and crashing the node.
+
+**Rule of thumb for benchmarking/testing:**
+- Testing different presets/models → `PUT /instances/<id>/config` with new `preset_id` → then `reconfig_restart`
+- Testing different cluster configs (expert split, RPC bindings, tensor_split) → create new instance (need separate server processes with different configs)
+- Never create >1 llama_server instance per node without confirming sufficient memory for ALL models combined
+
+**Example — correct benchmark workflow:**
+```
+1. GET /instances/<id>/status → verify current model
+2. PUT /instances/<id>/config {"preset_id": NNN} → change preset
+3. POST /instances/<id>/reconfig_restart → reload with new model
+4. Wait for "running" state
+5. Run benchmark
+6. Revert to original preset when done
+```
+
+**Example — correct cluster comparison:**
+```
+1. Instance A: llama_server on node X (no expert split, CPU-only)
+2. Instance B: NEW instance on node Y (with expert split bindings to RPC cluster)
+3. Both test same model but DIFFERENT configurations → need separate instances
+```
+
+**Key risk:** Creating 4 new instances for benchmarking 2 presets loaded 4 models across 2 nodes, exhausting memory. Each Qwen3.6-35B-A3B-Q8_0 is ~20GB. Two such instances on dllama1 = 40GB+ vs node VRAM/RAM limits.
+
+### Preset ↔ Engine Type Feedback (2026-07-22)
+
+`POST /instances` returns `_warnings` array when preset's `engine_type_id` doesn't match the instance engine type. Always check `_warnings` in create_instance response:
+```json
+{"_warnings":["Preset engine_type_id=21 (llama_server) does not match instance engine_type_id=22 (llama_rpc)"]}
+```
+- **llama_server presets:** IDs 100+ (model-loaded inference, GPU support)
+- **llama_rpc presets:** IDs 10-14 (CPU gRPC serving, thread pool config)
+- Using a llama_server preset on an RPC instance → wrong CLI args, model loading attempts on a service that doesn't load models
+
 ### State Transition Quick Reference
 | State | Meaning |
 |-------|---------|
@@ -539,11 +583,11 @@ Only use `POST /instances/<id>/deploy` when:
 |-------|-----|
 | Instance creation & deploy workflow | §18 above (auto-deploy, job checking, state transitions) |
 | Database structure, tables, engine IDs, seed file | `QUICKROBOT.md` §Database + §Seed File |
-| Security (root guards, snakeoil model) | `QUICKROBOT.md` §Security |
-| API endpoint reference + MCP tools | `SKILL.md` |
+| Security (root guards, auth layers) | `QUICKROBOT.md` §Security |
+| API endpoint reference + MCP tools | `prompts/skill.md` |
 | Architecture, merge chains, playbook registry | `QUICKROBOT.md` |
 | Task list (open items) | `docs/TODO.md` |
-| Full task history | `docs/TODO_done.md` |
+| Full task history | `docs/TODO_done_v010.md` |
 | Ansible JSON format details | `docs/ansible_output_format.md` |
 | Sortable table pattern | `docs/sortable_tables.md` |
 | Changelog | `CHANGELOG.md` |

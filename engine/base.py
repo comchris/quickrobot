@@ -21,6 +21,10 @@ Each engine controls a specific type of service deployed on remote nodes.
 import abc
 import logging
 
+from lib.lib_engine_config import set_config as _set_config, get_config as _get_config
+from lib.lib_engine_command import execute as _execute, forward_request as _forward_request
+from lib.lib_engine_resources import list_resources as _list_res, get_presets as _get_preset, set_active_preset as _set_preset
+
 logger = logging.getLogger(__name__)
 
 
@@ -77,102 +81,116 @@ class BaseEngine(abc.ABC):
         """
         raise NotImplementedError
 
-    @abc.abstractmethod
     def set_config(self, instance_id, config_dict, db_path=None):
         """Apply a configuration update to a running instance.
+
+        Default stub — all engines use this identical implementation.
+        Actual persistence is handled by the API layer (config_override).
 
         Args:
             instance_id: Integer primary key of the instance.
             config_dict: dict of configuration parameters to apply.
-            db_path: Optional database path (required for system-managed engines).
+            db_path: Optional database path.
 
         Returns:
-            dict with updated configuration.
+            dict with engine, instance_id, config, applied=True.
         """
-        raise NotImplementedError
+        return _set_config(self._name, instance_id, config_dict, db_path)
 
-    @abc.abstractmethod
     def get_config(self, instance_id, db_path=None):
         """Retrieve the current running configuration of an instance.
 
+        Default stub — all engines use this identical implementation.
+        Actual config is resolved at deploy time via config merge chain.
+
         Args:
             instance_id: Integer primary key of the instance.
-            db_path: Optional database path (required for system-managed engines).
+            db_path: Optional database path.
 
         Returns:
-            dict with the instance's current configuration.
+            dict with engine, instance_id, config={} (empty).
         """
-        raise NotImplementedError
+        return _get_config(self._name, instance_id, db_path)
 
-    @abc.abstractmethod
     def execute(self, instance_id, command, db_path=None, **kwargs):
         """Execute a command on a running engine instance.
+
+        Default stub — used by llama_server, llama_rpc, and iperf3.
+        Subprocess overrides with full PID/state management logic.
 
         Args:
             instance_id: Integer primary key of the instance.
             command: Command string or dict of parameters to send.
-            db_path: Optional database path (required for system-managed engines).
-            **kwargs: Additional arguments (timeout, extra_vars, etc.).
+            db_path: Optional database path.
+            **kwargs: Additional arguments (ignored in stub).
 
         Returns:
             dict with execution result.
         """
-        raise NotImplementedError
+        return _execute(self._name, instance_id, command, db_path, **kwargs)
 
-    @abc.abstractmethod
     def list_resources(self, instance_id, db_path=None):
         """List available resources (models, presets) for an engine instance.
 
+        Default stub — engines that need custom resource listing (llama_server,
+        iperf3) override this method. Others inherit the empty-list stub.
+
         Args:
             instance_id: Integer primary key of the instance.
-            db_path: Optional database path (required for system-managed engines).
+            db_path: Optional database path.
 
         Returns:
-            dict with resource listings (models, presets, etc.).
+            dict with resource listings (models=[], presets=[]).
         """
-        raise NotImplementedError
+        return _list_res(self._name, instance_id, db_path)
 
-    @abc.abstractmethod
     def get_presets(self, engine_type_id, db_path=None):
         """Get available presets for an engine type.
 
+        Default stub — returns empty list. Presets are managed via API
+        endpoints that query the DB at runtime.
+
         Args:
             engine_type_id: Integer primary key of the engine type.
-            db_path: Optional database path (required for system-managed engines).
+            db_path: Optional database path.
 
         Returns:
-            list of preset dicts.
+            Empty list (presets loaded via API).
         """
-        raise NotImplementedError
+        return _get_preset(self._name, engine_type_id, db_path)
 
-    @abc.abstractmethod
     def set_active_preset(self, instance_id, preset_id, db_path=None):
         """Set or change the active preset for an instance.
+
+        Default stub — returns placeholder success dict. Actual preset
+        assignment is handled by the API layer (instance.preset_id column).
 
         Args:
             instance_id: Integer primary key of the instance.
             preset_id: Integer primary key of the target preset.
-            db_path: Optional database path (required for system-managed engines).
+            db_path: Optional database path.
 
         Returns:
-            dict with updated instance data and merged config.
+            dict with engine, instance_id, preset_id, applied=True.
         """
-        raise NotImplementedError
+        return _set_preset(self._name, instance_id, preset_id, db_path)
 
-    @abc.abstractmethod
     def forward_request(self, instance_id, method, params=None, db_path=None):
         """Forward an RPC-style request to a running engine instance.
+
+        Default stub — used by llama_server, llama_rpc, and iperf3.
+        Returns placeholder result; actual forwarding via API proxy.
 
         Args:
             instance_id: Integer primary key of the instance.
             method: RPC method name string.
             params: Optional dict of parameters.
-            db_path: Optional database path (required for system-managed engines).
+            db_path: Optional database path.
 
         Returns:
-            dict with the response from the remote engine.
+            dict with engine, instance_id, method, params, result=None.
         """
-        raise NotImplementedError
+        return _forward_request(self._name, instance_id, method, params, db_path)
 
 
 # Global engine registry

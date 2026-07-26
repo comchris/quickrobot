@@ -1,15 +1,19 @@
 # @name: Get Instance Logs
-# @playbook_id: NODE_GET_INSTANCE_LOGS_V1
-# @version: 1
+# @playbook_id: get_instance_logs
+# @version: 2
 # @timeout: 30
 # get_instance_logs.yml — Fetch systemd journal logs for a quickrobot instance
-# Uses extra_vars: target_host, log_instance, log_lines
+# Uses extra_vars: target_host, log_instance_id, log_engine_type, log_lines
 - hosts: "{{ target_host }}"
   gather_facts: no
   become: yes
+
+  vars:
+    unit_name: "qr-{{ log_instance_id }}-{{ log_engine_type }}"
+
   tasks:
     - name: Get journal logs
-      ansible.builtin.command: "journalctl -u qr-{{ log_instance }} --utc --no-pager -n {{ log_lines }}"
+      ansible.builtin.command: "journalctl -u {{ unit_name }} --utc --no-pager -n {{ log_lines }}"
       register: _journal_output
       changed_when: false
       failed_when: false

@@ -3,6 +3,7 @@
   <h1 style="margin:0;font-size:1.3em;">Presets</h1>
   <span style="display:inline-block;padding:2px 8px;background:#555;color:#fff;border-radius:10px;font-size:0.75em;font-weight:normal;" title="Total presets matching current filters">{{ preset_count }}</span>
   <a href="/webui/engine/{{ engine_type }}/presets/create" class="btn btn-primary" style="display:inline-block;padding:4px 12px;border-radius:4px;text-decoration:none;font-size:0.85em;">+ Add Preset</a>
+  <button id="remove-empty-btn" class="btn btn-warning" style="display:inline-block;padding:4px 10px;border-radius:4px;text-decoration:none;font-size:0.85em;margin-left:auto;">Remove Empty</button>
   <form method="get" action="/webui/engine/{{ engine_type }}/presets" id="filter-form" style="display:flex;gap:6px;align-items:center;margin:0;">
     <input type="text" name="q" placeholder="Search..." value="{{ search_q }}"
            style="padding:4px 10px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;" />
@@ -147,5 +148,57 @@ qrApi('/engine/' + engine + '/presets/' + id + '/clone', {method: 'POST'})
         }).catch(function(e) { alert('Load failed: ' + e); });
     });
   });
+
+  // Remove Empty button handler
+  var _reb = document.getElementById('remove-empty-btn');
+  if (_reb) {
+    _reb.addEventListener('click', function() {
+      var engine = '{{ engine_type }}';
+      var btn = this;
+      btn.disabled = true;
+      btn.textContent = 'Checking...';
+      qrApi('/engine/' + encodeURIComponent(engine) + '/presets/remove-empty', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({})})
+         .then(function(data) {
+           if (data.status !== 'ok') throw new Error(data.message || 'Unknown');
+           var presets = data.data ? data.data.presets : [];
+           var count = presets.length;
+           var skipped = data.data ? (data.data.skipped_count || 0) : 0;
+           if (count === 0) {
+             alert('No empty presets found to remove.');
+             btn.disabled = false;
+             btn.textContent = 'Remove Empty';
+             return;
+           }
+           var info = 'Remove ' + count + ' preset(s) with no model assigned?\n\n';
+           if (skipped > 0) info += '(' + skipped + ' preset(s) in use by instances will be skipped)\n';
+           info += 'Presets to remove: ' + presets.map(function(p) { return p.name; }).join(', ');
+           if (!confirm(info)) {
+             btn.disabled = false;
+             btn.textContent = 'Remove Empty';
+             return;
+           }
+           var presetIds = presets.map(function(p) { return p.id; });
+           qrApi('/engine/' + encodeURIComponent(engine) + '/presets/remove-empty/confirm', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({preset_ids: presetIds})})
+             .then(function(cdata) {
+               if (cdata.status === 'ok') {
+                 alert('Removed ' + (cdata.data ? cdata.data.deleted_count : count) + ' preset(s).');
+                 window.location.href = '/webui/engine/' + encodeURIComponent(engine) + '/presets';
+               } else {
+                 btn.disabled = false;
+                 btn.textContent = 'Remove Empty';
+                 alert('Remove failed: ' + (cdata.message || 'Unknown'));
+               }
+             }).catch(function(e) {
+               btn.disabled = false;
+               btn.textContent = 'Remove Empty';
+               alert('Error: ' + e.message);
+             });
+         }).catch(function(e) {
+           btn.disabled = false;
+           btn.textContent = 'Remove Empty';
+           alert('Check failed: ' + e.message);
+         });
+    });
+  }
 })();
 </script>

@@ -516,6 +516,65 @@ def reset_counters(db_path, prompt_id=None):
             return conn.total_changes
 
 
+def increment_prompt_usage_counter(db_path, prompt_id):
+    """Increment usage counter for a prompt in the engine_prompts table.
+
+    Call when an MCP agent successfully invokes a prompt tool.
+    Counter resets on explicit admin reset (reset-counters endpoint).
+
+    Args:
+        db_path: Path to the SQLite database.
+        prompt_id: Stable prompt identifier (e.g. "designer-system-prompt").
+
+    Returns:
+        True if updated successfully, False if prompt not found.
+    """
+    from db.sqlite import pool
+
+    with pool(db_path) as conn:
+        row = conn.execute(
+            "SELECT id FROM engine_prompts WHERE prompt_id = ?",
+            (prompt_id,),
+        ).fetchone()
+        if row:
+            conn.execute(
+                "UPDATE engine_prompts SET usage_counter_since_update = usage_counter_since_update + 1 WHERE id = ?",
+                (row[0],),
+            )
+            return True
+    return False
+
+
+def increment_prompt_error_counter(db_path, prompt_id):
+    """Increment error counter for a prompt in the engine_prompts table.
+
+    Call when an MCP agent invokes a prompt but it fails to serve
+    (checksum mismatch, file missing, read error).
+    Counter resets on explicit admin reset (reset-counters endpoint).
+
+    Args:
+        db_path: Path to the SQLite database.
+        prompt_id: Stable prompt identifier.
+
+    Returns:
+        True if updated successfully, False if prompt not found.
+    """
+    from db.sqlite import pool
+
+    with pool(db_path) as conn:
+        row = conn.execute(
+            "SELECT id FROM engine_prompts WHERE prompt_id = ?",
+            (prompt_id,),
+        ).fetchone()
+        if row:
+            conn.execute(
+                "UPDATE engine_prompts SET error_counter_since_update = error_counter_since_update + 1 WHERE id = ?",
+                (row[0],),
+            )
+            return True
+    return False
+
+
 def bump_version(db_path, prompt_id):
     """Increment prompt version and write audit record.
 

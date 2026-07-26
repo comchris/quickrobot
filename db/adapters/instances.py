@@ -42,12 +42,11 @@ VALID_TRANSITIONS = {
     "build_error": ["configuring", "error", "unconfigured", "starting", "running", "updating", "stopping"],
     "deployed": ["starting", "running", "stopped", "error", "unconfigured", "updating", "build_error", "compiling", "stopping"],
     "starting": ["running", "error", "timeout", "stopping"],
-    "running": ["stopping", "error", "test_mode", "updating", "compiling"],
+    "running": ["stopping", "error", "updating", "compiling"],
     "stopping": ["stopped", "running", "starting", "deployed", "configuring", "error", "timeout"],
-    "stopped": ["starting", "running", "configuring", "stopping", "error", "test_mode", "unconfigured", "compiling", "updating"],
+    "stopped": ["starting", "running", "configuring", "stopping", "error", "unconfigured", "compiling", "updating"],
     "error": ["unconfigured", "configuring", "deploying", "starting", "stopping", "updating", "build_error", "compiling", "running", "error"],
     "timeout": ["error", "stopping"],
-    "test_mode": ["running", "stopped", "error", "stopping"],
     "updating": ["running", "deployed", "build_error", "error", "timeout", "unconfigured", "stopping"],
     "compiling": ["deployed", "error", "timeout", "stopping"],
 }
@@ -420,7 +419,7 @@ def update_instance(db_path, instance_id, **fields):
                "start_on_boot", "restart_policy", "gpu_device", "instance_uuid", "last_state_change",
                "rpc_bind_ids", "split_mode", "tensor_split", "split",
                 "experts", "draft", "cli_flags",
-               "node_hostname", "node_name"}
+               "node_hostname", "node_name", "target_instance_ids"}
     updates = {k: v for k, v in fields.items() if k in allowed}
     if not updates:
         raise InstanceError("No valid fields to update")

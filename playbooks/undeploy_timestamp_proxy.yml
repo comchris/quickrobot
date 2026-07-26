@@ -1,0 +1,11 @@
+# @name: Undeploy Timestamp Proxy
+# @playbook_id: undeploy_timestamp_proxy
+# @version: 1
+# undeploy_timestamp_proxy.yml — Remove timestamp_proxy binary, env file, and systemd service
+- hosts: "{{ inventory_host }}"
+  become: yes
+  vars:
+    unit_name: "qr-{{ instance_id }}-timestamp_proxy"
+    pkill_pattern: "timestamp_proxy_server"
+  tasks:
+    - import_tasks: "{{ playbook_dir }}/common/undeploy_base.yml"

@@ -101,6 +101,11 @@ def load_system_engine_config():
     Returns logging config as part of qr_env dict for later consumption
     by quickrobot.py after _CONFIG is defined.
 
+    Per-engine log levels (Phase 2 of LOG-CONSOLIDATE):
+    - Reads QUICKROBOT_<ENGINE>_LOG_LEVEL env vars (scheduler, mcp, webui, api)
+    - Falls back to QUICKROBOT_CONSOLE_DEBUG_LEVEL if per-engine var absent
+    - Numeric value >= 10 means DEBUG, < 10 means WARNING (quiet production)
+
     Returns:
         Tuple of (parsed_config, console_debug_level, ansible_log_level).
         The tuple unpacking lets the caller set _CONFIG keys at the right time.
@@ -108,16 +113,35 @@ def load_system_engine_config():
     from lib import lib_constants as _lc
 
     qr_env = load_env_strict()
+
+    # Legacy single console level — kept for backward compatibility
     console_level = qr_env.get("QUICKROBOT_CONSOLE_DEBUG_LEVEL")
     if console_level is not None:
         try:
             _lc.QUICKROBOT_CONSOLE_DEBUG_LEVEL = int(console_level)
         except ValueError:
             pass
+
     ansible_level = qr_env.get("QUICKROBOT_ANSIBLE_LOG_LEVEL", "errors")
     if ansible_level not in ("errors", "warnings", "all"):
         ansible_level = "errors"
-    return (qr_env, _lc.QUICKROBOT_CONSOLE_DEBUG_LEVEL, ansible_level)
+
+    # Per-engine log levels (LOG-CONSOLIDATE Phase 2)
+    _engine_names = ("scheduler", "mcp", "webui", "api")
+    _per_engine = {}
+    for _name in _engine_names:
+        _key = f"QUICKROBOT_{_name.upper()}_LOG_LEVEL"
+        _val = qr_env.get(_key)
+        if _val is not None:
+            try:
+                _per_engine[_name] = int(_val)
+            except (ValueError, TypeError):
+                _per_engine[_name] = 0  # WARNING
+        elif console_level is not None:
+            # Fallback to legacy single console level if per-engine var absent
+            _per_engine[_name] = int(console_level)
+
+    return (qr_env, _lc.QUICKROBOT_CONSOLE_DEBUG_LEVEL, ansible_level, _per_engine)
 
 
 def backup_database(db_path):
@@ -177,7 +201,7 @@ def resolve_seed_path(project_root=None):
         from qr_api import _project_root
         project_root = _project_root
     if _seed_file_path is None:
-        _seed_file_path = os.path.join(project_root, "data", "_seed", "seed_v009.sql")
+        _seed_file_path = os.path.join(project_root, "data", "_seed", "seed_v010.sql")
     return _seed_file_path
 
 
@@ -185,7 +209,8 @@ def import_seed_file(db_path):
     """Import seed SQL into the database.
 
     Seed file contains INSERT OR REPLACE statements for models, presets,
-    engine_types, engine_configs, playbook_registry, and benchmark_prompts.
+    engine_types, playbook_registry, and benchmark_prompts.
+    engine_configs moved to 010_base.sql (v0.10 split).
 
     Only runs on fresh DB creation (gated by _db_was_created flag).
     Never re-imports on existing DB startup — seed is one-time only.

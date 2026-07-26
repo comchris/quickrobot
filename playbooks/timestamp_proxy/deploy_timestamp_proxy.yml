@@ -1,0 +1,37 @@
+# @name: Deploy Timestamp Proxy — Install Binary
+# @playbook_id: deploy_timestamp_proxy
+# @version: 1
+# @timeout: 30
+# deploy_timestamp_proxy.yml — Copy timestamp proxy Python script to remote node
+# Runs as root (become: yes). Creates directory, copies script, sets permissions.
+- hosts: "{{ inventory_host }}"
+  become: yes
+  gather_facts: no
+
+  vars:
+    unit_name: "qr-{{ instance_id }}-{{ engine_type }}"
+    install_dir: "/opt/quickrobot/{{ unit_name }}"
+    script_path: "{{ install_dir }}/timestamp_proxy_server.py"
+    # Source path — resolved at playbook runtime from project root
+    _project_root: "{{ playbook_dir | dirname | dirname }}"
+
+  tasks:
+    - name: Create per-instance install directory
+      file:
+        path: "{{ install_dir }}"
+        state: directory
+        mode: '0755'
+        owner: "{{ remote_node_user }}"
+
+    - name: Copy timestamp proxy server script to remote node
+      copy:
+        src: "{{ _project_root }}/engine/timestamp_proxy_server.py"
+        dest: "{{ script_path }}"
+        mode: '0755'
+        owner: "{{ remote_node_user }}"
+
+    - name: Verify script installed correctly
+      stat:
+        path: "{{ script_path }}"
+      register: _script_stat
+      failed_when: not _script_stat.stat.exists

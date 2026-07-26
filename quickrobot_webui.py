@@ -37,15 +37,19 @@ import logging
 import os
 import socket
 import sys
+import threading
+import time
 from datetime import datetime
 
-logger = logging.getLogger(__name__)
+# LOG-CONSOLIDATE: use shared dual logger (console + file) with runtime level control
+import lib.lib_logging as _ll
+logger = _ll.create_logger("webui")
 from lib.qr_engine_ids import (
     QR_DEFAULT_LOCALHOST,
     QR_ENGINE_API_NAME, QR_ENGINE_LLAMA_SERVER, QR_ENGINE_LLAMA_RPC,
     QR_ENGINE_LLAMA_SERVER_NAME, QR_ENGINE_LLAMA_RPC_NAME,
     QR_ENGINE_MCP_NAME, QR_ENGINE_SCHEDULER_NAME, QR_ENGINE_SUBPROCESS_NAME,
-    QR_ENGINE_UNIVERSAL_NAME, QR_ENGINE_WEBUI, QR_ENGINE_WEBUI_NAME,
+    QR_ENGINE_TIMESTAMP_PROXY_NAME, QR_ENGINE_UNIVERSAL_NAME, QR_ENGINE_WEBUI, QR_ENGINE_WEBUI_NAME,
     QR_FORBIDDEN_HOSTS,
     _QR_NAV_DISPLAY_NAMES, _QR_NAV_LLAMA_NAMES, _QR_NAV_NO_CONFIG,
     _QR_NAV_SHORT_ALIASES, _QR_NAV_SECTION_MAP, _QR_SYSTEM_NAMES,
@@ -77,8 +81,9 @@ if os.getuid() == 0:
     print("this robot won't run as root", file=sys.stderr)
     sys.exit(1)
 
-from flask import Flask, request, Response, jsonify, redirect, url_for, render_template, send_from_directory
+from flask import Flask, request, Response, jsonify, redirect, url_for, render_template, send_from_directory, session
 from markupsafe import Markup
+from waitress import serve
 
 from lib.lib_constants import DEFAULT_ANSIBLE_USER, VERSION, DEFAULT_TIMEZONE
 from lib.qr_engine_registry import is_system_engine, get_engine_by_name, get_display_name
@@ -92,6 +97,105 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 app = Flask(__name__, template_folder='webui')
+
+# Session secret key — used for signed Flask cookies.
+# Reads from QUICKROBOT_WEBUI_SESSION_KEY env var, generates one if not set.
+import secrets as _secrets
+_session_key = os.getenv("QUICKROBOT_WEBUI_SESSION_KEY", "")
+app.secret_key = _session_key if _session_key else _secrets.token_urlsafe(32)
+
+# ---------------------------------------------------------------------------
+# WebUI Login Rate Limiter — failed attempt tracking with exponential backoff
+# ---------------------------------------------------------------------------
+# Tracks failed password attempts per client IP. After N consecutive failures,
+# blocks further attempts for an exponentially increasing delay window.
+# Logs all attempts (success + failure) to console and file via the webui logger.
+
+_WEBUI_RATE_MAX_ATTEMPTS = int(os.getenv("QUICKROBOT_WEBUI_RATE_LIMIT", "5"))
+_WEBUI_RATE_BASE_DELAY = int(os.getenv("QUICKROBOT_WEBUI_RATE_BASE_DELAY", "10"))
+_WEBUI_RATE_MAX_DELAY = int(os.getenv("QUICKROBOT_WEBUI_RATE_MAX_DELAY", "300"))
+
+# In-memory store: {client_ip: [(timestamp, success_bool), ...]}
+# Only recent entries (last 5 min) are kept.
+_WEBUI_FAILED_ATTEMPTS: dict[str, list[tuple[float, bool]]] = {}
+_WEBUI_RATE_LOCK = threading.Lock()
+
+
+def _webui_rate_cleanup():
+    """Remove entries older than 5 minutes from the rate limiter store."""
+    cutoff = time.time() - 300
+    with _WEBUI_RATE_LOCK:
+        expired_ips = []
+        for ip, attempts in _WEBUI_FAILED_ATTEMPTS.items():
+            try:
+                timestamps = [a[0] for a in attempts]
+            except (TypeError, IndexError):
+                expired_ips.append(ip)
+                continue
+            if all(t < cutoff for t in timestamps):
+                expired_ips.append(ip)
+        for ip in expired_ips:
+            del _WEBUI_FAILED_ATTEMPTS[ip]
+
+
+def check_webui_login_rate_limit(client_ip: str) -> tuple[bool, int, str]:
+    """Check rate limit for a client IP.
+
+    Returns: (allowed, delay_seconds, message)
+      - allowed=True  → proceed with login
+      - allowed=False → blocked; delay is seconds to wait
+    """
+    _webui_rate_cleanup()
+    now = time.time()
+
+    with _WEBUI_RATE_LOCK:
+        if client_ip not in _WEBUI_FAILED_ATTEMPTS:
+            return True, 0, ""
+
+        attempts = _WEBUI_FAILED_ATTEMPTS[client_ip]
+        # Keep only failed attempts within the sliding window
+        recent_failures = [a for a in attempts if a[1] is False and a[0] > now - 300]
+        _WEBUI_FAILED_ATTEMPTS[client_ip] = recent_failures
+
+        if len(recent_failures) < _WEBUI_RATE_MAX_ATTEMPTS:
+            return True, 0, ""
+
+        # Calculate backoff: base_delay * 2^(attempt_index - max_attempts)
+        attempt_idx = len(recent_failures) - _WEBUI_RATE_MAX_ATTEMPTS + 1
+        delay = min(_WEBUI_RATE_BASE_DELAY * (2 ** attempt_idx), _WEBUI_RATE_MAX_DELAY)
+
+        last_attempt = recent_failures[-1][0] if recent_failures else now
+        remaining = int(delay - (now - last_attempt))
+        if remaining < 0:
+            return True, 0, ""
+
+        return False, remaining, f"Too many failed attempts. Try again in {remaining}s."
+
+
+def _webui_rate_record(client_ip: str, success: bool):
+    """Record a login attempt result (True=success, False=failed).
+
+    Only failed attempts are tracked. On success, the failure counter resets.
+    All attempts are logged to console and file.
+    """
+    now = time.time()
+    with _WEBUI_RATE_LOCK:
+        if success:
+            _WEBUI_FAILED_ATTEMPTS[client_ip] = []
+        else:
+            if client_ip not in _WEBUI_FAILED_ATTEMPTS:
+                _WEBUI_FAILED_ATTEMPTS[client_ip] = []
+            _WEBUI_FAILED_ATTEMPTS[client_ip].append((now, False))
+
+    if success:
+        short_pw = (os.getenv("QUICKROBOT_WEBUI_PASSWORD", "???") or "")[:10] + "..."
+        logger.info("LOGIN SUCCESS ip=%s password_prefix=%s", client_ip, short_pw)
+    else:
+        with _WEBUI_RATE_LOCK:
+            count = len([a for a in _WEBUI_FAILED_ATTEMPTS.get(client_ip, []) if not a[1]])
+        logger.warning("LOGIN FAILED ip=%s failure_count=%d max=%d",
+                       client_ip, count, _WEBUI_RATE_MAX_ATTEMPTS)
+
 
 # Register Jinja2 template filters for badge rendering
 def _format_bytes_py(bytes_val):
@@ -192,6 +296,7 @@ def _resolve_api_base():
 
 CONFIG = {
     "api_base": _resolve_api_base(),
+    "api_token": "",  # Set during startup from parsed args or env var
 }
 
 # Load engine registry for is_system_engine() filtering
@@ -228,9 +333,15 @@ def api_get(path, params=None):
     try:
         req = urllib.request.Request(url)
         req.add_header("Accept", "application/json")
+        if CONFIG.get("api_token"):
+            req.add_header("X-API-Key", CONFIG["api_token"])
         with urllib.request.urlopen(req, timeout=60) as resp:
             import json
             return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            logger.warning("WEBUI AUTH FAIL: %s → 401 (token=%s)", path, CONFIG.get("api_token", "")[:20] + "...")
+        return {"error": f"HTTP {exc.code}: {exc.reason}"}
     except Exception as exc:
         return {"error": str(exc)}
 
@@ -253,8 +364,14 @@ def api_post(path, data=None):
         req = urllib.request.Request(url, data=body, method="POST")
         req.add_header("Content-Type", "application/json")
         req.add_header("Accept", "application/json")
+        if CONFIG.get("api_token"):
+            req.add_header("X-API-Key", CONFIG["api_token"])
         with urllib.request.urlopen(req, timeout=120) as resp:
             return _json.loads(resp.read().decode())
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            logger.warning("WEBUI AUTH FAIL: POST %s → 401 (token=%s)", path, CONFIG.get("api_token", "")[:20] + "...")
+        return {"error": f"HTTP {exc.code}: {exc.reason}"}
     except Exception as exc:
         return {"error": str(exc)}
 
@@ -274,8 +391,14 @@ def api_delete(path):
     try:
         req = urllib.request.Request(url, method="DELETE")
         req.add_header("Accept", "application/json")
+        if CONFIG.get("api_token"):
+            req.add_header("X-API-Key", CONFIG["api_token"])
         with urllib.request.urlopen(req, timeout=120) as resp:
             return _json.loads(resp.read().decode())
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            logger.warning("WEBUI AUTH FAIL: DELETE %s → 401 (token=%s)", path, CONFIG.get("api_token", "")[:20] + "...")
+        return {"error": f"HTTP {exc.code}: {exc.reason}"}
     except Exception as exc:
         return {"error": str(exc)}
 
@@ -556,6 +679,10 @@ def render_nav(active, engine_types=None):
      """
     pages = ["dashboard", "hosts", "instances", "models", "logs", "engines"]
     nav = {p: ' class="active"' if p == active else "" for p in pages}
+    # Pass api_token to base template so all pages have QR_API_TOKEN set
+    nav["api_token"] = CONFIG.get("api_token", "")
+    # Pass password flag so base.html shows/hides logout link consistently
+    nav["qr_webui_password_set"] = _webui_password_required()
 
     # Build engine sections: 3 groups (LLAMA.cpp, Misc, System)
     llama_section = {"header": "LLAMA.cpp", "items": []}
@@ -615,8 +742,20 @@ def render_nav(active, engine_types=None):
     if "quickrobot-api" in [e.get("name") for e in engine_types or []] or \
         "quickrobot-webui" in [e.get("name") for e in engine_types or []] or \
         "quickrobot-mcp" in [e.get("name") for e in engine_types or []]:
-         system_section["items"].append('<li><a href="/webui/prompts">Prompts</a></li>')
-         system_section["items"].append('<li><a href="/webui/playbooks">Playbooks</a></li>')
+        system_section["items"].append('<li><a href="/webui/prompts">Prompts</a></li>')
+        system_section["items"].append('<li><a href="/webui/playbooks">Playbooks</a></li>')
+
+    # System engine config links (api, webui, mcp, scheduler)
+    _sys_links = {
+        "quickrobot-api": "API",
+        "quickrobot-webui": "WebUI",
+        "quickrobot-mcp": "MCP",
+        "quickrobot-scheduler": "Scheduler",
+    }
+    for et in engine_types or []:
+        et_name = et.get("name", "")
+        if et_name in _sys_links:
+            system_section["items"].append(f'<li><a href="/webui/engine/{et_name}/config">{_sys_links[et_name]}</a></li>')
 
     engines_nav_data = []
     for s in [llama_section, misc_section, system_section]:
@@ -762,6 +901,8 @@ def make_html(title, nav_state, content, engine_types=None):
         tasks=nav.get("tasks", ""),
         engines_nav=engines_nav_data,
         content=Markup(content),
+        api_token=CONFIG.get("api_token", ""),
+        qr_webui_password_set=_webui_password_required(),
     )
 
 
@@ -789,6 +930,65 @@ def webui_static(filename):
 
 
 # ---------------------------------------------------------------------------
+# WebUI User Session / Login
+# ---------------------------------------------------------------------------
+
+def _webui_password_required():
+    """Check if password auth is enabled (QUICKROBOT_WEBUI_PASSWORD is non-empty)."""
+    return os.getenv("QUICKROBOT_WEBUI_PASSWORD", "").strip() != ""
+
+def login_required(f):
+    """Decorator: if password auth is enabled, require valid session before rendering page."""
+    from functools import wraps
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not _webui_password_required():
+            return f(*args, **kwargs)  # No password set → allow access
+        if not session.get("_qr_logged_in"):
+            return redirect(url_for("webui_login"))
+        return f(*args, **kwargs)
+    return decorated
+
+@app.route("/webui/login", methods=["GET", "POST"])
+def webui_login():
+    """Login page — shows password form if QUICKROBOT_WEBUI_PASSWORD is set."""
+    client_ip = request.remote_addr or "unknown"
+    
+    if not _webui_password_required():
+        return redirect("/webui/")  # No password → skip login entirely
+    
+    if request.method == "POST":
+        submitted = (request.form.get("password") or "").strip()
+        expected = os.getenv("QUICKROBOT_WEBUI_PASSWORD", "").strip()
+        
+        # Check rate limit before processing
+        allowed, delay, msg = check_webui_login_rate_limit(client_ip)
+        if not allowed:
+            _webui_rate_record(client_ip, False)
+            return render_template('login.html', error=msg), 429
+        
+        # Validate password
+        if submitted and submitted == expected:
+            _webui_rate_record(client_ip, True)
+            session["_qr_logged_in"] = True
+            session.permanent = True  # cookie survives browser close
+            return redirect(url_for("webui_dashboard"))
+        
+        _webui_rate_record(client_ip, False)
+        error_msg = "Incorrect password"
+        if delay:
+            error_msg += f" ({delay}s cooldown)"
+        return render_template('login.html', error=error_msg), 401
+    
+    return render_template('login.html')
+
+@app.route("/webui/logout")
+def webui_logout():
+    """Clear session and redirect to login."""
+    session.clear()
+    return redirect(url_for("webui_login"))
+
+# ---------------------------------------------------------------------------
 # Page routes
 # ---------------------------------------------------------------------------
 
@@ -799,6 +999,7 @@ def webui_root():
 
 
 @app.route("/webui/")
+@login_required
 def webui_dashboard():
     """Main dashboard showing overview stats."""
     data = api_get("")
@@ -819,6 +1020,7 @@ def webui_dashboard():
 
 
 @app.route("/webui/hosts")
+@login_required
 def webui_hosts():
     """List all managed nodes/hosts with client-side column sorting and actions."""
     # Check URL param first, then cookie (set by JS on filter toggle), default to false
@@ -865,6 +1067,7 @@ def webui_hosts():
 
 
 @app.route("/webui/nodes/new", methods=["GET", "POST"])
+@login_required
 def webui_nodes_new():
     """Add a new node page with form and validation."""
     if request.method == "POST":
@@ -948,6 +1151,7 @@ Check that the hostname resolves and SSH (port {{ ssh_port }}) is accessible.
 
 
 @app.route("/webui/engines")
+@login_required
 def webui_engines():
     """List all engine types."""
     data = api_get("engines")
@@ -962,6 +1166,7 @@ def webui_engines():
 
 
 @app.route("/webui/iperf3")
+@login_required
 def webui_iperf3():
     """Merged iperf3 page: engine config + presets list on one page."""
     data = api_get("engines")
@@ -972,6 +1177,7 @@ def webui_iperf3():
 
 
 @app.route("/webui/rpc")
+@login_required
 def webui_rpc():
     """Merged RPC page: engine config + presets list on one page."""
     data = api_get("engines")
@@ -982,6 +1188,7 @@ def webui_rpc():
 
 
 @app.route("/webui/models")
+@login_required
 def webui_models():
     """Unified models page — single hub for all engine models."""
     from flask import request as _request
@@ -1022,6 +1229,7 @@ def webui_models():
 
 
 @app.route("/webui/models/<int:model_id>/edit")
+@login_required
 def webui_model_edit(model_id):
     """Edit a model entry (global, not per-engine)."""
     data = api_get(f"models/{model_id}")
@@ -1041,12 +1249,13 @@ def webui_model_edit(model_id):
             cats_set.add(str(c))
     categories = sorted(cats_set)
     nav, engines_nav = render_nav("engines", get_engine_types())
-    content = render_template('models_edit.html', model=m, model_id=model_id, categories=categories)
+    content = render_template('models_edit.html', model=m, model_id=model_id, engine_type=m.get("engine_type_name", "llama_server"), categories=categories)
     return render_template('base.html', title=f"Edit Model -- {m.get('name', model_id)}",
                            engines_nav=engines_nav, **nav, content=Markup(content))
 
 
 @app.route("/webui/models/create", methods=["GET"])
+@login_required
 def webui_model_create():
     """Create a new global model entry."""
     nav, engines_nav = render_nav("engines", get_engine_types())
@@ -1064,6 +1273,7 @@ def webui_model_create():
 
 
 @app.route("/webui/instances")
+@login_required
 def webui_instances():
     """List all instances with filter controls."""
     filter_host = request.args.get("host") or request.args.get("filter_host") or ""
@@ -1209,6 +1419,7 @@ def webui_instances():
 
 
 @app.route("/webui/instances/new", methods=["GET"])
+@login_required
 def webui_instances_new():
     """Create new instance page with engine-specific configuration.
 
@@ -1277,6 +1488,7 @@ def webui_instances_new():
 
 
 @app.route("/webui/nodes/<int:node_id>")
+@login_required
 def webui_node_detail(node_id):
     """Show detail page for a single node."""
     data = api_get(f"nodes/{node_id}")
@@ -1308,6 +1520,7 @@ def webui_node_detail(node_id):
 # ---------------------------------------------------------------------------
 
 @app.route("/webui/instances/<int:inst_id>/logs")
+@login_required
 def webui_instance_logs(inst_id):
     """Proxy endpoint: fetch instance logs from the API and serve as HTML."""
     data = api_get(f"instances/{inst_id}/logs")
@@ -1333,6 +1546,7 @@ def webui_instance_logs(inst_id):
 # ---------------------------------------------------------------------------
 
 @app.route("/webui/engine/<engine_type>/config")
+@login_required
 def webui_engine_config(engine_type):
     """Show engine config page with editable key-value table.
 
@@ -1514,7 +1728,7 @@ def webui_engine_config(engine_type):
 
     fetch('/api/v1/engine/{engine_type}/config/batch?_cb=' + Date.now(), {{
       method: 'POST',
-      headers: {{'Content-Type': 'application/json'}},
+      headers: {{'Content-Type': 'application/json', 'X-API-Key': '{CONFIG.get("api_token", "")}'}},
       body: JSON.stringify({{configs: changes}})
     }}).then(function(r) {{ return r.json(); }})
       .then(function(data) {{
@@ -1543,7 +1757,7 @@ def webui_engine_config(engine_type):
     content += config_html + save_js
 
     # Add instance detail button for scheduler
-    if engine_type == "quickrobot-scheduler":
+    if engine_type == QR_ENGINE_SCHEDULER_NAME:
         _sched_inst = _find_sys_inst(os.path.join(os.getcwd(), "data", "quickrobot.db"), QR_ENGINE_SCHEDULER_NAME)
         sched_id = _sched_inst.get("id") if _sched_inst else None
         if sched_id:
@@ -1711,14 +1925,14 @@ def _render_system_engine_config(engine_type):
        var orig = originals[key];
        if (JSON.stringify(val) === JSON.stringify(orig)) return;
 
-       fetch(saveEndpoint + '/' + key, {{
-          method: 'PUT',
-          headers: {{'Content-Type': 'application/json'}},
-          body: JSON.stringify({{value: val}})
-        }}).then(function(r) {{ return r.json(); }})
-          .then(function(data) {{
-            if (data.status === 'ok') {{
-              // Visual feedback on the button
+        fetch(saveEndpoint + '/' + key, {{
+           method: 'PUT',
+           headers: {{'Content-Type': 'application/json', 'X-API-Key': '{CONFIG.get("api_token", "")}'}},
+           body: JSON.stringify({{value: val}})
+         }}).then(function(r) {{ return r.json(); }})
+           .then(function(data) {{
+             if (data.status === 'ok') {{
+               // Visual feedback on the button
               var originalText = this.textContent;
               btn.textContent = '\u2714';
               btn.style.background = '#28a745';
@@ -1888,11 +2102,11 @@ def _render_system_engine_config(engine_type):
        var orig = originals[key];
        if (JSON.stringify(val) === JSON.stringify(orig)) return;
 
-       fetch(saveEndpoint + '/' + key, {{
-          method: 'PUT',
-          headers: {{'Content-Type': 'application/json'}},
-          body: JSON.stringify({{value: val}})
-        }}).then(function(r) {{ return r.json(); }})
+        fetch(saveEndpoint + '/' + key, {{
+           method: 'PUT',
+           headers: {{'Content-Type': 'application/json', 'X-API-Key': '{CONFIG.get("api_token", "")}'}},
+           body: JSON.stringify({{value: val}})
+         }}).then(function(r) {{ return r.json(); }})
           .then(function(data) {{
             if (data.status === 'ok') {{
               var originalText = this.textContent;
@@ -2018,21 +2232,20 @@ def _render_system_engine_config(engine_type):
   var saveEndpoint = '{_save_ep_mcp}';
 
  // Per-line save handlers — each .btn-save-line button saves just its field
-   document.querySelectorAll('.btn-save-line').forEach(function(btn) {{
-     btn.addEventListener('click', function() {{
-       var key = this.getAttribute('data-key');
-       var input = document.querySelector('.config-value[data-key="' + key + '"]');
-       if (!input) return;
-       var val = input.value;
-       var orig = originals[key];
-       if (JSON.stringify(val) === JSON.stringify(orig)) return;
+    document.querySelectorAll('.btn-save-line').forEach(function(btn) {{
+      btn.addEventListener('click', function() {{
+        var key = this.getAttribute('data-key');
+        var input = document.querySelector('.config-value[data-key="' + key + '"]');
+        if (!input) return;
+        var val = input.value;
+        var orig = originals[key];
+        if (JSON.stringify(val) === JSON.stringify(orig)) return;
 
-     fetch(saveEndpoint + '/' + key, {{
-          method: 'PUT',
-          headers: {{'Content-Type': 'application/json'}},
-          body: JSON.stringify({{value: val}})
-        }}).then(function(r) {{ return r.json(); }})
-          .then(function(data) {{
+      qrApi(saveEndpoint + '/' + key, {{
+           method: 'PUT',
+           headers: {{'Content-Type': 'application/json'}},
+           body: JSON.stringify({{value: val}})
+         }}).then(function(data) {{
             if (data.status === 'ok') {{
               var originalText = this.textContent;
               btn.textContent = '\u2714';
@@ -2056,9 +2269,8 @@ def _render_system_engine_config(engine_type):
     }});
 
      // Load MCP interpreter status from engine status endpoint
-    fetch('/api/v1/engines/{engine_type}/status')
-      .then(function(r) {{ return r.json(); }})
-      .then(function(data) {{
+     qrApi('/engines/{engine_type}/status')
+       .then(function(data) {{
         if (data.status !== 'ok') return;
         var interp = data.data.interpreter_path || '';
         var avail = data.data.mcp_available;
@@ -2085,6 +2297,7 @@ def _render_system_engine_config(engine_type):
 
 
 @app.route("/webui/engine/<engine_type>/presets")
+@login_required
 def webui_engine_presets(engine_type):
     """List presets for an engine type."""
     from flask import request as _request
@@ -2103,7 +2316,7 @@ def webui_engine_presets(engine_type):
             return make_html(f"Presets -- {engine_type}", "engines", content, engine_types=get_engine_types())
 
         presets = data.get("items", [])
-        print(f"[qr] DEBUG presets after get: len={len(presets)} first_name={presets[0].get('name','?') if presets else 'empty'}", file=sys.stderr)
+        logger.debug("presets after get: len=%d first_name=%s", len(presets), presets[0].get("name", "?") if presets else "empty")
         preset_count = len(presets)
 
         # Engine display name for header — single source from registry
@@ -2136,11 +2349,12 @@ def webui_engine_presets(engine_type):
         return render_template('base.html', title=f"Presets -- {engine_type}", engines_nav=engines_nav, **nav, content=Markup(content))
     except Exception as exc:
         tb = traceback.format_exc()
-        print(f"[qr] ERROR webui_engine_presets: {tb}", file=sys.stderr)
+        logger.error("webui_engine_presets: %s", tb)
         return make_html(f"Presets -- {engine_type}", "engines", f'<p style="color:#f44336;">Error: {exc}</p>', engine_types=get_engine_types())
 
 
 @app.route("/webui/engine/<engine_type>/presets/create")
+@login_required
 def webui_engine_presets_create(engine_type):
     """Create a new preset for an engine type."""
     nav, engines_nav = render_nav("engines", get_engine_types())
@@ -2150,6 +2364,7 @@ def webui_engine_presets_create(engine_type):
 
 
 @app.route("/webui/engine/<engine_type>/presets/<int:preset_id>/edit", methods=["GET"])
+@login_required
 def webui_engine_preset_edit(engine_type, preset_id):
     """Edit an existing preset with affected instances display."""
     data = api_get(f"engine/{engine_type}/presets/{preset_id}")
@@ -2222,6 +2437,7 @@ def webui_engine_preset_edit(engine_type, preset_id):
 
 
 @app.route("/webui/logs")
+@login_required
 def webui_logs():
     """Unified log viewer — job headers with expandable task sub-rows.
 
@@ -2326,6 +2542,7 @@ def webui_logs():
 
 
 @app.route("/webui/qr-tasks")
+@login_required
 def webui_qr_tasks():
     """Unified running tasks viewer — now serves from log_entries.
 
@@ -2540,6 +2757,7 @@ def webui_prompt_detail(prompt_id):
 
 
 @app.route("/webui/prompts/<string:prompt_id>", methods=["POST"])
+@login_required
 def webui_prompt_update(prompt_id):
     """Update a prompt via form POST."""
     content = request.form.get("content", "")
@@ -2556,6 +2774,7 @@ def webui_prompt_update(prompt_id):
 
 
 @app.route("/webui/prompts/create", methods=["POST"])
+@login_required
 def webui_prompt_create():
     """Create a new prompt via form POST."""
     data = api_post("prompts", {
@@ -2622,7 +2841,31 @@ def webui_instance_proxy(inst_id):
 '''))
 
 
+# Deterministic state→actions mapping for server-side action button rendering.
+# Avoids the ~3.6s SSH call to /status endpoint just to derive available actions.
+_QR_STATE_ACTIONS = {
+    "unconfigured": [("deploy", "Deploy")],
+    "configuring": [("deploy", "Deploy")],
+    "deploying": [("deploy", "Deploy")],
+    "deployed": [("start", "Start"), ("undeploy", "Undeploy"), ("delete", "Delete")],
+    "starting": [],
+    "running": [("stop", "Stop"), ("restart", "Restart"), ("undeploy", "Undeploy"), ("delete", "Delete")],
+    "stopping": [],
+    "stopped": [("start", "Start"), ("deploy", "Deploy"), ("undeploy", "Undeploy"), ("delete", "Delete")],
+    "error": [("start", "Start"), ("reconfigure", "Reconfigure"), ("restart", "Restart"), ("deploy", "Deploy"), ("delete", "Delete")],
+    "loading": [],
+    "updating": [("deploy", "Deploy")],
+    "compiling": [("deploy", "Deploy")],
+}
+
+
+def get_actions_for_state(state):
+    """Return list of (action_name, label) tuples for a given instance state."""
+    return _QR_STATE_ACTIONS.get(state, [])
+
+
 @app.route("/webui/instances/<int:inst_id>", methods=["GET"])
+@login_required
 def webui_instance_detail_v2(inst_id):
     """Enhanced instance detail page with state badge, actions, merged config, logs."""
     data = api_get(f"instances/{inst_id}")
@@ -2768,19 +3011,16 @@ def webui_instance_detail_v2(inst_id):
                 "draft_model_path": m.get("draft_model_path"),
             }
 
-    # STATUS-1: Unified status with engine-specific actions (single source of truth for badges)
-    status_api = api_get(f"instances/{inst_id}/status")
-    health_alive = False
-    health_latency = None
-    health_error = ""
-    if "error" not in status_api and status_api.get("data"):
-        d = status_api["data"]
-        health_alive = True
-        health_latency = d.get("latency_ms")
-        health_error = d.get("error", "")
+    # ACTION-ASYNC: Derive actions from DB state (no SSH needed).
+    # /status SSH call deferred to client-side for health badges + live actions refresh.
+    status_actions = get_actions_for_state(state)
+    actions = []
+    for aname, alabel in status_actions:
+        actions.append((aname, alabel, aname, True))
 
     system_status_data = api_get(f"instances/{inst_id}/system-status")
     is_llama = (engine_name == QR_ENGINE_LLAMA_SERVER_NAME)
+    is_timestamp_proxy = (engine_name == QR_ENGINE_TIMESTAMP_PROXY_NAME)
     is_system = inst.get("system_managed", 0)
     is_mcp = (engine_name == QR_ENGINE_MCP_NAME)
     mcp_flags = {}
@@ -2793,36 +3033,41 @@ def webui_instance_detail_v2(inst_id):
         }
 
     # Build detail_items list for template
-    # Use STATUS-1 data as single source of truth for state/health badges.
-    # override_system_instance_states() already updated DB state based on process health,
-    # so we trust the instance's state field directly.
+    # Use DB-cached fields for system instance health badge (no SSH needed on page load).
+    # Real-time health check runs async via client-side /status call.
     state_badge_html = status_badge(state)
     health_badge = ""
-    if is_system and "error" not in status_api:
-        sd = status_api.get("data", {}) or {}
-        ed = sd.get("engine_data", {})
-        pid = ed.get("pid")
-        uptime = ed.get("uptime_seconds", 0)
-        rss = ed.get("rss_bytes", 0)
-        if pid:
-            # System engine with active PID — running
+    if is_system:
+        # Use DB-cached fields from the instance row (pid_last_known, uptime_seconds, rss_bytes)
+        # These are updated by the periodic health check system — not live but recent.
+        pid_cached = inst.get("pid_last_known")
+        uptime_cached = inst.get("uptime_seconds") or 0
+        rss_cached = inst.get("rss_bytes") or 0
+        if pid_cached and pid_cached > 0:
             health_badge = Markup(f'<span class="badge badge-running">running</span>')
-            if uptime and uptime > 0:
-                hrs = uptime // 3600; mins = (uptime % 3600) // 60
+            if uptime_cached and uptime_cached > 0:
+                hrs = uptime_cached // 3600; mins = (uptime_cached % 3600) // 60
                 health_badge += Markup(f' <small style="color:#888;">{hrs}h {mins}m</small>')
-            if rss and rss > 0:
-                health_badge += Markup(f' <small style="color:#888;">RSS {rss // (1024*1024)}MB</small>')
-        elif sd.get("engine_type_name") in (QR_ENGINE_WEBUI_NAME, QR_ENGINE_MCP_NAME):
-            # System engine with stale/dead PID — show error state
-            health_badge = Markup('<span class="badge badge-error">dead</span>')
-        elif sd.get("engine_type_name") == QR_ENGINE_API_NAME:
-            # API instance always alive when serving requests
-            health_badge = Markup('<span class="badge badge-running">running</span>')
-    elif health_alive:
-        health_badge = Markup(f'<span class="badge badge-running">alive</span>')
-        if health_latency is not None: health_badge += Markup(f' <small style="color:#666;">{health_latency:.0f}ms</small>')
-    elif health_error:
-        health_badge = Markup(f'<span class="badge badge-other">unknown</span> <small style="color:#888;">{health_error[:50]}</small>')
+            if rss_cached and rss_cached > 0:
+                health_badge += Markup(f'<small style="color:#888;">RSS {rss_cached // (1024*1024)}MB</small>')
+        else:
+            # Check system-status data for engine type to show appropriate state
+            sys_data = system_status_data.get("data", {}) if "error" not in system_status_data else {}
+            sys_engine = sys_data.get("engine_type_name") or ""
+            if sys_engine and sys_engine in (QR_ENGINE_WEBUI_NAME, QR_ENGINE_MCP_NAME):
+                health_badge = Markup('<span class="badge badge-error">dead</span>')
+            elif sys_engine == QR_ENGINE_API_NAME:
+                # API instance always alive when serving requests
+                health_badge = Markup('<span class="badge badge-running">running</span>')
+            else:
+                # Use state field from DB
+                if state in ("running", "starting", "loading"):
+                    health_badge = Markup(f'<span class="badge badge-{state}">{state}</span>')
+                elif state == "stopped":
+                    health_badge = Markup('<span class="badge badge-stopped">stopped</span>')
+                else:
+                    health_badge = Markup(f'<span class="badge badge-other">{state}</span>')
+    # Non-system instances: health badge deferred to async /status call
 
     detail_items = [
         ("Instance ID", str(inst_id)), ("UUID", instance_uuid_val or "N/A"),
@@ -2852,44 +3097,25 @@ def webui_instance_detail_v2(inst_id):
         detail_items.append(("Port", str(actual_port)))
     detail_items.extend([("Transport", "local subprocess" if is_system else transport), ("Created", str(created_at)), ("Last State Change", str(last_change))])
     if is_llama: detail_items.append(("GPU Device", inst.get("gpu_device", "") or "not set"))
-    # Use STATUS-1 engine_data for system instance details (RSS, uptime) — single source of truth
-    if is_system and "error" not in status_api:
-        sd = status_api.get("data", {}) or {}
-        ed = sd.get("engine_data", {})
-        if "rss_bytes" in ed and ed["rss_bytes"]:
-            detail_items.append(("RSS Memory", f"{ed['rss_bytes'] / (1024*1024):.1f} MB"))
-        if ed.get("uptime_seconds", 0) > 0:
-            hrs = ed["uptime_seconds"] // 3600; mins = (ed["uptime_seconds"] % 3600) // 60
+    # Auth token for llama_server / llama_rpc instances
+    if engine_type_id in (QR_ENGINE_LLAMA_SERVER, QR_ENGINE_LLAMA_RPC):
+        auth_token_val = inst.get("auth_token", "") or ""
+        detail_items.append(("Auth Token", auth_token_val if auth_token_val else "<em>not set</em>"))
+    # Use DB-cached fields for system instance details (RSS, uptime)
+    if is_system:
+        cached_rss = inst.get("rss_bytes") or 0
+        cached_uptime = inst.get("uptime_seconds") or 0
+        if cached_rss > 0:
+            detail_items.append(("RSS Memory", f"{cached_rss / (1024*1024):.1f} MB"))
+        if cached_uptime > 0:
+            hrs = cached_uptime // 3600; mins = (cached_uptime % 3600) // 60
             detail_items.append(("Uptime", f"{hrs}h {mins}m"))
 
-    status_actions = []
+    # Warnings from STATUS-1 — now empty (no blocking SSH call).
+    # Real-time warnings deferred to async client-side /status call.
     status_warnings = []
-    status_engine_data = {}
-    if "error" not in status_api:
-        status_data = status_api.get("data", {}) or {}
-        status_actions = status_data.get("actions", [])
-        status_warnings = status_data.get("warnings", [])
-        status_engine_data = status_data.get("engine_data", {})
 
-    # For system-managed instances, use STATUS-1 state as single source of truth.
-    # This ensures the detail page shows real-time process health, not stale DB state.
-    if is_system and "error" not in status_api:
-        sd = status_api.get("data", {}) or {}
-        real_state = sd.get("state")
-        if real_state:
-            state = real_state
-
-    # Convert STATUS-1 actions to template tuple format: (name, label, endpoint, enabled)
-    actions = []
-    for sa in status_actions:
-        aname = sa.get("name", "")
-        alabel = sa.get("label", aname)
-        # STATUS-1 action names now match API endpoints directly (post redesign)
-        endpoint = aname
-        enabled = not sa.get("disabled", False)
-        actions.append((aname, alabel, endpoint, enabled))
-
-   # Prepare config data for template
+    # Prepare config data for template
     env_data = {}; cli_data = []; model_data = {}
     config_json = "No merged config"
     is_build_engine = engine_type_id in (QR_ENGINE_LLAMA_SERVER, QR_ENGINE_LLAMA_RPC)
@@ -2933,7 +3159,7 @@ def webui_instance_detail_v2(inst_id):
         engine_display=engine_display, node_name=node_name, port=actual_port,
         transport=transport, instance_uuid_val=instance_uuid_val,
         created_at=created_at, last_change=last_change, start_on_boot=start_on_boot,
-        is_llama=is_llama, is_system=is_system, is_universal=is_universal, is_mcp=is_mcp, is_subprocess=is_subprocess,
+        is_llama=is_llama, is_timestamp_proxy=is_timestamp_proxy, is_system=is_system, is_universal=is_universal, is_mcp=is_mcp, is_subprocess=is_subprocess,
         mcp_flags=mcp_flags, subprocess_env_passthrough=subprocess_env_passthrough,
         subprocess_user_env_vars_count=subprocess_user_env_vars_count,
         merged_config=merged_config,
@@ -3035,12 +3261,17 @@ def api_proxy(subpath):
         body, status_code, resp_headers = _proxy_req(
             url, data=data, headers=headers,
             method=request.method, timeout=3600)
+        # Strip hop-by-hop headers (PEP 3333 / waitress strictness)
+        _HOP_BY_HOP = frozenset(["connection", "keep-alive", "proxy-authenticate",
+            "proxy-authorization", "te", "trailers", "transfer-encoding", "upgrade"])
         # Ensure proper charset on all responses — Firefox needs explicit charset
         ct_header = None
         clean_headers = []
         for k, v in resp_headers.items():
             kl = k.lower()
-            if kl == "content-type" and "charset" not in v.lower():
+            if kl in _HOP_BY_HOP:
+                continue  # strip hop-by-hop headers for waitress/PEP3333
+            elif kl == "content-type" and "charset" not in v.lower():
                 ct_header = f"{v}; charset=utf-8"
             elif kl == "content-length":
                 continue  # let Flask set it
@@ -3059,10 +3290,14 @@ def api_proxy(subpath):
             logger.debug("error body read failed (upstream proxy): %s", _e)
             raw_body = b""
         # Ensure Content-Type is always application/json for Firefox compatibility
+        _HOP_BY_HOP = frozenset(["connection", "keep-alive", "proxy-authenticate",
+            "proxy-authorization", "te", "trailers", "transfer-encoding", "upgrade"])
         clean_headers = [("Content-Type", "application/json; charset=utf-8")]
         for k, v in e.headers.items():
             kl = k.lower()
-            if kl == "content-length":
+            if kl in _HOP_BY_HOP:
+                continue  # strip hop-by-hop headers for waitress/PEP3333
+            elif kl == "content-length":
                 continue  # let Flask set it
             elif kl != "content-type":  # skip original CT, we set it above
                 clean_headers.append((k, v))
@@ -3149,46 +3384,58 @@ def parse_args():
     args.host = args.host or os.getenv("QUICKROBOT_WEBUI_HOST")
     _env_port = os.getenv("QUICKROBOT_WEBUI_PORT")
     args.port = args.port if args.port is not None else (int(_env_port) if _env_port else None)
+    # API auth token: CLI --api-token > QUICKROBOT_API_KEY env var (shared gatekeeper)
+    args.api_token = args.api_token or os.getenv("QUICKROBOT_API_KEY", "")
     return args, api_base
 
 
 if __name__ == "__main__":
     args, api_base = parse_args()
     CONFIG["api_base"] = api_base
+    CONFIG["api_token"] = args.api_token if args.api_token else None
     # Validate that --host and --port were explicitly provided
     _check_webui_args()
     # Validate bind host against QR_FORBIDDEN_HOSTS
     if args.host in QR_FORBIDDEN_HOSTS:
-        print(f"[qr] FATAL: Web UI bind host is '{args.host}' — {QR_FORBIDDEN_HOSTS}", file=sys.stderr)
+        logger.error("[qr-webui] FATAL: Web UI bind host is '%s' — %s", args.host, QR_FORBIDDEN_HOSTS)
         sys.exit(1)
-    # Log rotation (vC): truncate oversized log files on startup
-    from lib.lib_system_engine import get_engine_log_path as _log_path, rotate_log_if_needed as _rotate_log
-    _rotate_log(_log_path("webui"), "webui")
-    # Structured startup log — single line with all config info minus tokens
+    # Structured startup log (shared logger handles rotation + dual output)
     _pid = os.getpid()
-    _log_path = os.getenv("QUICKROBOT_LOG_PATH", "")
-    _log_suffix = f" log_path={_log_path}" if _log_path else ""
     _api_h = args.api_host or os.getenv("QUICKROBOT_API_HOST", "?")
     _api_p = args.api_port or os.getenv("QUICKROBOT_API_PORT", "?")
-    print(f"[qr] STARTUP: pid={_pid} host={args.host} port={args.port} api={_api_h}:{_api_p}{_log_suffix}")
+    try:
+        _port_num = int(args.port) if args.port else int(_api_p)
+    except (ValueError, TypeError):
+        _port_num = 0
+    logger.info("[qr-webui] STARTUP: pid=%d host=%s port=%d api=%s:%s", _pid, args.host, _port_num, _api_h, _api_p)
     try:
         # === Start periodic health check thread ===
         from lib.lib_system_engine import start_health_check_thread as _start_health
         api_host = args.api_host or os.getenv("QUICKROBOT_API_HOST", "?")
         api_port = int(args.api_port) if args.api_port else int(os.getenv("QUICKROBOT_API_PORT", "?"))
+        # Read retry count from env whitelist (set by API process) — default 2
+        _hc_retries = 2
+        _raw = os.getenv("QUICKROBOT_SYSTEM_RETRIES", "")
+        if _raw:
+            try:
+                _v = int(_raw)
+                if 1 <= _v <= 10:
+                    _hc_retries = _v
+            except (ValueError, TypeError):
+                pass
         _health_thread = _start_health(
             api_host=api_host,
             api_port=api_port,
-            max_retries=3,
+            max_retries=_hc_retries,
             retry_delay=5,
             check_interval=10
         )
-        print(f"[qr] Health check thread started (interval=10s, kill=10s)", flush=True)
-        
-        app.run(host=args.host, port=args.port, debug=False)
+        logger.info("[qr-webui] Health check thread started (interval=10s, kill=10s)")
+
+        serve(app, host=args.host, port=args.port, threads=4, channel_timeout=30, cleanup_interval=15)
     except OSError as exc:
         if "Address already in use" in str(exc) or "Errno 98" in str(exc):
-            print(f"FATAL: Port {args.port} is already in use. Another Web UI instance is running. Exiting.", file=_sys_mod.stderr)
+            logger.error("[qr-webui] FATAL: Port %d is already in use. Another Web UI instance running.", args.port)
         else:
-            print(f"FATAL: {exc}", file=_sys_mod.stderr)
-        _sys_mod.exit(1)
+            logger.error("[qr-webui] FATAL: %s", exc)
+        sys.exit(1)

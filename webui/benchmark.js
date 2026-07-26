@@ -1,7 +1,6 @@
 /* Benchmark page - external JavaScript module */
 (function() {
-  const API_BASE = "/api/v1";
-  let currentRunId = null;
+    let currentRunId = null;
   const promptsData = window.__BENCH_CONFIG__.prompts;
   const presetsForLlama = window.__BENCH_CONFIG__.llama_presets || [];
 
@@ -25,8 +24,7 @@
 
     if (!instId) return;
 
-    fetch(API_BASE + "/instances/" + instId)
-      .then(function(r) { return r.json(); })
+    qrApi("/instances/" + instId)
       .then(function(data) {
         if (data.status !== "ok") return;
         let inst = data.data || {};
@@ -72,16 +70,14 @@
 
     if (newPreset) {
       let engineType = "llama_server";
-      fetch(API_BASE + "/engine/" + encodeURIComponent(engineType) + "/presets/" + newPreset)
-        .then(function(r) { return r.json(); })
+      qrApi("/engine/" + encodeURIComponent(engineType) + "/presets/" + newPreset)
         .then(function(data) {
           let p = data.data || {};
           let details = [];
           details.push('Switch to preset ' + p.id + ': "' + (p.name || '') + '"');
           // Fetch model details if preset references a model
           if (p.model_id) {
-            return fetch(API_BASE + "/engine/" + encodeURIComponent(engineType) + "/models/" + p.model_id)
-              .then(function(r) { return r.json(); })
+            return qrApi("/engine/" + encodeURIComponent(engineType) + "/models/" + p.model_id)
               .then(function(modelData) {
                 let m = modelData.data || {};
                 if (m.id && m.name) {
@@ -132,12 +128,11 @@
       toast.textContent = 'Applying preset change... stopping instance';
       document.body.appendChild(toast);
 
-      fetch(API_BASE + "/instances/" + id, {
-        method: "PUT",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({preset_id: preset})
-      }).then(function(r) { return r.json(); })
-        .then(function(data) {
+       qrApi("/instances/" + id, {
+         method: "PUT",
+         headers: {"Content-Type": "application/json"},
+         body: JSON.stringify({preset_id: preset})
+       }).then(function(data) {
           toast.style.opacity = '0';
           setTimeout(function() { toast.remove(); }, 300);
           if (data.status === "ok") {
@@ -174,11 +169,11 @@
     if (!name) { alert("Enter a prompt name"); return; }
     if (!content) { alert("Enter prompt content"); return; }
 
-    fetch(API_BASE + "/benchmarks/prompts", {
+    qrApi("/benchmarks/prompts", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({name: name, content: content, max_tokens: parseInt(maxTokensEl.value) || 20})
-    }).then(function(r) { return r.json(); })
+    })
       .then(function(data) {
         if (data.status === "ok") {
           loadPrompts();
@@ -193,8 +188,7 @@
 
   // --- Load prompts into dropdown ---
   function loadPrompts() {
-    fetch(API_BASE + "/benchmarks/prompts")
-      .then(function(r) { return r.json(); })
+    qrApi("/benchmarks/prompts")
       .then(function(data) {
         if (data.status !== "ok") return;
         let sel = document.getElementById("prompt-select");
@@ -221,8 +215,7 @@
     delBtn.style.display = "";
 
     let pid = parseInt(this.value);
-    fetch(API_BASE + "/benchmarks/prompts/" + pid)
-      .then(function(r) { return r.json(); })
+    qrApi("/benchmarks/prompts/" + pid)
       .then(function(data) {
         if (data.status === "ok") {
           document.getElementById("prompt-name").value = data.data.name || "";
@@ -245,12 +238,11 @@
     let maxTokens = parseInt(document.getElementById("prompt-max-tokens").value) || 20;
     if (!name || !content) { alert("Fill in both fields"); return; }
 
-    fetch(API_BASE + "/benchmarks/prompts/" + pid, {
+    qrApi("/benchmarks/prompts/" + pid, {
       method: "PUT",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({name: name, content: content, max_tokens: maxTokens})
-    }).then(function(r) { return r.json(); })
-      .then(function(data) {
+    }).then(function(data) {
         if (data.status === "ok") {
           loadPrompts();
           alert("Prompt updated!");
@@ -267,8 +259,7 @@
     let pid = parseInt(sel.value);
     if (!confirm('Delete prompt "' + sel.options[sel.selectedIndex].textContent + '"?')) return;
 
-    fetch(API_BASE + "/benchmarks/prompts/" + pid, {method: "DELETE"})
-      .then(function(r) { return r.json(); })
+    qrApi("/benchmarks/prompts/" + pid, {method: "DELETE"})
       .then(function(data) {
         if (data.status === "ok") {
           loadPrompts();
@@ -303,11 +294,11 @@
     statusEl.textContent = "";
     outputEl.textContent = "Starting benchmark...\n";
 
-    fetch(API_BASE + "/benchmarks/run", {
+    qrApi("/benchmarks/run", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({instance_id: parseInt(instId), prompt_id: parseInt(promptId)})
-    }).then(function(r) { return r.json(); })
+    })
       .then(function(data) {
         if (data.status === "ok") {
           let runId = data.data.run_id;
@@ -331,8 +322,7 @@
   // --- Polling loop for progress output (supports multiple parallel runs) ---
   function startPolling(instId, runId) {
     let poll = setInterval(function() {
-      fetch(API_BASE + "/benchmarks/results/" + runId + "/progress")
-        .then(function(r) { return r.json(); })
+      qrApi("/benchmarks/results/" + runId + "/progress")
         .then(function(data) {
           if (data.status !== "ok" || !data.data) return;
           let out = document.getElementById("output-window");
@@ -401,9 +391,8 @@
   function loadResults(sortKey, sortDir) {
     let filterVal = document.getElementById("bench-filter").value;
     let limitVal = document.getElementById("result-limit").value;
-    let url = API_BASE + "/benchmarks/results?instance_id=" + encodeURIComponent(filterVal) + "&limit=" + encodeURIComponent(limitVal);
-    fetch(url)
-      .then(function(r) { return r.json(); })
+    let url = "/benchmarks/results?instance_id=" + encodeURIComponent(filterVal) + "&limit=" + encodeURIComponent(limitVal);
+    qrApi(url)
       .then(function(data) {
         if (data.status !== "ok") return;
         let all = data.items || [];
@@ -480,8 +469,7 @@
         e.stopPropagation();
         let rid = this.getAttribute('data-id');
         if (!confirm('Delete benchmark result ' + rid.substring(0,12) + '?')) return;
-        fetch(API_BASE + '/benchmarks/results/' + rid, { method: 'DELETE' })
-          .then(function(r) { return r.json(); })
+        qrApi('/benchmarks/results/' + rid, { method: 'DELETE' })
           .then(function(data) {
             if (data.status === 'ok') {
               let sortKey = qrSettings.get('benchmark', 'sort_col', '');
@@ -498,8 +486,7 @@
 
   // --- Result detail modal ---
   window.viewResult = function(runId) {
-    fetch(API_BASE + "/benchmarks/results/" + runId)
-      .then(function(r) { return r.json(); })
+    qrApi("/benchmarks/results/" + runId)
       .then(function(data) {
         if (data.status !== "ok" || !data.data) return;
         let d = data.data;
@@ -648,8 +635,7 @@
   // --- Clear results button ---
   document.getElementById("clear-results-btn").addEventListener("click", function() {
     if (!confirm('Clear all benchmark results? This cannot be undone.')) return;
-    fetch(API_BASE + "/benchmarks/results", { method: "DELETE" })
-      .then(function(r) { return r.json(); })
+    qrApi("/benchmarks/results", { method: "DELETE" })
       .then(function(data) {
         if (data.status === "ok") {
           loadResults();
@@ -680,9 +666,8 @@
   // --- Periodic re-check of active runs via API (cleans up stale entries) ---
   setInterval(function() {
     let filterVal = document.getElementById("bench-filter").value;
-    let url = API_BASE + "/benchmarks/results?instance_id=" + encodeURIComponent(filterVal) + "&limit=50";
-    fetch(url)
-      .then(function(r) { return r.json(); })
+    let url = "/benchmarks/results?instance_id=" + encodeURIComponent(filterVal) + "&limit=50";
+    qrApi(url)
       .then(function(data) {
         if (data.status !== "ok") return;
         let all = data.items || [];

@@ -53,6 +53,17 @@
       <option value="50" {% if filter_limit == 50 %}selected="selected"{% endif %}>50</option>
       <option value="100" {% if filter_limit == 100 %}selected="selected"{% endif %}>100</option>
       <option value="250" {% if filter_limit == 250 %}selected="selected"{% endif %}>250</option>
+      <option value="1000" {% if filter_limit == 1000 %}selected="selected"{% endif %}>1000</option>
+      <option value="2000" {% if filter_limit == 2000 %}selected="selected"{% endif %}>2000</option>
+      <option value="99999" {% if filter_limit == 99999 %}selected="selected"{% endif %}>all</option>
+    </select>
+
+    <label style="font-size:0.85em;color:#666;">Refresh:</label>
+    <select id="log-refresh-interval" style="padding:3px 6px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;width:60px;">
+      <option value="0">Off</option>
+      <option value="10">10s</option>
+      <option value="30" selected>30s</option>
+      <option value="60">60s</option>
     </select>
 
     <button type="submit" class="btn btn-primary" style="padding:4px 10px;font-size:0.85em;">Apply &amp; Refresh</button>
@@ -221,12 +232,6 @@ function groupByParent(entries) {
             }
             groups[pid].push(entry);
         }
-    });
-    // Sort headers by created_at desc (newest first)
-    headers.sort(function(a, b) {
-        var ta = a.created_at || '';
-        var tb = b.created_at || '';
-        return tb.localeCompare(ta);
     });
     return { headers: headers, groups: groups };
 }
@@ -617,11 +622,12 @@ function rebindSort() {
             applyArrows(col, dir);
         });
     });
-    // Restore saved sort on load
+    // Restore saved sort on load — apply immediately (no setTimeout delay)
     var _sortCol = parseInt(qrSettings.get('log_entries', 'sort_col', '-1'), 10);
     var _sortDir = qrSettings.get('log_entries', 'sort_dir', '');
     if (_sortCol >= 0 && _sortDir) {
-        setTimeout(function(){ sortTable(_sortCol, _sortDir); applyArrows(_sortCol, _sortDir); }, 100);
+        sortTable(_sortCol, _sortDir);
+        applyArrows(_sortCol, _sortDir);
     }
 }
 
@@ -685,8 +691,35 @@ function startAutoRefresh(secs) {
     // Load logs immediately
     renderAllLogs();
 
-    // Auto-refresh: 30s default for running jobs
-    var autoRefresh = parseInt(qrSettings.get('log_entries', 'refresh_sec', '30') || '30', 10);
+    // Auto-refresh: restore from qrSettings, default 30s
+    var refreshSelect = document.getElementById('log-refresh-interval');
+    var storedRefresh = parseInt(qrSettings.get('log_entries', 'refresh_sec', '30') || '30', 10);
+    if (refreshSelect) {
+        // Validate stored value against available options
+        var valid = false;
+        for (var i = 0; i < refreshSelect.options.length; i++) {
+            if (parseInt(refreshSelect.options[i].value, 10) === storedRefresh) {
+                refreshSelect.value = storedRefresh.toString();
+                valid = true;
+                break;
+            }
+        }
+        if (!valid && refreshSelect.options.length > 2) {
+            refreshSelect.value = '30';
+        }
+    }
+
+    // Start auto-refresh from dropdown value
+    var autoRefresh = parseInt(refreshSelect ? refreshSelect.value : '30', 10);
     startAutoRefresh(autoRefresh);
+
+    // Wire up refresh interval change handler
+    if (refreshSelect) {
+        refreshSelect.addEventListener('change', function() {
+            var val = parseInt(this.value, 10);
+            startAutoRefresh(val);
+            qrSettings.set('log_entries', 'refresh_sec', val.toString());
+        });
+    }
 })();
 </script>

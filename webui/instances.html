@@ -1,3 +1,44 @@
+<!-- MCP Key Popup Modal -->
+<div id="mcpKeyModal">
+  <div class="overlay"></div>
+  <div class="modal-box">
+    <button class="btn-close" aria-label="Close">&times;</button>
+    <h3 class="modal-title">MCP Connection Details</h3>
+    <div class="modal-row">
+      <span class="modal-label">SSE Endpoint:</span>
+      <a class="modal-link endpoint-url" href="#" target="_blank" rel="noopener"></a>
+    </div>
+    <div class="modal-row">
+      <span class="modal-label">MCP Token:</span>
+      <input id="token-field" class="token-field" type="text" readonly value="">
+      <button class="btn-copy" data-copy-for="token-field">Copy</button>
+    </div>
+    <div class="modal-row">
+      <span class="modal-label">API Key (for API calls):</span>
+      <input id="api-key-field" class="token-field" type="text" readonly value="">
+      <button class="btn-copy" data-copy-for="api-key-field">Copy</button>
+    </div>
+  </div>
+</div>
+
+<!-- Server Auth Token Popup Modal -->
+<div id="serverKeyModal">
+  <div class="overlay"></div>
+  <div class="modal-box">
+    <button class="btn-close" aria-label="Close">&times;</button>
+    <h3 class="modal-title">Server Auth Token</h3>
+    <div class="modal-row">
+      <span class="modal-label">HTTP Endpoint:</span>
+      <a class="modal-link endpoint-url" href="#" target="_blank" rel="noopener"></a>
+    </div>
+    <div class="modal-row">
+      <span class="modal-label">Auth Token:</span>
+      <input id="server-token-field" class="token-field" type="text" readonly value="">
+      <button class="btn-copy" data-copy-for="server-token-field">Copy</button>
+    </div>
+  </div>
+</div>
+
 <!-- Single row header with controls and filters -->
 <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
   <h1 style="margin:0;font-size:1.3em;">Instances</h1>
@@ -37,8 +78,10 @@
       <option value="60">60s</option>
       <option value="120">120s</option>
     </select>
-    <button id="health-check-all-btn" class="btn" style="padding:2px 8px;font-size:0.85em;background:#90caf9;border:1px solid #64b5f6;color:#1565c0;" title="Trigger health check for all instances">Health check all</button>
-  </form>
+     <div style="display:inline-flex;align-items:center;margin-left:8px;">
+       <button id="health-check-all-btn" class="btn" style="padding:2px 8px;font-size:0.85em;background:#90caf9;border:1px solid #64b5f6;color:#1565c0;" title="Trigger health check for all instances">Health check all</button>
+     </div>
+   </form>
 </div>
 {% if default_refresh_ms is defined %}
 {% endif %}
@@ -77,10 +120,43 @@
      tr.row-inactive-host { background-color:var(--row-inactive, #f0f0f0) !important; }
     /* Model load progress bar — list view sub-row */
     .model-load-row td { padding: 6px 12px !important; }
-    .model-load-progress .load-bar { background:#e0e0e0;border-radius:3px;height:6px;overflow:hidden; }
+     .model-load-progress .load-bar { background:#e0e0e0;border-radius:3px;height:6px;overflow:hidden; }
     .model-load-progress .load-fill { height:100%;border-radius:3px;transition:width 0.3s,background 0.3s; }
     .model-load-progress .load-fill.loading { background:#2196f3; }
     .model-load-progress .load-fill.complete { background:#4caf50; }
+    /* MCP key popup */
+    .mcp-key-link { color:var(--text-muted,#999); font-size:0.8em; cursor:pointer; text-decoration:none; }
+    .mcp-key-link:hover { color:var(--accent,#2196f3); }
+    /* Server auth token lock — same size as MCP lock, greyed when disabled */
+    .server-key-link { color:var(--text-muted,#999); font-size:0.8em; cursor:pointer; text-decoration:none; }
+    .server-key-link:hover { color:var(--accent,#2196f3); }
+    .server-key-link.disabled { opacity:0.4; pointer-events:none; }
+    /* Server key popup modal */
+    #serverKeyModal { display:none; position:fixed; top:0; left:0; width:100%; height:100%; z-index:10000; }
+    #serverKeyModal .overlay { position:absolute; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); }
+    #serverKeyModal .modal-box { position:relative; margin:15% auto; padding:20px 24px; width:380px; max-width:90vw; background:var(--bg-card,#fff); border-radius:8px; box-shadow:0 4px 20px rgba(0,0,0,0.3); }
+    #serverKeyModal .modal-title { margin:0 0 12px; font-size:1em; color:var(--text-primary,#333); }
+    #serverKeyModal .modal-row { margin-bottom:10px; }
+    #serverKeyModal .modal-label { display:block; font-size:0.8em; color:var(--text-muted,#666); margin-bottom:3px; }
+    #serverKeyModal .modal-link { color:var(--accent,#2196f3); font-size:0.85em; word-break:break-all; }
+    #serverKeyModal .token-field { width:100%; padding:8px 10px; font-family:monospace; font-size:0.82em; border:1px solid var(--border,#ccc); border-radius:4px; background:var(--bg-input,#f5f5f5); color:var(--text-primary,#333); box-sizing:border-box; }
+    #serverKeyModal .btn-copy { padding:6px 14px; font-size:0.8em; background:var(--accent,#2196f3); color:#fff; border:none; border-radius:4px; cursor:pointer; margin-top:4px; }
+    #serverKeyModal .btn-copy:hover { background:#1976d2; }
+    #serverKeyModal .btn-close { position:absolute; top:8px; right:10px; font-size:1.2em; cursor:pointer; color:var(--text-muted,#999); background:none; border:none; }
+    #serverKeyModal .btn-close:hover { color:#333; }
+    #mcpKeyModal { display:none; position:fixed; top:0; left:0; width:100%; height:100%; z-index:10000; }
+    #mcpKeyModal .overlay { position:absolute; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); }
+    #mcpKeyModal .modal-box { position:relative; margin:15% auto; padding:20px 24px; width:380px; max-width:90vw; background:var(--bg-card,#fff); border-radius:8px; box-shadow:0 4px 20px rgba(0,0,0,0.3); }
+    #mcpKeyModal .modal-title { margin:0 0 12px; font-size:1em; color:var(--text-primary,#333); }
+    #mcpKeyModal .modal-row { margin-bottom:10px; }
+    #mcpKeyModal .modal-label { display:block; font-size:0.8em; color:var(--text-muted,#666); margin-bottom:3px; }
+    #mcpKeyModal .modal-link { color:var(--accent,#2196f3); font-size:0.85em; word-break:break-all; }
+    #mcpKeyModal .token-field { width:100%; padding:8px 10px; font-family:monospace; font-size:0.82em; border:1px solid var(--border,#ccc); border-radius:4px; background:var(--bg-input,#f5f5f5); color:var(--text-primary,#333); box-sizing:border-box; }
+    #mcpKeyModal .token-field:focus { outline:none; border-color:var(--accent,#2196f3); }
+    #mcpKeyModal .btn-copy { padding:6px 14px; font-size:0.8em; background:var(--accent,#2196f3); color:#fff; border:none; border-radius:4px; cursor:pointer; margin-top:4px; }
+    #mcpKeyModal .btn-copy:hover { background:#1976d2; }
+    #mcpKeyModal .btn-close { position:absolute; top:8px; right:10px; font-size:1.2em; cursor:pointer; color:var(--text-muted,#999); background:none; border:none; }
+    #mcpKeyModal .btn-close:hover { color:#333; }
   </style>
 <table>
 <thead>
@@ -123,54 +199,53 @@
      {% elif inst.node_hostname %}<a href="/webui/instances?host={{ inst.node_hostname|urlencode }}" title="Filter by host">{{ inst.node_hostname }}</a>{% else %}-{% endif %}
    </td>
     <!-- Remote: single-line with status badge inline -->
-      <td class="remote-cell" style="display:flex;flex-direction:column;gap:2px;">
+      <td class="remote-cell">
         {% if inst.engine_type_name == 'llama_rpc' %}
           {% if inst.node_hostname and inst.port_assigned %}
             {% set co = inst.config_override or {} %}
             {% set bind_host = co.get("LLAMA_ARG_HOST", "") or co.get("host", "") or "0.0.0.0" %}
-            <span style="font-size:0.85em;">{{ bind_host }}:{{ inst.port_assigned }}</span>
-            {% if bind_host == '0.0.0.0' %}
-              <span style="font-size:0.7em;color:#e67e22;" title="Bind address is 0.0.0.0">⚠</span>
-            {% endif %}
-            {% if inst.id in rpc_to_llama %}
-              <small style="color:#666;">→ <a href="/webui/instances/{{ rpc_to_llama[inst.id].id }}">{{ rpc_to_llama[inst.id].name }}</a></small>
-            {% else %}
-              <small style="color:#e67e22;" title="Not bound to any llama-server">⊘ unbound</small>
-            {% endif %}
+            <span style="font-size:0.85em;">{{ bind_host }}:{{ inst.port_assigned }}{% if bind_host == '0.0.0.0' %} <span style="font-size:0.7em;color:#e67e22;" title="Bind address is 0.0.0.0">⚠</span>{% endif %}{% if inst.id in rpc_to_llama %} <span style="color:#666;">→ <a href="/webui/instances/{{ rpc_to_llama[inst.id].id }}">{{ rpc_to_llama[inst.id].name }}</a></span>{% else %} <span style="color:#e67e22;" title="Not bound to any llama-server">⊘ unbound</span>{% endif %}</span>
           {% else %}-{% endif %}
         {% elif inst.engine_type_name == 'llama_server' %}
           {% if inst.node_hostname and inst.port_assigned %}
             {% set co = inst.config_override or {} %}
             {% set bind_host = co.get("LLAMA_ARG_HOST", "") or co.get("host", "") or "0.0.0.0" %}
-            <a href="http://{{ inst.node_hostname }}:{{ inst.port_assigned }}" target="_blank" rel="noopener" style="font-size:0.85em;">{{ inst.node_hostname }}:{{ inst.port_assigned }}</a>
-            {% if bind_host == '0.0.0.0' %}
-              <span style="font-size:0.7em;color:#e67e22;" title="Bind address is 0.0.0.0">⚠</span>
-            {% endif %}
-           <br>
-           <a href="/webui/proxy/{{ inst.id }}" target="_parent" style="font-size:0.8em;color:#4fc3f7;">[proxy frame]</a>
-         {% else %}-{% endif %}
-       {% elif inst.engine_type_name == "subprocess" %}
-           {% set sp_host = inst.config_override.get("host") or "127.0.0.1" %}
-           {% set sp_port = inst.config_override.get("port") or inst.port_assigned %}
-           {% if sp_port %}<a href="http://{{ sp_host }}:{{ sp_port }}" target="_blank" rel="noopener" style="font-size:0.85em;">{{ sp_host }}:{{ sp_port }}</a>{% else %}-{% endif %}
-        {% elif inst.node_hostname and inst.port_assigned and inst.system_managed == 0 %}
-            <a href="http://{{ inst.node_hostname }}:{{ inst.port_assigned }}" target="_blank" rel="noopener" style="font-size:0.85em;">{{ inst.node_hostname }}:{{ inst.port_assigned }}</a>
-            <br>
-            <a href="/webui/proxy/{{ inst.id }}" target="_parent" style="font-size:0.8em;color:#4fc3f7;">[proxy frame]</a>
+            <span>
+              <a href="http://{{ inst.node_hostname }}:{{ inst.port_assigned }}" target="_blank" rel="noopener" style="font-size:0.85em;">{{ inst.node_hostname }}:{{ inst.port_assigned }}</a>{% if bind_host == '0.0.0.0' %}<span style="font-size:0.7em;color:#e67e22;" title="Bind address is 0.0.0.0"> ⚠</span>{% endif %}
+              <a href="/webui/proxy/{{ inst.id }}" target="_parent" style="font-size:0.8em;color:#4fc3f7;">[proxy frame]</a>&nbsp;<a href="javascript:void(0)" class="server-key-link{% if not inst.auth_token %} disabled{% endif %}" data-inst-id="{{ inst.id }}" title="{% if inst.auth_token %}Show server auth token{% else %}Auth disabled{% endif %}">&#128274;</a>
+            </span>
+          {% else %}-{% endif %}
+         {% elif inst.engine_type_name == "subprocess" %}
+            {% set sp_host = inst.config_override.get("host") or "127.0.0.1" %}
+            {% set sp_port = inst.config_override.get("port") or inst.port_assigned %}
+            {% if sp_port %}<a href="http://{{ sp_host }}:{{ sp_port }}" target="_blank" rel="noopener" style="font-size:0.85em;">{{ sp_host }}:{{ sp_port }}</a>{% else %}-{% endif %}
+          {% elif inst.engine_type_name in ("llama_server", "llama_rpc") and inst.port_assigned %}
+             <a href="http://{{ inst.node_hostname }}:{{ inst.port_assigned }}" target="_blank" rel="noopener" style="font-size:0.85em;">{{ inst.node_hostname }}:{{ inst.port_assigned }}</a>
+              &nbsp;<a href="javascript:void(0)" class="server-key-link{% if not inst.auth_token %} disabled{% endif %}" data-inst-id="{{ inst.id }}" title="{% if inst.auth_token %}Show server auth token{% else %}Auth disabled{% endif %}">&#128274;</a>
+           {% elif inst.engine_type_name == "timestamp_proxy" %}
+               {% if inst.node_hostname and inst.port_assigned %}
+                   <a href="http://{{ inst.node_hostname }}:{{ inst.port_assigned }}" target="_blank" rel="noopener" style="font-size:0.85em;">{{ inst.node_hostname }}:{{ inst.port_assigned }}</a>{% set tids = inst.target_instance_ids or '[]' %}{% if tids != '[]' and tids %}<span style="color:#666;"> → {{ tids | truncate(30) }}</span>{% else %}<span style="color:#e67e22;" title="No target server bound"> ⊘ unbound</span>{% endif %}
+               {% else %}-{% endif %}
+          {% elif inst.node_hostname and inst.port_assigned and inst.system_managed == 0 %}
+             <a href="http://{{ inst.node_hostname }}:{{ inst.port_assigned }}" target="_blank" rel="noopener" style="font-size:0.85em;">{{ inst.node_hostname }}:{{ inst.port_assigned }}</a>
+             <br>
+             <a href="/webui/proxy/{{ inst.id }}" target="_parent" style="font-size:0.8em;color:#4fc3f7;">[proxy frame]</a>
         {% elif inst.system_managed and inst.engine_type_name == "quickrobot-webui" %}
           {% set ws_host = inst.config_override.get("web_ui_host") or inst.node_hostname or "127.0.0.1" %}
           {% set ws_port = inst.config_override.get("web_ui_port") or inst.port_assigned %}
           {% if ws_port %}<a href="http://{{ ws_host }}:{{ ws_port }}" target="_blank" rel="noopener" style="font-size:0.85em;">{{ ws_host }}:{{ ws_port }}</a>{% else %}-{% endif %}
-  {% elif inst.system_managed and inst.engine_type_name == "quickrobot-api" %}
+        {% elif inst.system_managed and inst.engine_type_name == "quickrobot-api" %}
             {% set svc_host = inst.config_override.get("host") or inst.node_hostname or "127.0.0.1" %}
             {% set svc_port = inst.config_override.get("port") %}
             {% if not svc_port %}{% if inst.port_assigned %}{% set svc_port = inst.port_assigned %}{% endif %}{% endif %}
             {% if svc_port %}<a href="http://{{ svc_host }}:{{ svc_port }}" target="_blank" rel="noopener" style="font-size:0.85em;">{{ svc_host }}:{{ svc_port }}</a>{% else %}-{% endif %}
-        {% elif inst.system_managed and inst.engine_type_name == "quickrobot-mcp" %}
-             {% set mcp_host = inst.config_override.get("mcp_host") or inst.config_override.get("mcp_api_host") or inst.node_hostname or "127.0.0.1" %}
-             {% set mcp_port_val = inst.config_override.get("mcp_port") or inst.port_assigned %}
-               {% if mcp_port_val %}<a href="http://{{ mcp_host }}:{{ mcp_port_val }}/sse" target="_blank" rel="noopener" style="font-size:0.85em;">http://{{ mcp_host }}:{{ mcp_port_val }}/sse</a>{% else %}-{% endif %}
-         {% else %}-{% endif %}
+        {% elif inst.engine_type_name == "quickrobot-mcp" %}
+              {% set mcp_host = inst.config_override.get("mcp_host") or inst.config_override.get("mcp_api_host") or inst.node_hostname or "127.0.0.1" %}
+              {% set mcp_port_val = inst.config_override.get("mcp_port") or inst.port_assigned %}
+                {% if mcp_port_val %}
+                <a href="http://{{ mcp_host }}:{{ mcp_port_val }}/sse" target="_blank" rel="noopener" style="font-size:0.85em;">http://{{ mcp_host }}:{{ mcp_port_val }}/sse</a>
+                &nbsp;<a href="javascript:void(0)" class="mcp-key-link" data-mcp-host="{{ mcp_host }}" data-mcp-port="{{ mcp_port_val }}" data-inst-id="{{ inst.id }}" title="Show MCP connection details + token">&#128274;</a>{% else %}-{% endif %}
+        {% else %}-{% endif %}
       </td>
   <!-- Preset & Actions: merged column — preset config on top, action buttons below -->
     <td class="preset-actions-cell" data-inst-id="{{ inst.id }}">
@@ -981,6 +1056,133 @@ document.querySelectorAll('.mcp-perm-sel').forEach(function(sel) {
 // No AJAX needed — initStatusActions only wraps long button rows.
 (function initStatusActions() {
   setTimeout(function() { wrapActionButtons(); }, 50);
+})();
+
+// Key Popup Modals — separate modals for MCP and server auth tokens
+(function initKeyPopup() {
+  var _mcpModal = document.getElementById('mcpKeyModal');
+  var _srvModal = document.getElementById('serverKeyModal');
+  if (!_mcpModal) return;
+
+  // MCP popup: fetch settings, populate SSE link + API key
+  function openMcpPopup(host, port) {
+    qrApi('/engines/quickrobot-mcp/settings').then(function(resp) {
+      var data = resp.data || {};
+      var endpoint = 'http://' + host + ':' + port + '/sse';
+      var apiKeyVal = window.QR_API_TOKEN || '';
+
+      _mcpModal.querySelector('.endpoint-url').textContent = endpoint;
+      // Token fields: index 0 = MCP token, index 1 = API key
+      var fields = _mcpModal.querySelectorAll('.token-field');
+      fields[0].value = data.mcp_token || '(not set)';
+      fields[1].value = apiKeyVal;
+      _mcpModal.style.display = 'block';
+    }).catch(function() {
+      var endpoint = 'http://' + host + ':' + port + '/sse';
+      var fields = _mcpModal.querySelectorAll('.token-field');
+      _mcpModal.querySelector('.endpoint-url').textContent = endpoint;
+      fields[0].value = '(fetch failed)';
+      fields[1].value = window.QR_API_TOKEN || '';
+      _mcpModal.style.display = 'block';
+    });
+  }
+
+  // Server popup: show node:port and auth token (separate modal)
+  function openServerPopup(instId) {
+    qrApi('/instances/' + instId).then(function(resp) {
+      var data = resp.data || {};
+      var token = data.auth_token || '(not set)';
+      var nodeHost = data.node_hostname || 'unknown';
+      var port = data.port_assigned || '';
+      var linkText = port ? (nodeHost + ':' + port) : nodeHost;
+
+      _srvModal.querySelector('.endpoint-url').textContent = linkText;
+      _srvModal.querySelector('.endpoint-url').href = port ? ('http://' + nodeHost + ':' + port) : '#';
+      _srvModal.querySelector('#server-token-field').value = token;
+      _srvModal.style.display = 'block';
+    }).catch(function() {
+      _srvModal.querySelector('#server-token-field').value = '(fetch failed)';
+      _srvModal.style.display = 'block';
+    });
+  }
+
+  // MCP key link clicks
+  document.querySelectorAll('.mcp-key-link').forEach(function(link) {
+    link.addEventListener('click', function() {
+      var h = link.getAttribute('data-mcp-host');
+      var p = link.getAttribute('data-mcp-port');
+      openMcpPopup(h, p);
+    });
+  });
+
+  // Server key link clicks
+  document.querySelectorAll('.server-key-link').forEach(function(link) {
+    link.addEventListener('click', function() {
+      var instId = link.getAttribute('data-inst-id');
+      openServerPopup(instId);
+    });
+  });
+
+  // Close MCP modal on overlay click or close button
+  _mcpModal.querySelector('.overlay').addEventListener('click', function() { _mcpModal.style.display = 'none'; });
+  _mcpModal.querySelector('.btn-close').addEventListener('click', function() { _mcpModal.style.display = 'none'; });
+
+  // Close server modal on overlay click or close button
+  if (_srvModal) {
+    _srvModal.querySelector('.overlay').addEventListener('click', function() { _srvModal.style.display = 'none'; });
+    _srvModal.querySelector('.btn-close').addEventListener('click', function() { _srvModal.style.display = 'none'; });
+  }
+
+  // Escape key closes both modals
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+      if (_mcpModal.style.display === 'block') _mcpModal.style.display = 'none';
+      if (_srvModal && _srvModal.style.display === 'block') _srvModal.style.display = 'none';
+    }
+  });
+
+  // Copy button handlers — MCP modal
+  ['token-field', 'api-key-field'].forEach(function(fieldId) {
+    var btn = _mcpModal.querySelector('[data-copy-for="' + fieldId + '"]');
+    if (btn) {
+      btn.addEventListener('click', function() {
+        var field = _mcpModal.querySelector('#' + fieldId);
+        if (field) {
+          navigator.clipboard.writeText(field.value).then(function() {
+            btn.textContent = 'Copied!';
+            setTimeout(function() { btn.textContent = 'Copy'; }, 1500);
+          }).catch(function() {
+            field.select();
+            document.execCommand('copy');
+            btn.textContent = 'Copied!';
+            setTimeout(function() { btn.textContent = 'Copy'; }, 1500);
+          });
+        }
+      });
+    }
+  });
+
+  // Copy button handlers — server modal
+  if (_srvModal) {
+    var srvBtn = _srvModal.querySelector('[data-copy-for="server-token-field"]');
+    if (srvBtn) {
+      srvBtn.addEventListener('click', function() {
+        var field = _srvModal.querySelector('#server-token-field');
+        if (field) {
+          navigator.clipboard.writeText(field.value).then(function() {
+            srvBtn.textContent = 'Copied!';
+            setTimeout(function() { srvBtn.textContent = 'Copy'; }, 1500);
+          }).catch(function() {
+            field.select();
+            document.execCommand('copy');
+            srvBtn.textContent = 'Copied!';
+            setTimeout(function() { srvBtn.textContent = 'Copy'; }, 1500);
+          });
+        }
+      });
+    }
+  }
+
 })();
 
 </script>

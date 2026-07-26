@@ -57,43 +57,22 @@ from lib.qr_engine_ids import (
 # ── Module imports ──────────────────────────────────────────────────
 from engine.quickrobot_scheduler import stale, health, runner as sched_runner
 
-# ── Logging setup ───────────────────────────────────────────────────
+# ── Logging setup (shared via lib/lib_logging.py) ───────────────────
+import lib.lib_logging as _ll
 
-def _setup_logging():
-    """Configure logging for the scheduler.
+logger = _ll.create_logger("scheduler")
 
-    Writes to both stderr (for tmux capture) and logs/scheduler.log file.
+
+def _log_level_name_to_numeric(name):
+    """Convert a named log level string to its numeric equivalent.
+
+    Args:
+        name: String like "debug", "info", "warning", "error", "critical"
+
+    Returns:
+        Integer logging level (e.g., logging.DEBUG = 10).
     """
-    _project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    log_dir = os.path.join(_project_root, "logs")
-    os.makedirs(log_dir, exist_ok=True)
-    log_file = os.path.join(log_dir, "scheduler.log")
-
-    logger = logging.getLogger("quickrobot.scheduler")
-    logger.setLevel(logging.DEBUG)
-
-    # File handler
-    fh = logging.FileHandler(log_file)
-    fh.setFormatter(logging.Formatter(
-        "%(asctime)s [qr-scheduler] %(levelname)s: %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S",
-    ))
-    logger.addHandler(fh)
-
-    # Stderr handler
-    sh = logging.StreamHandler(sys.stderr)
-    sh.setFormatter(logging.Formatter(
-        "%(asctime)s [qr-scheduler] %(levelname)s: %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S",
-    ))
-    logger.addHandler(sh)
-
-    # Prevent duplicate propagation
-    logger.propagate = False
-    return logger
-
-
-logger = _setup_logging()
+    return getattr(logging, name.upper(), logging.INFO)
 
 
 # ── Config loading with sanity checks ───────────────────────────────
@@ -132,14 +111,28 @@ def load_scheduler_config(db_path):
         sys.exit(1)
     config["poll_interval_sec"] = v
 
-    # Load scheduler_max_retries
-    row = _gec(db_path, 4, "scheduler_max_retries")
-    raw = row.get("value", "3") if row else "3"
-    try:
-        v = int(raw)
-    except (ValueError, TypeError):
-        logger.error("[qr-scheduler] FATAL: scheduler_max_retries='%s' is not a valid integer", raw)
-        sys.exit(1)
+    # Load scheduler_max_retries — priority: env whitelist > DB > constant default
+    _env_retries = os.environ.get("QUICKROBOT_SYSTEM_RETRIES", "")
+    if _env_retries:
+        try:
+            v = int(_env_retries)
+            if 1 <= v <= 10:
+                config["max_retries"] = v
+            else:
+                logger.warning("[qr-scheduler] QUICKROBOT_SYSTEM_RETRIES=%d out of range (1-10), falling back to DB", v)
+                raise ValueError("out of range")
+        except (ValueError, TypeError):
+            pass  # Fall through to DB lookup
+    else:
+        v = None  # No env var — proceed to DB lookup
+    if v is None:
+        row = _gec(db_path, 4, "scheduler_max_retries")
+        raw = row.get("value", "2") if row else "2"
+        try:
+            v = int(raw)
+        except (ValueError, TypeError):
+            logger.error("[qr-scheduler] FATAL: scheduler_max_retries='%s' is not a valid integer", raw)
+            sys.exit(1)
     if v < 1 or v > 10:
         logger.error(
             "[qr-scheduler] FATAL: scheduler_max_retries=%d out of valid range (1-10)", v,
@@ -168,13 +161,15 @@ def load_scheduler_config(db_path):
 
 
 def update_log_level(config):
-    """Update logger level based on loaded config.
+    """Update logger levels on runtime config change.
+
+    Updates both console and file handlers to the new level.
 
     Args:
-        config: Config dict with 'log_level' key.
+        config: Config dict with 'log_level' key (e.g. "debug", "info").
     """
     level_name = config.get("log_level", "info").upper()
-    numeric_level = getattr(logging, level_name, logging.INFO)
+    numeric_level = _log_level_name_to_numeric(level_name)
     logger.setLevel(numeric_level)
     for handler in logger.handlers:
         handler.setLevel(numeric_level)
@@ -350,6 +345,39 @@ def _process_cycle(config):
 sched = None
 
 
+def _detect_duplicate_scheduler():
+    """Pre-flight check: scan for existing scheduler processes.
+
+    Returns True if a duplicate is detected (should exit), False if clean to start.
+    Excludes own process and its parent shell wrapper from the scan.
+    """
+    try:
+        import subprocess as _sub
+        result = _sub.run(
+            ["ps", "aux"], capture_output=True, text=True, timeout=5
+        )
+        pid = os.getpid()
+        ppid = os.getppid()
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 11:
+                other_pid = parts[1]
+                # Skip own process and parent shell wrapper
+                if other_pid == str(pid) or other_pid == str(ppid):
+                    continue
+                cmd = " ".join(parts[10:])
+                if "quickrobot_scheduler" in cmd:
+                    # Verify the PID is actually alive (kill -0 returns 0 if alive)
+                    try:
+                        os.kill(int(other_pid), 0)
+                    except (OSError, ValueError):
+                        continue  # stale PID — skip
+                    return True  # duplicate found and confirmed alive
+    except Exception:
+        pass
+    return False
+
+
 def main():
     """Entry point for scheduler subprocess."""
     global sched
@@ -357,6 +385,11 @@ def main():
     # Root guard
     if os.getuid() == 0:
         print("this robot won't run as root", file=sys.stderr)
+        sys.exit(1)
+
+    # Pre-flight: detect duplicate scheduler process
+    if _detect_duplicate_scheduler():
+        print("[qr-scheduler] FATAL: Another scheduler instance is already running. Exiting.", file=sys.stderr)
         sys.exit(1)
 
     parser = argparse.ArgumentParser(description="Quickrobot Staged Playbook Scheduler")

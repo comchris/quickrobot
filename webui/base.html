@@ -76,6 +76,11 @@
 
 // Centralized API base path and utility functions
 window.QR_API_BASE = "/api/v1";
+{% if api_token %}
+window.QR_API_TOKEN = "{{ api_token }}";
+{% else %}
+window.QR_API_TOKEN = "";
+{% endif %}
 
 // Timestamp formatting utilities — UTC-aware, consistent across all pages
 (function() {
@@ -199,6 +204,10 @@ window.QR_API_BASE = "/api/v1";
         // Inject bearer token if available
         if (window._qr_bearer_token) {
             headers["Authorization"] = "Bearer " + window._qr_bearer_token;
+        }
+        // Inject API key for quickrobot auth
+        if (window.QR_API_TOKEN) {
+            headers['X-API-Key'] = window.QR_API_TOKEN;
         }
         return fetch(QR_API_BASE + path, Object.assign({}, opts, { headers: headers }))
             .then(function(r) {
@@ -488,8 +497,8 @@ nav .nav-section-header { padding: 12px 16px 4px; font-size: 0.75em; text-transf
 <div class="layout-wrap">
 <nav>
   <div class="nav-header"><a href="/webui/" style="color:inherit;text-decoration:none;"><span class="qr-status-dot" id="qr-status-dot" title="{{ qr_status_tooltip }}"></span><span>quick</span>robot</a>{% if qr_is_dev %} <a href="https://www.quickrobot.de" target="_blank" style="color:#f44336;font-size:0.6em;font-weight:bold;margin-left:4px;text-decoration:none;">DEV</a>{% endif %}</div>
-  <ul>
-    <li><a href="/webui/hosts" {{ hosts }}>Hosts</a></li>
+    <ul>
+      <li><a href="/webui/hosts" {{ hosts }}>Hosts</a></li>
     <li><a href="/webui/instances" {{ instances }}>Instances</a></li>
     <li><a href="/webui/models" {{ models }}>Models</a></li>
     <li><a href="/webui/logs" {{ logs }}>Logs</a></li>
@@ -502,8 +511,8 @@ nav .nav-section-header { padding: 12px 16px 4px; font-size: 0.75em; text-transf
     </li>
     {% endfor %}
     <!-- Skin sliders — always visible, lazy-loads color_engine.js on first change -->
-    <li class="nav-section" data-section="skins">
-      <div class="nav-section-header">Skins <span class="nav-chevron">&#9660;</span></div>
+     <li class="nav-section" data-section="skins" data-collapsed="true">
+       <div class="nav-section-header">Skins <span class="nav-chevron">&#9654;</span></div>
       <ul class="nav-section-items">
       <li class="color-controls">
         <label class="slider-label ctrl-power">
@@ -522,7 +531,13 @@ nav .nav-section-header { padding: 12px 16px 4px; font-size: 0.75em; text-transf
       </ul>
     </li>
   </ul>
-  <div class="nav-footer"><a href="https://www.quickrobot.de" target="_blank" style="color:inherit;text-decoration:none;">{{ version }}</a></div>
+  <div class="nav-footer">
+    <a href="https://www.quickrobot.de" target="_blank" style="color:inherit;text-decoration:none;">{{ version }}</a>
+    {% if qr_webui_password_set %}
+    &nbsp;|&nbsp;
+    <a href="{{ url_for('webui_logout') }}" style="color:inherit;text-decoration:none;">logout</a>
+    {% endif %}
+  </div>
 <script>
 (function() {
   // Event delegation: handle clicks on nav-section-header via parent <ul>
@@ -852,31 +867,10 @@ nav .nav-section-header { padding: 12px 16px 4px; font-size: 0.75em; text-transf
         // Success: re-enable button and restore label
         btn.disabled = false;
         btn.textContent = originalText;
-        // Reload strategy depends on action type
-        if (action === 'start' || action === 'reconfig_restart' || action === 'restart') {
-          // Sync actions (start/reconfig/restart) — instance enters loading/running immediately.
-          // Try SSE first for llama_server, fallback to polling after 5s.
-          var mlRow = document.querySelector('tr.model-load-row[data-inst-id="' + instId + '"]');
-          if (mlRow && typeof mlConnectSSE === 'function') {
-            try { mlConnectSSE(instId); } catch(e) { /* ignore SSE failures */ }
-          }
-          // Poll fallback: if no state change within 5s, reload anyway
-          setTimeout(function() {
-            pollUntilTarget(instId, ['running','error'], function() {}, 5000);
-            // Absolute timeout — reload if nothing happened
-            setTimeout(function() { location.reload(); }, 8000);
-          }, 3000);
-        } else if (action === 'deploy') {
-          // Async deploy — scheduler picks up task. Poll until state changes to running/error.
-          pollUntilTarget(instId, ['running','error','stopped'], function() {
-            location.reload();
-          }, 120000); // 2 min timeout for full compile
-        } else if (action === 'reconfigure' || action === 'reconfig_restart') {
-          // Sync reconfigure — already completed. Reload after delay.
-          setTimeout(function() { location.reload(); }, 3000);
-        } else if (action === 'stop') {
-          setTimeout(function() { location.reload(); }, 3000);
-        }
+        // All actions: simple uniform reload after 5s delay.
+        // SSE model-load tracking removed — systemctl start/restart takes seconds
+        // for the remote service to be ready, making immediate /models/sse unreliable.
+        setTimeout(function() { location.reload(); }, 5000);
       }
     }).catch(function(err) {
       btn.disabled = false;

@@ -274,9 +274,9 @@ curl -s -X POST http://127.0.0.1:<API_PORT>/api/v1/instances \
  | Update instance | PUT | `/instances/<id>` |
 | Herd config (DB-only) | PUT | `/instances/<id>/herd-config` — stores ENV overrides in config_override without triggering BC-1 deploy |
   | CLI flags | GET/PUT | `/instances/<id>/cli-flags` — stored in config_override.cli_flags for unified herd state |
-  | Split mode | PATCH | `/instances/<id>/split-mode` — set layer/tensor split mode (DB-only) |
-  | Split value | PUT | `/instances/<id>/split` — set server tensor split percentage (DB-only) |
-  | GPU override | GET/PUT | `/instances/<id>/gpu-override` — set device flag (DB-only, no reconfigure trigger) |
+   | Split mode | PATCH | `/instances/<id>/split-mode` — cycle layer/tensor split mode (deprecated convenience) |
+   | Unified config | GET/PUT | `/instances/<id>/config` — set split_value, experts, draft, expert_split, cli_flags, gpu_override, env in one call |
+   | GPU override | GET/PUT | `/instances/<id>/gpu-override` — set device flag (DB-only, no reconfigure trigger) |
   | Herd summary | GET | `/rpccluster/summary` — returns all servers with bind counts, tensor_splits, RPC lists |
   | Bind RPC | POST | `/instances/<id>/bind-rpc` — add RPC instance(s) to server's rpc_bind_ids |
   | Unbind RPC | DELETE | `/instances/<id>/unbind-rpc` — remove RPC instance(s) from server |
@@ -289,6 +289,21 @@ curl -s -X POST /api/v1/instances -d '{"name":"x","engine_type_id":21,"node_id":
 # Verify: GET /instances/<id> → state=deploying, or check jobs list
 ```
 Omit `preset_id` if you want to create without deploying (stays in `unconfigured`).
+
+**Preset selection rules:**
+A) **New llama_server on unfamiliar hardware:** Use preset 100 (Router mode, no model) first. Compile + startup succeeds instantly (no model download). Once running, swap to the actual model preset via `PUT /instances/<id>` with `{preset_id: N, skip_build: true}` — this fast-path update changes only the env file, skips git clone + cmake build entirely. Preserves the same port.
+B) **Never auto-select preset by node name match** (e.g., "bender" node matched preset "BENDER_GLM_5_2... 222GB"). Always verify GPU hardware (`ssh <node> "nvidia-smi --query-gpu=name,memory.total --format=csv"` or `lspci | grep -i vga`) before choosing a large-model preset.
+C) **RPC instances:** Use RPC presets (IDs 10-14 only). Preset 11 (RPC-CPU-Default) is minimal resource, no GPU. Preset 12 (RPC-Vulkan0-Default) if Vulkan compute available. NEVER use llama_server presets (IDs 100+) on RPC instances — they include model loading CLI args and GPU settings that don't apply to gRPC serving.
+D) **Preset swap after compile:** Do NOT undeploy + recreate to change presets (wastes compile time, gets new port). Use `skip_build: true` PUT instead.
+E) **Instance reuse over creation:** Quickrobot's power is preset switching, not instance proliferation. For benchmarking, model testing, or preset comparison on the same node — reuse the existing instance, switch preset via `PUT /instances/<id>` with `skip_build: true`, then `reconfig_restart`. Create new instances ONLY when you need a different server process (different cluster config, RPC bindings, or different node topology).
+
+**Preset ↔ engine feedback:** `POST /instances` returns `_warnings` array when preset's `engine_type_id` doesn't match the instance engine type. Example response: `{"_warnings":["Preset engine_type_id=21 (llama_server) does not match instance engine_type_id=22 (llama_rpc)"]}`. Agents MUST check `_warnings` and auto-correct by selecting appropriate preset for the engine type.
+
+**Preset inventory:**
+| Engine | Preset IDs | Count | Purpose |
+|--------|-----------|-------|---------|
+| llama_server (21) | 100+ | 51 | Model-loaded inference, GPU support |
+| llama_rpc (22) | 10-14 | 6 | CPU gRPC serving, thread pool config |
 
 ### Async Job Operations — Check Status After Starting
 Deploy, rebuild, start, stop, restart are all async via the RUNNER-1 job/task system. Each returns immediately with a job_id but does NOT block on completion.
@@ -323,7 +338,14 @@ curl -s http://127.0.0.1:<API_PORT>/api/v1/jobs?status=running | python3 -c "imp
 | Get task detail | GET | `/tasks/<id>` (includes playbook_runs output) |
 | Start/Stop/Restart | POST | `/instances/<id>/start`, `/stop`, `/restart` |
 | Undeploy | POST | `/instances/<id>/undeploy` (stop service, remove systemd unit from remote node) |
-| Delete | DELETE | `/instances/<id>` (remove from DB only — does NOT undeploy; use undeploy first to clean remote systemd units) |
+| Delete | DELETE | `/instances/<id>` (attempts remote undeploy via SSH first, then removes from DB. If node is offline, undeploy silently fails and instance is deleted from DB — remote systemd unit files remain on the host) |
+
+**Correct cleanup workflow for removing an instance:**
+1. `POST /instances/<id>/undeploy` — stops service, removes systemd unit from remote node
+2. Verify: SSH to node, check `/opt/quickrobot/` — should no longer contain `qr-<id>-<engine>` dirs or any deploy artifacts
+3. `DELETE /instances/<id>` — remove from DB
+4. If node is offline and you need full cleanup: SSH in, manually remove `/opt/quickrobot/llama.cpp` (shared source) + all `qr-<id>-*` deploy dirs, THEN delete instance from DB
+5. **Note:** The `source_llama.yml` playbook shares ONE `/opt/quickrobot/llama.cpp` dir per node across ALL instances. Deleting an instance does NOT remove the shared source — only a full manual `rm -rf /opt/quickrobot/llama.cpp` cleans it.
 | Restart system instance | POST | `/instances/<id>/restart_system` (system-managed instances only) |
 | Query status (health probe) | GET | `/instances/<id>/query-status` (returns alive/latency/error — health check style) |
 | Instance status (STATUS-1) | GET | `/instances/<id>/status` (returns actions, valid_next_states, engine_data — used by WebUI action rendering) |
@@ -331,7 +353,7 @@ curl -s http://127.0.0.1:<API_PORT>/api/v1/jobs?status=running | python3 -c "imp
 | Update build | POST | `/instances/<id>/update-build` |
 | List nodes | GET | `/nodes` |
 | Create node | POST | `/nodes` |
-| Node actions | POST | `/nodes/<id>/reboot`, `/shutdown`, `/apt-update`, `/discover` |
+| Node actions | POST | `/nodes/<id>/reboot`, `/shutdown`, `/nodes/<id>/apt?action=update|upgrade|all`, `/discover` |
 | Toggle host active/inactive | PUT | `/nodes/<id>/host-status` (body: `{"is_active": 0}` or `{"is_active": 1}`) — blocks all operations on the node when inactive |
 | Engine configs | GET/PUT/DELETE | `/engine/<type>/config[/<key>]` |
 | Presets CRUD | GET/POST/PUT/DELETE | `/engine/<type>/presets[/<id>]` |
@@ -364,10 +386,12 @@ curl -s -X POST http://127.0.0.1:<API_PORT>/api/v1/instances \
 | engine_type_id | int | yes | 1=API, 2=WebUI, 3=MCP, 4=scheduler, 11=universal, 12=subprocess, 21=llama_server, 22=llama_rpc, 31=iperf3 |
 | node_id | int | yes | Target node ID. **All engines now support node_id=1 (localhost/API host).** Subprocess is localhost-only; others can deploy to any active node including localhost. Requires local sudo + write access to `/opt/quickrobot/`. |
 | preset_id | int | no | Preset to apply (default: preset 100 "Router mode" for llama_server/llama_rpc — no model file required) |
-| config_override | dict | no | Per-instance overrides: `{env:{}, cli_opts:[], model:{}}` |
+| config_override | dict | no | Per-instance overrides: `{env:{}, cli_opts:[], model:{}}`. Use for custom git clone URL (`git_clone_url`), build commands (`node_build_run_cmd`, `node_build_set_cmd`), and other engine config overrides. |
 | deploy | bool | no | Skip auto-deploy if false (default: true) |
 
 **Engine type IDs:** API=1, WebUI=2, MCP=3, scheduler=4, universal=11, subprocess=12, llama_server=21, llama_rpc=22, iperf3=31. Always read from `qr_engine_ids.py` or the DB if unsure.
+
+**Custom git source:** To deploy from a forked llama.cpp repo, set `config_override: {"git_clone_url": "https://github.com/.../llama.cpp"}` on instance creation or update. **WARNING:** All instances on the same node share ONE `llama.cpp` source dir (`/opt/quickrobot/llama.cpp`). If one instance clones from a custom fork, ALL instances on that node will use that fork (via `git pull`). To run multiple different forks on the same node, you need separate deploy paths or manual separation. The source stage (`source_llama.yml`) does a `git clone` only when `.git` doesn't exist — otherwise it does `git pull` from whatever origin is already configured.
 
 ### Common Operations
 ```bash
@@ -494,8 +518,16 @@ curl -s -X POST http://127.0.0.1:<API_PORT>/api/v1/nodes/<id>/discover
 ```bash
 curl -s -X POST http://127.0.0.1:<API_PORT>/api/v1/nodes/<id>/reboot
 curl -s -X POST http://127.0.0.1:<API_PORT>/api/v1/nodes/<id>/shutdown
-curl -s -X POST http://127.0.0.1:<API_PORT>/api/v1/nodes/<id>/apt-update
-curl -s -X POST http://127.0.0.1:<API_PORT>/api/v1/nodes/<id>/apt-upgrade
+# APT operations: consolidated single endpoint, action dispatched via body
+curl -s -X POST http://127.0.0.1:<API_PORT>/api/v1/nodes/<id>/apt \
+  -H 'Content-Type: application/json' -d '{"action":"update"}'    # apt update only
+curl -s -X POST http://127.0.0.1:<API_PORT>/api/v1/nodes/<id>/apt \
+  -H 'Content-Type: application/json' -d '{"action":"upgrade"}'   # apt upgrade only
+curl -s -X POST http://127.0.0.1:<API_PORT>/api/v1/nodes/<id>/apt \
+  -H 'Content-Type: application/json' -d '{"action":"all"}'       # update + upgrade combined
+# APT is async — returns job_id immediately; poll for progress:
+# GET /api/v1/log_entries?parent_id=<job_id>&status=running  (check progress)
+# GET /api/v1/log_entries?job_type=apt_update (list recent apt jobs)
 ```
 
 **Admin toggle:** `PUT /api/v1/nodes/<id>/host-status` with body `{"is_active": 0}` blocks ALL operations on the node. Returns `NODE_INACTIVE` error to clients. Separate from ping connectivity (`ping_state`). Example:
@@ -671,6 +703,7 @@ The MCP server exposes tools wrapping the REST API for LLM agents. Two tiers ava
 
 ### Proxy Tool (requires ALLOW_PROXY)
 `quickrobot_api(method, path, body)` — direct pass-through to any API endpoint. Uses 30s default timeout.
+Node APT operations (`POST /nodes/<id>/apt`) are **async** — they return immediately with a `job_id`. The 30s timeout is sufficient since the response is just `{action, node_id, job_id}`. Poll `GET /api/v1/log_entries?parent_id=<job_id>` for task progress.
 
 **Common cluster operations via proxy:**
 ```python
@@ -683,8 +716,8 @@ quickrobot_api("DELETE", "/instances/<server_id>/bind-rpc/<rpc_id>")
 # Set split mode
 quickrobot_api("PATCH", "/instances/<server_id>/split-mode", {"split_mode": "layer"})
 
-# Set server split to 0% (RPCs take all)
-quickrobot_api("PUT", "/instances/<server_id>/split", {"split": 0})
+# Set server split to 0% (RPCs take all) — use unified config endpoint
+quickrobot_api("PUT", "/instances/<server_id>/config", {"split_value": 0})
 
 # Scan models on a specific node
 quickrobot_api("POST", "/models/scan?node=12")
@@ -895,6 +928,7 @@ These are documented failures from real usage sessions. Keep this list current f
 | 4 | Instance update via PUT doesn't clear config keys | Same merge-only bug as #3 — `new_override = dict(old_config)` preserves old keys unless explicitly set to `""` | Fixed: send `{config_override: {"KEY": ""}}` or use force-clear pattern |
 | 5 | `Content-Type: application/json` missing → 415 error on ALL POST/PUT/DELETE | Every route handler calls `require_json()` which rejects without this header | Always include `-H 'Content-Type: application/json'` on write operations |
 | 6 | Node validation returns `NODE_UNREACHABLE` for wrong SSH port | Ansible ping task marks unreachable hosts as `unreachable: true` (not `failed`) → `parse_ansible_json()` now checks both fields | Fixed |
+| 7 | `DELETE /instances/<id>` removes from DB but leaves remote files when node is offline | Delete attempts SSH undeploy first; if node is unreachable, undeploy silently fails and instance is deleted from DB anyway. Remote systemd unit files and env files remain on the host. | Always verify: (1) `POST /instances/<id>/undeploy` succeeds, then (2) `DELETE /instances/<id>`. For offline nodes: manually SSH in and remove `/opt/quickrobot/llama.cpp` + `qr-<id>-<engine>` dirs before DB delete. |
 
 **Pattern to remember:** POST/PUT/DELETE always need `Content-Type: application/json`. GET never needs it. Delete uses `DELETE` method on the resource path, not POST to a sub-path.
 

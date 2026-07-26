@@ -500,11 +500,11 @@ PORT=8666' style="width:100%;padding:7px 10px;border:1px solid #ccc;border-radiu
     }
     presets.forEach(function(p) {
       var card = document.createElement('div');
-      card.style.cssText = 'border:2px solid #e0e0e0;border-radius:6px;padding:12px;cursor:pointer;transition:all 0.2s;';
-      card.innerHTML = '<div style="font-weight:600;color:#1a1a2e;">' + (p.name || 'Preset #' + p.id) + '</div>' +
-        '<small style="color:#666;display:block;margin-top:4px;">Model: ' + (p.model_path || 'N/A') + '</small>' +
+      card.style.cssText = 'border:2px solid #e0e0e0;border-radius:6px;padding:12px;cursor:pointer;transition:all 0.2s;overflow:hidden;max-width:100%;';
+      card.innerHTML = '<div style="font-weight:600;color:#1a1a2e;word-break:break-word;">' + (p.name || 'Preset #' + p.id) + '</div>' +
+        '<small style="color:#666;display:block;margin-top:4px;overflow-wrap:break-word;word-break:break-word;">Model: ' + (p.model_path || 'N/A') + '</small>' +
         '<small style="color:#888;display:block;margin-top:2px;">Category: ' + (p.category || 'default') + '</small>' +
-        (p.tags ? '<small style="color:#999;display:block;margin-top:2px;">Tags: ' + p.tags + '</small>' : '');
+        (p.tags ? '<small style="color:#999;display:block;margin-top:2px;overflow-wrap:break-word;word-break:break-word;">Tags: ' + p.tags + '</small>' : '');
 
       card.addEventListener('mouseenter', function() {
         if (currentPresetId !== p.id) this.style.borderColor = '#4fc3f7';
@@ -589,9 +589,9 @@ renderModelCards(allModels);
       var card = document.createElement('div');
       card.style.cssText = 'padding:8px 10px;border:1px solid #e0e0e0;border-radius:4px;cursor:pointer;margin-bottom:4px;transition:all 0.15s;display:flex;justify-content:space-between;align-items:center;';
       card.innerHTML = '<div>' +
-        '<span style="font-weight:600;">' + (m.name || m.model_path || 'Unknown') + '</span> ' +
+        '<span style="font-weight:600;word-break:break-word;">' + (m.name || m.model_path || 'Unknown') + '</span> ' +
         '<small style="color:#888;">[' + (m.quantization || '?') + ']</small>' +
-        '<br><small style="color:#666;font-size:0.8em;">' + shortPath + '</small></div>';
+        '<br><small style="color:#666;font-size:0.8em;word-break:break-word;">' + shortPath + '</small></div>';
 
       card.addEventListener('mouseenter', function() { this.style.background = '#f0f7ff'; });
       card.addEventListener('mouseleave', function() { this.style.background = ''; });

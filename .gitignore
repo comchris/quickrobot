@@ -17,7 +17,7 @@ data/quickrobot.db-shm
 # Opencode managed
 .opencode/node_modules/
 .opencode/*.*
-#.opencode/agents/
+.opencode/agents/
 
 # Environment / secrets
 .env
@@ -51,7 +51,7 @@ OLD_ignore/
 docs/LOCALHOSTS.md
 docs/TODO.md
 docs/TODO_done.md
-docs/LOCALHOSTS.md
 docs/benchmarks.md
 docs/design/
 docs/workflows/
+docs/*.md

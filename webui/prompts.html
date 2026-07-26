@@ -25,6 +25,9 @@
 
     <button type="button" id="apply-refresh-btn" class="btn btn-primary" style="padding:4px 10px;font-size:0.85em;">Apply &amp; Refresh</button>
     <button type="button" id="check-all-btn" class="btn btn-success" style="padding:4px 10px;font-size:0.85em;" title="Compute SHA-256 for all listed prompts and flag mismatches">&#9881; Check All</button>
+    <button type="button" id="refresh-mcp-btn" class="btn btn-info" style="padding:4px 10px;font-size:0.85em;margin-left:4px;" title="Re-read DB and re-register MCP prompts/resources. Requires browser reload for llama.cpp UI.">&#8635; Refresh MCP</button>
+    <button type="button" id="override-checksums-btn" class="btn btn-warning" style="padding:4px 10px;font-size:0.85em;margin-left:4px;" title="Update DB checksum/size to match current disk files for all prompts">&#9881; Override Checksums</button>
+    <span id="check-all-status" style="font-size:0.8em;color:#666;"></span>
     {% if filter_type or filter_search or filter_role %}
     <a href="/webui/prompts" class="btn" style="padding:4px 10px;font-size:0.85em;text-decoration:none;background:#999;color:#fff;">Clear</a>
     {% endif %}
@@ -164,21 +167,60 @@ document.addEventListener('DOMContentLoaded', function() {
     // Check All — verify checksums for all listed prompts (manual trigger)
     document.getElementById('check-all-btn').addEventListener('click', async function() {
         const btn = this;
+        const statusEl = document.getElementById('check-all-status');
         btn.disabled = true;
         btn.textContent = 'Re-checking...';
+        statusEl.textContent = '';
         
         let checked = 0, matched = 0, failed = 0;
+        const totalRows = rows.length;
         
         for (const row of rows) {
             await checkPromptChecksum(row);
-            const statusText = row.querySelector('.status-text')?.textContent || '';
-            if (statusText.includes('match')) matched++;
-            if (statusText.includes('mismatch') || statusText.includes('error')) failed++;
             checked++;
+            
+            // Check if status cell shows match/mismatch/error
+            const statusSpan = row.querySelector('.status-cell span');
+            if (statusSpan) {
+                const txt = statusSpan.textContent.trim();
+                if (txt === '\u2713' || txt === '✓' || txt.includes('match') || txt === 'match') {
+                    matched++;
+                } else if (txt === '✗' || txt === '\u2718' || txt.includes('error') || txt.includes('✗')) {
+                    failed++;
+                } else if (txt.includes('mismatch') || txt.includes('\u26a0\ufe0f')) {
+                    matched++; // still counted as checked, but not fully OK
+                }
+            }
         }
         
-        btn.textContent = `Checked ${checked}: ${matched} ok, ${failed} fail`;
-        setTimeout(() => { btn.disabled = false; btn.textContent = '\u2699\ufe0f Check All'; }, 3000);
+        // Build result text and color
+        let resultText = `Checked ${checked}/${totalRows}: ${matched} ok`;
+        if (failed > 0) resultText += `, ${failed} fail`;
+        
+        let btnClass = 'btn-success';
+        let statusColor = '#4caf50';
+        
+        // Bug 1: if checked != matched -> warning (orange)
+        // Bug 2: if checked < totalRows -> error (red)
+        if (checked < totalRows) {
+            btnClass = 'btn-danger';
+            statusColor = '#f44336';
+            resultText += ` (incomplete)`;
+        } else if (failed > 0 || matched !== checked) {
+            btnClass = 'btn-warning';
+            statusColor = '#ff9800';
+        }
+        
+        btn.className = `btn ${btnClass}`;
+        statusEl.textContent = resultText;
+        statusEl.style.color = statusColor;
+        
+        setTimeout(() => { 
+            btn.disabled = false; 
+            btn.className = 'btn btn-success';
+            btn.textContent = '\u2699\ufe0f Check All';
+            statusEl.textContent = '';
+        }, 3000);
     });
 
     // Reset counters button
@@ -205,6 +247,51 @@ document.addEventListener('DOMContentLoaded', function() {
         btn.textContent = 'Reset Counts';
     });
 
+    // Refresh MCP prompts/resources button
+    document.getElementById('refresh-mcp-btn')?.addEventListener('click', async function() {
+        const btn = this;
+        btn.disabled = true;
+        btn.textContent = 'Refreshing...';
+        
+        try {
+            const resp = await qrApi('/prompts/refresh', {method: 'POST'}, true);
+            if (resp.status === 'ok' && resp.data.refreshed) {
+                alert('MCP prompts/resources refreshed. Connected clients will need a page reload to see updates.');
+            } else {
+                alert('Refresh failed: ' + (resp.message || 'unknown error'));
+            }
+        } catch (e) {
+            alert('Error: ' + e.message);
+        }
+        
+        btn.disabled = false;
+        btn.textContent = '\u21bb Refresh MCP';
+    });
+
+    // Override Checksums — update DB checksum/size to match disk files
+    document.getElementById('override-checksums-btn')?.addEventListener('click', async function() {
+        const btn = this;
+        btn.disabled = true;
+        btn.textContent = 'Overriding...';
+        
+        try {
+            const resp = await qrApi('/prompts/rescan?fix=true', {method: 'POST'}, true);
+            if (resp.status === 'ok') {
+                const updated = resp.data.updated || 0;
+                const mismatchCount = resp.data.mismatch_count || 0;
+                alert(`Override complete: ${updated} checksum(s) updated, ${mismatchCount} total mismatch(es) resolved. Refreshing list...`);
+                setTimeout(() => location.reload(), 500);
+            } else {
+                alert('Override failed: ' + (resp.message || 'unknown error'));
+            }
+        } catch (e) {
+            alert('Error: ' + e.message);
+        }
+        
+        btn.disabled = false;
+        btn.textContent = '\u2699 Override Checksums';
+    });
+
     // Search/refresh button
     document.getElementById('apply-refresh-btn').addEventListener('click', function() {
         const type = document.getElementById('filter-prompt-type').value;
@@ -219,9 +306,56 @@ document.addEventListener('DOMContentLoaded', function() {
         window.location.href = '/webui/prompts' + (params.toString() ? '?' + params.toString() : '');
     });
 
-    // Init sortable tables for this page
-    if (typeof qrSettings !== 'undefined') {
-        sortTable(tbody, 'prompt-table-body');
+    // Sortable table init
+    var _savedSortCol = parseInt(qrSettings.get('prompts', 'sort_col', '-1'), 10);
+    var _savedSortDir = qrSettings.get('prompts', 'sort_dir', '');
+    var ths = document.querySelectorAll('.sortable');
+
+    // Sort table function
+    function sortTable(col, dir) {
+        if (!ths[col]) return;
+        var table = ths[col].closest('table');
+        if (!table) return;
+        var body = table.querySelector('tbody');
+        if (!body) return;
+        var rows = Array.from(body.rows);
+        rows.sort(function(a, b) {
+            var cellA = a.cells[col] ? (a.cells[col].getAttribute('data-sort') || a.cells[col].textContent.trim()) : '';
+            var cellB = b.cells[col] ? (b.cells[col].getAttribute('data-sort') || b.cells[col].textContent.trim()) : '';
+            if (col === 0 || col === 4 || col === 6 || col === 7) {
+                return dir === 'asc' ? (parseInt(cellA, 10) || 0) - (parseInt(cellB, 10) || 0) : (parseInt(cellB, 10) || 0) - (parseInt(cellA, 10) || 0);
+            }
+            return dir === 'asc' ? cellA.localeCompare(cellB) : cellB.localeCompare(cellA);
+        });
+        rows.forEach(function(row) { body.appendChild(row); });
     }
+
+    function applyArrows(col, dir) {
+        ths.forEach(function(t) {
+            t.textContent = t.textContent.replace(/\s*[\u2191\u2193]\s*$/, '').trim();
+        });
+        var arrow = dir === 'asc' ? ' \u2191' : ' \u2193';
+        ths[col].textContent = ths[col].textContent.trim() + arrow;
+    }
+
+    function applySavedSort() {
+        if (_savedSortCol >= 0 && _savedSortDir) {
+            sortTable(_savedSortCol, _savedSortDir);
+            applyArrows(_savedSortCol, _savedSortDir);
+        }
+    }
+    applySavedSort();
+
+    ths.forEach(function(th) {
+        th.style.cursor = 'pointer';
+        th.addEventListener('click', function() {
+            var col = parseInt(this.getAttribute('data-col'), 10);
+            var dir = qrSettings.get('prompts', 'sort_dir', '') === 'desc' ? 'asc' : 'desc';
+            qrSettings.set('prompts', 'sort_col', col.toString());
+            qrSettings.set('prompts', 'sort_dir', dir);
+            sortTable(col, dir);
+            applyArrows(col, dir);
+        });
+    });
 });
 </script>

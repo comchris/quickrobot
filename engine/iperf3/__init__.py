@@ -22,7 +22,7 @@ discovery by the engine loader. Supports two modes via presets:
 
 import logging
 
-from lib.qr_engine_ids import QR_DEFAULT_LOCALHOST, QR_ENGINE_PORT_DEFAULTS
+from lib.qr_engine_ids import QR_DEFAULT_LOCALHOST, QR_ENGINE_PORT_DEFAULTS, QR_ENGINE_IPERF3_NAME
 from engine.base import BaseEngine
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,11 @@ CAPABILITIES = {
         {"path": "/engines/iperf3/presets", "label": "Presets", "order": 2},
     ],
     "supported_jobs": ["deploy", "restart", "undeploy"],
+    "undeploy_chain": [
+        {"stage": "stop", "playbook": "service_stop"},
+        {"stage": "undeploy", "playbook": "undeploy_iperf3"},
+        {"stage": "verify", "playbook": "check_undeploy"},
+    ],
 }
 
 
@@ -50,6 +55,10 @@ class Iperf3Engine(BaseEngine):
     Instances communicate via iperf3 protocol. Port range: 9900-9904
     (limited to 5 concurrent server listeners per node).
     """
+
+    STATE_EXTENSIONS = {
+        "running": ["configuring"],
+    }
 
     def __init__(self):
         self._name = "iperf3"
@@ -63,59 +72,22 @@ class Iperf3Engine(BaseEngine):
         Extends base with "configuring" from running (BC-1: config updates while running).
         No updating/compiling since iperf3 has no cmake build pipeline.
         """
-        sm = super().get_state_machine()
-        sm["running"].append("configuring")
-        return sm
+        from lib.lib_engine_states import build_state_machine as _bsm
+        return _bsm(cls.STATE_EXTENSIONS)
 
     def get_status(self, instance_id, db_path=None):
         """Get remote status of an iperf3 instance via systemctl.
 
-        Args:
-            instance_id: Integer primary key of the instance.
-            db_path: Optional database path (required for remote instances).
-
-        Returns:
-            dict with keys: engine, instance_id, service_state,
-                service_substate, main_pid, memory_mb, restart_count, error.
+        Returns canonical shape: engine, instance_id, unit_name, service_state, error.
         """
         if db_path is None:
             return {"engine": self._name, "instance_id": instance_id,
                     "error": "db_path required for remote get_status"}
 
-        import json as _json
-        from db.sqlite import pool
-
         try:
-            with pool(db_path) as conn:
-                row = conn.execute(
-                    """SELECT i.port_assigned, i.state, i.name,
-                               n.hostname as node_host, n.ansible_user as node_user,
-                               e.name as engine_type_name
-                        FROM instances i
-                        LEFT JOIN nodes n ON i.node_id = n.id
-                        JOIN engine_types e ON i.engine_type_id = e.id
-                        WHERE i.id = ?""",
-                    (instance_id,),
-                ).fetchone()
-
-                if not row:
-                    return {"engine": self._name, "instance_id": instance_id,
-                            "error": f"Instance {instance_id} not found"}
-
-                unit_name = f"qr-{instance_id}-{row['engine_type_name']}"
-                node_host = row["node_host"] or QR_DEFAULT_LOCALHOST
-                node_user = (row["node_user"] if row["node_user"] else None) or DEFAULT_ANSIBLE_USER
-
-                result = self._check_remote_service(node_host, unit_name, node_user)
-
-                return {
-                    "engine": self._name,
-                    "instance_id": instance_id,
-                    "unit_name": unit_name,
-                    "node_host": node_host,
-                    "port_assigned": row["port_assigned"],
-                } | result
-
+            from lib.lib_engine_status_query import query_systemd_status as _qs
+            unit_builder = lambda row: f"qr-{instance_id}-{row['engine_type_name']}"
+            return _qs(db_path, self._name, instance_id, unit_builder)
         except Exception as exc:
             return {"engine": self._name, "instance_id": instance_id,
                     "service_state": "unknown", "error": str(exc),
@@ -125,79 +97,19 @@ class Iperf3Engine(BaseEngine):
     def _check_remote_service(self, node_host, unit_name, node_user=None):
         """Check remote systemd service and process stats via ansible playbook.
 
-        Uses instance_health_check playbook for unified, interlock-aware health checks.
+        Delegates to shared lib_engine_health.check_remote_service().
 
         Args:
             node_host: Hostname or IP of the remote node.
             unit_name: Name of the systemd unit (e.g., 'qr-19-iperf3').
-            node_user: SSH username for the remote node (defaults to DEFAULT_ANSIBLE_USER).
+            node_user: SSH username for the remote node.
 
         Returns:
             dict with keys: service_state, service_substate, main_pid,
                 memory_mb, restart_count, error.
         """
-        import json as _json
-
-        try:
-            from qr_api import _execute_playbook as _ep
-            r = _ep("instance_health_check", resolver_type="playbook_id",
-                    limit=node_host,
-                    extra_vars={"inventory_host": node_host, "unit_name": unit_name},
-                    action_type="health_check")
-
-            if r.get("error"):
-                return {
-                    "service_state": "unknown", "service_substate": "ansible_error",
-                    "main_pid": None, "memory_mb": 0.0, "restart_count": 0,
-                    "error": r["error"],
-                }
-
-            # Parse JSON from playbook debug msg
-            svc_result = r.get("result", {})
-            json_str = ""
-            for play in svc_result.get("results", {}).get("plays", []):
-                for task in play.get("tasks", []):
-                    if "Output health check result" in task.get("task", {}).get("name", ""):
-                        entry = task.get("results", [{}])[0]
-                        json_str = entry.get("msg", "")
-
-            if not json_str:
-                return {
-                    "service_state": "unknown", "service_substate": "no_output",
-                    "main_pid": None, "memory_mb": 0.0, "restart_count": 0,
-                    "error": "Playbook returned no output",
-                }
-
-            data = _json.loads(json_str)
-            memory_kb = int(data.get("memory_kb", 0))
-            main_pid = int(data["main_pid"]) if data.get("main_pid") and data["main_pid"] not in ("0",) else None
-
-            error = None
-            state = data.get("service_state", "unknown")
-            if state == "unknown" and main_pid is None:
-                error = f"Service {unit_name} not found on {node_host}"
-
-            return {
-                "service_state": state,
-                "service_substate": data.get("sub_state", "unknown"),
-                "main_pid": main_pid,
-                "memory_mb": round(memory_kb / 1024, 2) if memory_kb else 0.0,
-                "restart_count": int(data.get("restart_count", 0)),
-                "error": error,
-            }
-
-        except _json.JSONDecodeError:
-            return {
-                "service_state": "unknown", "service_substate": "parse_error",
-                "main_pid": None, "memory_mb": 0.0, "restart_count": 0,
-                "error": f"Failed to parse playbook output: {json_str!r}",
-            }
-        except Exception as exc:
-            return {
-                "service_state": "unknown", "service_substate": "error",
-                "main_pid": None, "memory_mb": 0.0, "restart_count": 0,
-                "error": str(exc),
-            }
+        from lib.lib_engine_health import check_remote_service as _check
+        return _check(node_host, unit_name, node_user)
 
     def query_status(self, instance_id, db_path=None):
         """Remote health check via ansible playbook.
@@ -278,47 +190,60 @@ class Iperf3Engine(BaseEngine):
             return {"alive": False, "latency_ms": None,
                     "error": str(exc)}
 
-    def set_config(self, instance_id, config_dict, db_path=None):
-        """Apply configuration to an iperf3 instance.
+    # set_config, get_config, execute inherited from BaseEngine (shared lib)
 
-        Args:
-            instance_id: Integer primary key of the instance.
-            config_dict: dict of configuration parameters.
-            db_path: Optional database path for system-managed engines.
+    # forward_request inherited from BaseEngine (shared lib)
 
-        Returns:
-            dict with the updated configuration.
+    @classmethod
+    def get_instance_status(cls, db_path, instance_id):
+        """Unified status endpoint for iperf3 instances (STATUS-1).
+
+        Delegates to shared build_instance_status() with iperf3-specific extras.
         """
-        return {"engine": self._name, "instance_id": instance_id,
-                "config": config_dict, "applied": True}
+        result = cls.build_instance_status(db_path, instance_id)
+        if not result:
+            return None
 
-    def get_config(self, instance_id, db_path=None):
-        """Get current running config for an iperf3 instance.
+        # Engine-specific: node hostname warning
+        if result["engine_data"].get("node_hostname"):
+            result["warnings"].append(
+                {"type": "info", "message": f"Running on {result['engine_data']['node_hostname']}"}
+            )
 
-        Args:
-            instance_id: Integer primary key of the instance.
-            db_path: Optional database path for system-managed engines.
+        return result
 
-        Returns:
-            dict with current configuration.
+    @classmethod
+    def build_instance_status(cls, db_path, instance_id):
+        """Shared STATUS-1 base response (lib/lib_engine_status.build_instance_status).
+
+        iperf3-specific: merges remote systemd service health into engine_data.
         """
-        return {"engine": self._name, "instance_id": instance_id,
-                "config": {}}
+        from lib.lib_engine_status import build_instance_status as _shared_build
+        result = _shared_build(cls, db_path, instance_id)
+        if not result:
+            return None
 
-    def execute(self, instance_id, command, db_path=None, **kwargs):
-        """Execute a command on an iperf3 instance.
+        # Merge remote systemd service health into engine_data
+        from lib.lib_engine_status_query import query_systemd_status as _qs
+        svc = _qs(
+            db_path, QR_ENGINE_IPERF3_NAME, instance_id,
+            unit_name_builder=lambda r: f"qr-{instance_id}-iperf3",
+        )
+        if svc and not svc.get("error"):
+            result["engine_data"].update({
+                "service_state": svc.get("service_state"),
+                "main_pid": svc.get("main_pid"),
+                "memory_mb": svc.get("memory_mb"),
+                "restart_count": svc.get("restart_count"),
+            })
 
-        Args:
-            instance_id: Integer primary key of the instance.
-            command: Command string (e.g., "run_client").
-            db_path: Optional database path for system-managed engines.
-            **kwargs: Additional parameters.
+        return result
 
-        Returns:
-            dict with execution result.
-        """
-        return {"engine": self._name, "instance_id": instance_id,
-                "command": command, "result": "executed"}
+    @classmethod
+    def _get_available_actions(cls, state):
+        """Map instance state to available actions (shared lib module)."""
+        from lib.lib_engine_actions import get_action_map
+        return get_action_map(CAPABILITIES["name"]).get(state, [])
 
     def list_resources(self, instance_id, db_path=None):
         """List available iperf3 server instances as connectable targets.
@@ -342,7 +267,6 @@ class Iperf3Engine(BaseEngine):
 
         try:
             with pool(db_path) as conn:
-                # Get node_id for this instance
                 row = conn.execute(
                     "SELECT node_id FROM instances WHERE id = ?",
                     (instance_id,),
@@ -353,7 +277,6 @@ class Iperf3Engine(BaseEngine):
 
                 node_id = row["node_id"]
 
-                # Find running iperf3 server instances on the same node
                 target_rows = conn.execute(
                     """SELECT i.id, i.name, i.port_assigned, n.hostname as node_host
                        FROM instances i
@@ -370,7 +293,7 @@ class Iperf3Engine(BaseEngine):
 
                 targets = []
                 for t in target_rows:
-                    if t["id"] != instance_id:  # exclude self
+                    if t["id"] != instance_id:
                         targets.append({
                             "id": t["id"],
                             "name": t["name"],
@@ -384,105 +307,3 @@ class Iperf3Engine(BaseEngine):
         except Exception as exc:
             return {"engine": self._name, "instance_id": instance_id,
                     "targets": [], "_error": str(exc)}
-
-    def get_presets(self, engine_type_id, db_path=None):
-        """Get presets for the iperf3 engine type.
-
-        Args:
-            engine_type_id: Integer primary key of the engine type.
-            db_path: Optional database path for system-managed engines.
-
-        Returns:
-            list of preset dicts (loaded from DB at runtime).
-        """
-        return []
-
-    def set_active_preset(self, instance_id, preset_id, db_path=None):
-        """Set the active preset for an iperf3 instance.
-
-        Args:
-            instance_id: Integer primary key of the instance.
-            preset_id: Integer primary key of the target preset.
-            db_path: Optional database path for system-managed engines.
-
-        Returns:
-            dict with updated preset assignment.
-        """
-        return {"engine": self._name, "instance_id": instance_id,
-                "preset_id": preset_id, "applied": True}
-
-    def forward_request(self, instance_id, method, params=None, db_path=None):
-        """Forward a request to an iperf3 instance.
-
-        Args:
-            instance_id: Integer primary key of the instance.
-            method: Request method name string.
-            params: Optional dict of parameters.
-            db_path: Optional database path for system-managed engines.
-
-        Returns:
-            dict with the response from the iperf3 instance.
-        """
-        return {"engine": self._name, "instance_id": instance_id,
-                "method": method, "params": params or {}, "result": None}
-
-    @classmethod
-    def get_instance_status(cls, db_path, instance_id):
-        """Unified status endpoint for iperf3 instances (STATUS-1)."""
-        from db.sqlite import pool
-
-        with pool(db_path) as conn:
-            inst = conn.execute(
-                """SELECT i.id, i.name, i.state, i.port_assigned,
-                          i.node_id,
-                          e.name as engine_type_name,
-                          n.hostname as node_hostname
-                   FROM instances i
-                   JOIN engine_types e ON i.engine_type_id = e.id
-                   LEFT JOIN nodes n ON i.node_id = n.id
-                   WHERE i.id = ?""",
-                (instance_id,),
-            ).fetchone()
-
-        if not inst:
-            return None
-
-        engine_data = {"port_assigned": inst["port_assigned"], "node_hostname": inst["node_hostname"]}
-
-        actions = cls._get_available_actions(inst["state"])
-        warnings = []
-        if inst["node_hostname"] and inst["state"] in ("running", "deployed"):
-            warnings.append({"type": "info", "message": f"Running on {inst['node_hostname']}"})
-
-        state_machine = cls.get_state_machine()
-        valid_next = state_machine.get(inst["state"], [])
-
-        return {
-            "id": inst["id"],
-            "state": inst["state"],
-            "engine_type_name": inst["engine_type_name"],
-            "engine_data": engine_data,
-            "actions": actions,
-            "warnings": warnings,
-            "_meta": {
-                "valid_next_states": valid_next,
-                "is_transitioning": inst["state"] in ("configuring",),
-            },
-        }
-
-    @classmethod
-    def _get_available_actions(cls, state):
-        """Map instance state to available actions."""
-        action_map = {
-            "unconfigured": [{"name": "deploy", "label": "Deploy"}, {"name": "delete", "label": "Delete"}],
-            "configuring": [{"name": "stop", "label": "Stop"}],
-            "deployed": [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "delete", "label": "Delete"}],
-            "starting": [{"name": "stop", "label": "Stop"}],
-            "running": [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "stop", "label": "Stop"}],
-            "stopping": [{"name": "start", "label": "Start"}],
-            "stopped": [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "deploy", "label": "Deploy"}],
-            "error": [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "deploy", "label": "Deploy"}, {"name": "delete", "label": "Delete"}],
-            "build_error": [{"name": "deploy", "label": "Deploy"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "delete", "label": "Delete"}],
-            "timeout": [{"name": "deploy", "label": "Deploy"}],
-        }
-        return action_map.get(state, [])

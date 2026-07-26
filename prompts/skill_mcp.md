@@ -102,6 +102,10 @@ create_instance(
 deploy_instance(<instance_id>, start_after_deploy=True)
 ```
 
+**Preset ↔ engine feedback:** `create_instance` response includes `_warnings` if preset's `engine_type_id` mismatches instance engine type. Always check `_warnings` and correct before proceeding. For `llama_rpc` (engine_type_id=22), use RPC presets IDs 10-14 only.
+
+**Reuse pattern:** For benchmarking or testing different presets, do NOT create new instances. Use `change_preset(instance_id, <preset_id>, skip_build=True)` on an existing running instance. This swaps the model via env file update (CONFIG-1: `$QR_CLI_ARGS_JOINED`), no rebuild needed. Then run benchmark. Same approach for switching between model quantizations on the same hardware.
+
 ### Monitor Running Instances
 ```python
 # Check if an instance is healthy

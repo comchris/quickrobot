@@ -28,6 +28,12 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# ── Pre-flight dependency check (before any third-party imports) ──────
+# If Flask/ansible/etc. are missing, this exits with a friendly message
+# instead of a cryptic ModuleNotFoundError traceback.
+from lib.lib_deps import check_dependencies as _check_deps
+_check_deps()
+
 from qr_api import _CONFIG, _project_root  # Same mutable dict, not a copy
 from qr_api.lib_nodes import find_system_instance as _find_sys_inst
 from lib.qr_engine_ids import (
@@ -82,8 +88,11 @@ def _validate_system_engine_env(env_cfg, engine_name, required_keys):
     for key in required_keys:
         value = env_cfg.get(key)
         if not value or (isinstance(value, str) and value.strip() == ""):
-            print(f"[qr] FATAL: {engine_name} requires '{key}' in .quickrobot.env")
-            print(f"[qr]   Current value: '{value}'" if value else f"[qr]   Key is missing or empty")
+            logger.error("[qr] FATAL: %s requires '%s' in .quickrobot.env", engine_name, key)
+            if value:
+                logger.error("[qr]   Current value: '%s'", value)
+            else:
+                logger.error("[qr]   Key is missing or empty")
             sys.exit(1)
 
 
@@ -109,7 +118,7 @@ def _validate_system_engine_bind(env_cfg, engine_name):
     host = env_cfg.get(host_key, "")
 
     if host in QR_FORBIDDEN_HOSTS:
-        print(f"[qr] FATAL: {engine_name} bind host is '{host}' — must be a specific address")
+        logger.error("[qr] FATAL: %s bind host is '%s' — must be a specific address", engine_name, host)
         sys.exit(1)
 
 
@@ -125,20 +134,28 @@ def phase0_mode_flags(args):
     """
     if args.mode == "prod":
         _CONFIG["pb_mode"] = "prod"
-        print("[qr] normal mode: strict integrity, no auto-registration")
+        logger.info("[qr] normal mode: strict integrity, no auto-registration")
     elif args.mode == "dev-import":
         _CONFIG["pb_mode"] = "dev-import"
-        print("[qr] dev-import mode: scan disk, register new playbooks, sync checksums")
+        logger.info("[qr] dev-import mode: scan disk, register new playbooks, sync checksums")
     elif args.mode == "dev-update":
         _CONFIG["pb_mode"] = "dev-update"
-        print("[qr] dev-update mode: sync existing playbook checksums to DB")
+        logger.info("[qr] dev-update mode: sync existing playbook checksums to DB")
     elif args.mode == "dev":
         _CONFIG["pb_mode"] = "dev"
-        print("[qr] dev mode: integrity check, warn on mismatch")
+        logger.info("[qr] dev mode: integrity check, warn on mismatch")
     elif args.mode == "exit":
         _CONFIG["pb_mode"] = "prod"
         _CONFIG["exit_mode"] = True
-        print("[qr] Exit mode: start, spawn system engines, then exit (no Flask loop)")
+        logger.info("[qr] Exit mode: start, spawn system engines, then exit (no Flask loop)")
+
+    # Prod-mode enforcement: QUICKROBOT_API_KEY required in non-dev modes
+    if _CONFIG["pb_mode"] != "dev":
+        api_key = os.environ.get("QUICKROBOT_API_KEY", "").strip()
+        if not api_key:
+            logger.error("[qr] FATAL: QUICKROBOT_API_KEY is required in production mode.")
+            logger.error("[qr] Generate with: python3 -c \"import secrets; print(secrets.token_urlsafe(32))\"")
+            sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -162,9 +179,9 @@ def phase1_config(args):
         _env_cfg = _load_env(os.getcwd())
         _CONFIG["qr_env"] = _env_cfg
     except FileNotFoundError as _env_exc:
-        print(f"[qr] FATAL: { _env_exc }")
-        print("[qr] .quickrobot.env is required for startup. "
-              "Create one with QUICKROBOT_API_HOST and QUICKROBOT_API_PORT, or provide --port/--host CLI args.")
+        logger.error("[qr] FATAL: %s", _env_exc)
+        logger.error("[qr] .quickrobot.env is required for startup. "
+                      "Create one with QUICKROBOT_API_HOST and QUICKROBOT_API_PORT, or provide --port/--host CLI args.")
         sys.exit(1)
 
     # Use CLI port if explicitly provided, else .env value (required)
@@ -172,7 +189,7 @@ def phase1_config(args):
     if not _cli_port:
         _cli_port = _env_cfg.get("QUICKROBOT_API_PORT")
     if not _cli_port:
-        print("[qr] FATAL: QUICKROBOT_API_PORT is required in .quickrobot.env or via --port CLI arg")
+        logger.error("[qr] FATAL: QUICKROBOT_API_PORT is required in .quickrobot.env or via --port CLI arg")
         sys.exit(1)
     _CONFIG["_last_port"] = int(_cli_port)
     _CONFIG["api_port"] = _CONFIG["_last_port"]
@@ -182,7 +199,7 @@ def phase1_config(args):
     if not _cli_host:
         _cli_host = _env_cfg.get("QUICKROBOT_API_HOST")
     if not _cli_host:
-        print("[qr] FATAL: QUICKROBOT_API_HOST is required in .quickrobot.env or via --host CLI arg")
+        logger.error("[qr] FATAL: QUICKROBOT_API_HOST is required in .quickrobot.env or via --host CLI arg")
         sys.exit(1)
     _CONFIG["host"] = _cli_host
 
@@ -254,6 +271,7 @@ def _check_port_available():
     for attempt in range(2):  # initial + 1 retry
         try:
             _s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            _s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             _s.bind((api_host, api_port))
             _s.close()
             break  # Port available — proceed
@@ -299,11 +317,37 @@ def phase3_db_handling(args):
         _apply_base(db_path)
         print("[qr] Base schema applied")
     else:
-        # Existing database — backup first, then use in-place
-        print(f"[qr] Backing up existing database before startup")
-        from lib.lib_startup import backup_database as _backup_db
-        _backup_db(db_path)
-        _CONFIG["_db_was_created"] = False
+        # Existing database — verify it actually has tables before treating as valid.
+        # A 4KB empty DB (from a previous crash during migration/seed) should be treated as fresh.
+        _empty_db_hack = False
+        try:
+            from db.sqlite import pool as _pool
+            with _pool(db_path) as conn:
+                has_tables = conn.execute(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='engine_types'"
+                ).fetchone()[0]
+                _empty_db_hack = has_tables == 0
+        except Exception:
+            _empty_db_hack = True  # Can't verify → treat as fresh
+
+        if _empty_db_hack:
+            # Empty/broken DB — recreate fresh
+            os.remove(db_path)
+            env_cfg = _CONFIG.get("qr_env", {})
+            from lib.lib_startup import pre_validate_seed_checksum as _preval
+            _preval(env_cfg)
+            print(f"[qr] Database at {db_path} found but empty (no tables) — recreating fresh")
+            print(f"[qr] Creating fresh database with base schema...")
+            _CONFIG["_db_was_created"] = True
+            from db.migration import apply_base_schema as _apply_base
+            _apply_base(db_path)
+            print("[qr] Base schema applied")
+        else:
+            # Truly existing database — backup first, then use in-place
+            print(f"[qr] Backing up existing database before startup")
+            from lib.lib_startup import backup_database as _backup_db
+            _backup_db(db_path)
+            _CONFIG["_db_was_created"] = False
 
 
 # ---------------------------------------------------------------------------
@@ -456,8 +500,29 @@ def _auto_provision_system_instances():
             # Always sync node_hostname for system instances — ensures DB is never stale
             _ui(db_path, inst["id"], node_hostname=actual_host)
             changed = True
-            # Restore running state on startup — respect autostart config per engine
+            # Restore running state on startup only if PID is alive.
+            # If PID is gone or None, leave state as-is — deferred thread will start
+            # the subprocess and the engine execute() handles state transitions.
+            db_pid = inst.get("pid_last_known")
+            pid_alive = False
+            if db_pid:
+                try:
+                    import psutil as _psutil
+                    try:
+                        _proc = _psutil.Process(db_pid)
+                        if _proc.status() != "zombie":
+                            pid_alive = True
+                    except (_psutil.NoSuchProcess, _psutil.AccessDenied):
+                        pass
+                except ImportError:
+                    psutil_available = False
+
             if inst.get("state") not in ("running", "starting"):
+                if not pid_alive:
+                    # PID missing or dead — leave state alone.
+                    # The deferred thread will start the subprocess via engine.execute()
+                    # which handles proper state transitions.
+                    continue
                 auto_start_val = True  # default for API/Scheduler (no .env flag)
                 # WebUI: read from .env
                 if eng_name == QR_ENGINE_WEBUI_NAME:
@@ -1027,7 +1092,7 @@ def phase5_init():
     _APP_INITIALIZED = True
 
     # Load system engine config from env file (before any engine operations)
-    # Returns (qr_env_dict, console_debug_level, ansible_log_level)
+    # Returns (qr_env_dict, console_debug_level, ansible_log_level, per_engine_levels)
     from lib.lib_startup import load_system_engine_config as _load_system_engine_config
     _env_result = _load_system_engine_config()
 
@@ -1037,9 +1102,15 @@ def phase5_init():
     if isinstance(_env_result, tuple) and len(_env_result) >= 3:
         _CONFIG["console_debug_level"] = _env_result[1]
         _CONFIG["ansible_log_level"] = _env_result[2]
+    if isinstance(_env_result, tuple) and len(_env_result) >= 4:
+        _CONFIG["engine_log_levels"] = _env_result[3]
     # Strict validation for API engine
     _validate_system_engine_env(qr_env, "API", ["QUICKROBOT_API_HOST", "QUICKROBOT_API_PORT"])
     _validate_system_engine_bind(qr_env, "API")
+
+    # Load auth key from environment (must happen after env config is loaded)
+    from qr_api import _load_api_key as _lak
+    _lak()
 
     # Override API host/port from .quickrobot.env if present (env > constant defaults)
     if "QUICKROBOT_API_HOST" in qr_env:
@@ -1119,14 +1190,14 @@ def phase5_init():
                 _seed_presets(conn)
                 print("[qr] Seeded default presets")
     except Exception as exc:
-         logger.debug("preset_seeding failed: %s", exc)
-         print(f"[qr] WARNING: preset seeding failed: {exc}")
+        logger.debug("preset_seeding failed: %s", exc)
+        print(f"[qr] WARNING: preset seeding failed: {exc}")
 
-     # Seed already imported above (right after migrations).
-     # Second pass is redundant but harmless (idempotent INSERT OR REPLACE).
-     # Kept for safety — preserves original behavior until we're confident.
+    # Seed already imported above (right after migrations).
+      # Second pass is redundant but harmless (idempotent INSERT OR REPLACE).
+      # Kept for safety — preserves original behavior until we're confident.
 
-     # Backfill playbook_id for any existing rows that have NULL/empty IDs
+      # Backfill playbook_id for any existing rows that have NULL/empty IDs
     try:
         from db.adapters.playbooks import backfill_playbook_ids as _backfill_ids
         filled = _backfill_ids(db_path)
@@ -1274,46 +1345,6 @@ def phase5_init():
 
     return db_path, qr_env, webui_autostart, mcp_autostart
 
-    # Exit mode: print subprocess PIDs and return before Flask loop
-    if _CONFIG.get("exit_mode"):
-        from db.adapters.instances import list_instances as _li_exit
-        sys_print = lambda *a, **k: print("[qr] " + " ".join(str(x) for x in a), **k)
-        for inst in _li_exit(db_path):
-            if inst.get("system_managed"):
-                pid = inst.get("pid_last_known") or "none"
-                sys_print(f"System instance {inst['id']} ({inst['engine_type_name']}): state={inst['state']} pid={pid}")
-        print("[qr] Exit mode: system engines started. Exiting (no Flask loop).")
-        return _CONFIG
-
-    # Recover stale instances (mid-build after crash)
-    try:
-        recover_stale_instances()
-    except Exception as _e:
-        logger.debug("zombie_cleanup failed: %s", _e)
-        pass
-
-    # Recover subprocess instances with start_on_boot=true
-    try:
-        recover_subprocess_instances(db_path)
-    except Exception as _exc:
-        logger.debug("subprocess_recovery failed: %s", _exc)
-        print(f"[qr] WARNING: subprocess recovery failed: {_exc}")
-
-    # Ensure system-managed instances have correct state at startup.
-    # Since we reached here, the API is running and subprocesses are started — set to running.
-    try:
-        from db.adapters.instances import transition_state, list_instances as _li2
-        for i in _li2(db_path):
-            if i.get("system_managed") and i.get("state") == "unconfigured":
-                try:
-                    transition_state(db_path, i["id"], "running")
-                except Exception as _e:
-                    logger.debug("system_instance_transition failed for %d: %s", i["id"], _e)
-                    pass
-    except Exception as _e:
-        logger.debug("system_instance_state_sync failed: %s", _e)
-        pass
-
 
 # ---------------------------------------------------------------------------
 # Phase 6 — CLI overrides apply to DB
@@ -1369,6 +1400,70 @@ def phase7_verify_playbooks():
         print(f"[qr] Updated {prompt_result['updated']} prompt checksum(s)/size(s) in DB")
     if prompt_result.get("version_bumped"):
         print(f"[qr] Updated {prompt_result['version_bumped']} prompt version(s) from file headers")
+
+
+def _run_quicksetup_phase(db_path):
+    """Run QUICKSETUP first-run auto-deploy if enabled and not yet done.
+
+    Called after seed import in phase5_init(), before engine loading.
+    Checks QUICKROBOT_QUICKSETUP env flag and quicksetup_done column.
+    Only runs on FRESH DB creation (_db_was_created=True), never on existing DB restart.
+    Skips if flag is false, _db_was_created is False, or any instance has quicksetup_done=1.
+    """
+    import os as _os
+    import sys as _sys
+
+    try:
+        flag = _os.environ.get("QUICKROBOT_QUICKSETUP", "").strip().lower()
+        if flag != "true":
+            return  # Not enabled — skip silently
+
+        # Check if already done: instance 1 config_override["quicksetup"]["done"] == True.
+        # Also check legacy path (any instance with quicksetup_done=1) for DBs that
+        # used the old phantom-instance approach before v0.10+ migration.
+        from db.sqlite import pool as _pool
+        import json as _json
+        try:
+            with _pool(db_path) as conn:
+                row = conn.execute(
+                    "SELECT config_override FROM instances WHERE id=1"
+                ).fetchone()
+                if row and row[0]:
+                    try:
+                        meta = _json.loads(row[0])
+                        if meta.get("quicksetup", {}).get("done"):
+                            logger.debug("quicksetup skipped: already done (instance 1 config_override)")
+                            return  # Already complete — skip
+                    except Exception as _e:
+                        pass  # Invalid JSON, continue to legacy check
+                # Legacy fallback: any instance with quicksetup_done=1
+                done = conn.execute(
+                    "SELECT COUNT(*) FROM instances WHERE quicksetup_done=1"
+                ).fetchone()[0]
+                if done:
+                    logger.debug("quicksetup skipped: already done (legacy: %d instance(s) with quicksetup_done=1)", done)
+                    return  # Already complete — skip
+        except Exception as _e:
+            # Column may not exist yet on fresh DB (migration hasn't run)
+            # Quicksetup will proceed — the column will be created by migration
+            logger.debug("quicksetup done-check skipped (column may not exist): %s", _e)
+
+        # Only run on fresh DB creation, never on existing DB restart
+        if not _CONFIG.get("_db_was_created"):
+            logger.debug("quicksetup skipped: existing DB (flag=%s, _db_was_created=%s)", flag, _CONFIG.get("_db_was_created"))
+            return
+
+        # Import and run quicksetup script
+        from quicksetup import run_quicksetup as _qr_run
+        exit_code = _qr_run(db_path)
+        if exit_code == 0:
+            print("[qr] QUICKSETUP first-run completed successfully")
+        elif exit_code == 1:
+            print("[qr] QUICKSETUP first-run failed (quicksetup_done remains 0)")
+        # exit_code None = already done, handled above
+    except Exception as exc:
+        logger.debug("quicksetup_phase failed: %s", exc)
+        print(f"[qr] WARNING: quicksetup phase failed: {exc}")
 
 
 def phase5a_zombie_cleanup():
@@ -1464,22 +1559,27 @@ def run_startup():
     phase2_preflight(args, None)
     phase3_db_handling(args)
     phase4_pid_port()
-    # Capture deferred start params from phase5_init
+    # Capture deferred values from phase5_init — needed by quickrobot.py deferred thread.
+    # phase5_init() returns (db_path, qr_env, webui_autostart, mcp_autostart).
     _deferred = phase5_init()
-    if isinstance(_deferred, tuple):
-        _db_path, _qr_env, _webui_as, _mcp_as = _deferred
-        _CONFIG["deferred_db_path"] = _db_path
-        _CONFIG["deferred_qr_env"] = _qr_env
-        _CONFIG["deferred_webui_autostart"] = _webui_as
-        _CONFIG["deferred_mcp_autostart"] = _mcp_as
     phase5a_zombie_cleanup()
     phase5b_log_retention()
     phase6_cli_overrides(args)
     phase7_verify_playbooks()
+    # Store deferred values on _CONFIG so quickrobot.py can access them.
+    if isinstance(_deferred, tuple) and len(_deferred) >= 4:
+        _CONFIG["deferred_db_path"] = _deferred[0]
+        _CONFIG["deferred_qr_env"] = _deferred[1]
+        _CONFIG["deferred_webui_autostart"] = _deferred[2]
+        _CONFIG["deferred_mcp_autostart"] = _deferred[3]
+    # Store db_path for deferred quicksetup — only on fresh DB creation.
+    # Existing DB restarts skip this to prevent re-running quicksetup.
+    if _CONFIG.get("_db_was_created"):
+        _CONFIG["deferred_quicksetup"] = _CONFIG.get("db_path")
     return _CONFIG
 
 
-def deferred_start_system_engines(db_path, qr_env, webui_autostart, mcp_autostart):
+def deferred_start_system_engines(db_path, qr_env, webui_autostart, mcp_autostart, scheduler_autostart):
     """Start system engine subprocesses (webui, mcp, scheduler).
 
     Called in a daemon thread AFTER Flask has bound to its port.
@@ -1490,6 +1590,7 @@ def deferred_start_system_engines(db_path, qr_env, webui_autostart, mcp_autostar
         qr_env: Dict from load_env_config()
         webui_autostart: Boolean — start webui?
         mcp_autostart: Boolean — start mcp?
+        scheduler_autostart: Boolean — start scheduler?
     """
     # WebUI
     if webui_autostart:
@@ -1513,10 +1614,12 @@ def deferred_start_system_engines(db_path, qr_env, webui_autostart, mcp_autostar
     else:
         print("[qr] [MCP] autostart=disabled (set QUICKROBOT_MCP_AUTOSTART=true or use /instances/3/start)")
 
-    # Scheduler — always autostart; critical for job/task execution
-    try:
-        _start_system_engine(db_path, "scheduler")
-        print("[qr] [SCHEDULER] autostart enabled")
-    except Exception as exc:
-        logger.debug("scheduler_start failed: %s", exc)
-        print(f"[qr] [SCHEDULER] start failed: {exc}")
+    # Scheduler — controlled by QUICKROBOT_SCHEDULER_AUTOSTART env var (default: true)
+    if scheduler_autostart:
+        try:
+            _start_system_engine(db_path, "scheduler")
+        except Exception as exc:
+            logger.debug("scheduler_start failed: %s", exc)
+            print(f"[qr] [SCHEDULER] start failed: {exc}")
+    else:
+        print("[qr] [SCHEDULER] autostart=disabled (set QUICKROBOT_SCHEDULER_AUTOSTART=true or use /instances/4/start)")

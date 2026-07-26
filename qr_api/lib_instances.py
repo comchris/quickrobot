@@ -40,7 +40,7 @@ def get_node_build_lock(node_id: int) -> threading.Lock:
             _NODE_BUILD_LOCKS[node_id] = threading.Lock()
         return _NODE_BUILD_LOCKS[node_id]
 BUILD_STATES = ("configuring", "deploying", "updating")
-# Project root — resolved from parent package's _project_root (defined in __init__.py line 21, before this module imports)
+# Project root — resolved from parent package's _project_root (defined in __init__.py line 42)
 PROJECT_ROOT = __import__("qr_api")._project_root
 
 # Internal imports — avoid circular dependency with __init__.py
@@ -60,7 +60,7 @@ from db.adapters.configs import get_engine_config as _gec
 from lib.lib_ansible_runner import run_playbook, log_ansible_action
 from lib.lib_cluster_env_builder import build_llama_server_env, build_rpc_server_env, get_cluster_summary
 from lib.lib_constants import (
-    DEFAULT_ANSIBLE_USER, GRACE_PERIOD_RUNNING, QR_DEFAULT_BIND_HOST,
+    DEFAULT_ANSIBLE_USER, QR_DEFAULT_BIND_HOST,
     QUICKROBOT_PLAYBOOK_TIMEOUT,
 )
 from lib.qr_engine_ids import (
@@ -396,9 +396,9 @@ def _execute_playbook(resolver_ref, resolver_type="playbook_id", limit=None, ext
 
         if not os.path.exists(full_path):
             checksum_status = "missing"
-            print(f"[qr] CHECKSUM MISSING: {file_path} (not found on disk)")
+            logger.error("[qr] CHECKSUM MISSING: %s (not found on disk)", file_path)
             if mode == "prod":
-                print("[qr] FATAL: playbook missing in prod mode. Killing API process.")
+                logger.error("[qr] FATAL: playbook missing in prod mode. Killing API process.")
                 raise SystemExit(1)
         else:
             # Check checksum
@@ -425,9 +425,9 @@ def _execute_playbook(resolver_ref, resolver_type="playbook_id", limit=None, ext
                     issues.append(f"size (expected={expected_size}B actual={actual_size}B)")
                 if not id_ok:
                     issues.append(f"playbook_id header (expected={expected_pb_id} actual={actual_header['playbook_id']})")
-                print(f"[qr] PLAYBOOK VERIFY FAIL: {file_path} — {'; '.join(issues)}")
+                logger.warning("PLAYBOOK VERIFY FAIL: %s — %s", file_path, "; ".join(issues))
                 if mode != "dev":
-                    print(f"[qr] FATAL: playbook verification failed in {mode} mode. Killing API process.")
+                    logger.error("[qr] FATAL: playbook verification failed in %s mode. Killing API process.", mode)
                     raise SystemExit(1)
     else:
         # No DB record — check file existence only
@@ -1089,23 +1089,84 @@ def _restart_system_managed(inst_id, engine_type_name, log_action_fn):
             return _error_response("DEPLOYMENT_FAILED", f"Web UI restart failed: {exc}")
 
         elif engine_type_name == QR_ENGINE_API_NAME:
+            # Transition to stopped
+            logger.info("API restart: entering restart path for instance %d", inst_id)
             try:
-                _ts2(config["db_path"], inst_id, "running")
+                _ts2(config["db_path"], inst_id, "stopped")
             except Exception as _e:
                 logger.debug("restart state transition failed: inst=%d (api)", inst_id, _e)
+
+            logger.info("API restart: updating log entry %d", log_entry_id)
             _update_log(config["db_path"], log_entry_id, "success",
                         detail={"system_managed": True, "engine": engine_type_name,
-                                "message": "quickrobot service reloads on next request"})
+                                "message": "API restarting via execv"})
+
             try:
                 log_ansible_action(config["db_path"], "restart_instance", node_id, inst_id,
                         "local (quickrobot-api)", {"action": "restart", "engine_type": engine_type_name,
                                     "system_managed": True},
-                            {"changed": False, "failed": False, "results": {"reloads_on_next_request": True}})
+                            {"changed": True, "failed": False, "results": {"execv_restart": True}})
             except Exception as _e:
-                logger.debug("restart log_ansible_action failed: inst=%d (api)", inst_id, _e)
-            return _success_single({"action": "restart", "instance_id": inst_id,
-                                "state": "running", "system_managed": True,
-                                "message": "quickrobot service will reload on next request"})
+                logger.debug("restart log failed: inst=%d (api)", inst_id, _e)
+
+            # Return a confirmation response immediately so Flask can send it
+            # before we block on shutdown_execv() in the background.
+            response = _success_single({
+                "action": "restart", "instance_id": inst_id,
+                "state": "running", "system_managed": True,
+                "message": "API restarting via execv replacement"
+            })
+
+            # Run shutdown + execv in a background thread so the HTTP response
+            # can be sent to the client without waiting for subprocess termination.
+            def _shutdown_execv():
+                """Shutdown subprocesses and execv in background thread."""
+                try:
+                    from lib.lib_system_engine import load_env_config as _load_env
+                    qr_env = _load_env(os.getcwd())
+                except FileNotFoundError:
+                    qr_env = {}
+
+                logger.info("API restart (bg): shutting down child subprocesses")
+                try:
+                    from lib.lib_system_engine import shutdown_subprocesses as _shutdown
+                    results = _shutdown(qr_env, timeout=3)
+                    logger.info("API restart (bg): subprocess shutdown results: %s", results)
+                except Exception as _e:
+                    logger.warning("API restart (bg): subprocess shutdown failed: %s", _e)
+
+                # Brief pause — allow DB PID updates to settle before execv replaces this process
+                _time.sleep(0.5)
+
+                # Delete our own PID file so _check_pid_file() on the new process
+                # doesn't see itself as a duplicate and abort startup.
+                try:
+                    _pid_path = os.path.join(os.getcwd(), "data", "quickrobot.pid")
+                    if os.path.exists(_pid_path):
+                        os.remove(_pid_path)
+                        logger.debug("API restart (bg): removed PID file %s", _pid_path)
+                except Exception as _pem:
+                    logger.debug("API restart (bg): failed to remove PID file: %s", _pem)
+
+                # Build argv: same script + all original arguments
+                import sys as _sys
+                _argv = [_sys.executable, _sys.argv[0]] + [a for a in _sys.argv[1:] if a != "--no-webui"]
+
+                logger.info("API restart (bg): about to execv: %s", " ".join(_argv[:3]))
+                # Write marker file for debugging (optional, survives execv)
+                try:
+                    marker = os.path.join(os.getcwd(), "data", "_restart_marker")
+                    with open(marker, "w") as _mf:
+                        _mf.write(f"execv_pid={os.getpid()}\nargs={' '.join(_argv)}\ntime={_time.strftime('%Y-%m-%dT%H:%M:%S')}\n")
+                except Exception as _em:
+                    pass
+                _sys.stdout.flush()
+                _sys.stderr.flush()
+                # os.execv replaces THIS process — code below never runs
+                __import__("os").execv(_sys.executable, _argv)
+
+            threading.Thread(target=_shutdown_execv, daemon=True).start()
+            return response
 
         elif engine_type_name == QR_ENGINE_MCP_NAME:
             from engine.quickrobot_mcp import QrMcpEngine
