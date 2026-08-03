@@ -1,5 +1,4 @@
-<a class="back-link" href="/webui/hosts">Back to hosts</a>
-<h1>Node: {{ node.name | default('unknown') }}</h1>
+<h1 style="margin:0;font-size:1.3em;">Node: {{ node.name }} {{ status_badge(node.status) }}</h1>
 
 <!-- Node info card -->
 <div class="detail-grid">
@@ -41,6 +40,7 @@
     <label>Age</label>
     <value>{{ node.age_created or '—' }}</value>
   </div>
+  {% if node.id != 1 %}
   <div class="detail-card">
     <label>SSH User</label>
     <value>{{ node.ansible_user or '—' }}</value>
@@ -53,6 +53,7 @@
     <label>SSH Key</label>
     <value>{% if node.ansible_key_path %}{{ node.ansible_key_path }}{% else %}ssh-agent (default){% endif %}</value>
   </div>
+  {% endif %}
 </div>
 
 <!-- Actions -->
@@ -106,9 +107,24 @@
 </tbody>
 </table>
 
-<!-- SSH Settings Edit Section -->
+<!-- Node Settings Edit Section (hidden for localhost) -->
+{% if node.id != 1 %}
 <div class="detail-card" style="margin-top:16px;">
-  <label>SSH Settings (edit per-host)</label>
+  <label>Node Settings (edit per-host)</label>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:8px;">
+    <div>
+      <label style="font-size:0.8em;color:#888;">Model Base Path (search root for .gguf files)</label>
+      <input type="text" id="model-base-path-input" value="{{ node.model_base_path or '' }}" placeholder="/mnt/llama/gguf/models" style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+    </div>
+    <div>
+      <label style="font-size:0.8em;color:#888;">Ansible Inventory Host (optional override)</label>
+      <input type="text" id="ansible-inv-host-input" value="{{ node.ansible_inventory_host or '' }}" placeholder="unset (uses hostname)" style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+    </div>
+    <div>
+      <label style="font-size:0.8em;color:#888;">Host Type (e.g., inference, rpc, cpu)</label>
+      <input type="text" id="host-type-input" value="{{ node.host_type or '' }}" placeholder="unset" style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+    </div>
+  </div>
   <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:8px;">
     <div>
       <label style="font-size:0.8em;color:#888;">SSH User (empty = unset, falls back to .env/default)</label>
@@ -123,8 +139,9 @@
       <input type="text" id="ssh-key-input" value="{% if node.ansible_key_path %}{{ node.ansible_key_path }}{% endif %}" placeholder="unset" style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
     </div>
   </div>
-  <button id="save-ssh-settings" class="btn btn-primary" style="margin-top:8px;padding:5px 16px;font-size:0.85em;">Save SSH Settings</button>
+  <button id="save-node-settings" class="btn btn-primary" style="margin-top:8px;padding:5px 16px;font-size:0.85em;">Save Node Settings</button>
 </div>
+{% endif %}
 
 <!-- Action button JS -->
 <script>
@@ -237,16 +254,25 @@ function loadActionHistory(nodeId) {
     }).catch(function() { /* silent fail */ });
 }
 
-// SSH settings save handler
-var saveBtn = document.getElementById('save-ssh-settings');
+// Node settings save handler
+var saveBtn = document.getElementById('save-node-settings');
 if (saveBtn) {
   saveBtn.addEventListener('click', function() {
     var nodeId = '{{ node.id }}';
+    var modelPathVal = document.getElementById('model-base-path-input').value.trim();
+    var invHostVal = document.getElementById('ansible-inv-host-input').value.trim();
+    var hostTypeVal = document.getElementById('host-type-input').value.trim();
     var userVal = document.getElementById('ssh-user-input').value.trim();
     var portVal = document.getElementById('ssh-port-input').value.trim();
     var keyVal = document.getElementById('ssh-key-input').value.trim();
 
     var payload = {};
+    if (modelPathVal === '') payload.model_base_path = null;
+    else payload.model_base_path = modelPathVal;
+    if (invHostVal === '') payload.ansible_inventory_host = null;
+    else payload.ansible_inventory_host = invHostVal;
+    if (hostTypeVal === '') payload.host_type = null;
+    else payload.host_type = hostTypeVal;
     if (userVal === '') payload.ansible_user = null;
     else payload.ansible_user = userVal;
     if (portVal && portVal !== '{{ node.ssh_port or 22 }}') payload.ssh_port = parseInt(portVal);
@@ -269,7 +295,7 @@ if (saveBtn) {
       if (data.status === 'ok') {
         var toast = document.createElement('div');
         toast.style.cssText = 'position:fixed;top:20px;right:20px;z-index:9999;padding:10px 16px;background:#4caf50;color:#fff;border-radius:4px;font-size:0.85em;box-shadow:0 2px 8px rgba(0,0,0,0.2);';
-        toast.textContent = 'SSH settings saved';
+        toast.textContent = 'Node settings saved';
         document.body.appendChild(toast);
         setTimeout(function() { toast.style.opacity = '0'; setTimeout(function() { toast.remove(); }, 300); }, 2500);
       } else {

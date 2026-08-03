@@ -1,4 +1,7 @@
+# @name: Quicksetup Validate
+# @name: Quicksetup Validate
 # @playbook_id: quicksetup_validate
+# @timeout: 60
 # @version: 1
 
 ---

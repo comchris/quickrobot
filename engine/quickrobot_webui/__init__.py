@@ -64,9 +64,8 @@ class QrWebuiEngine(BaseEngine):
         return sm
 
     def __init__(self, config=None):
-        if os.getuid() == 0:
-            print("this robot won't run as root")
-            sys.exit(1)
+        import lib.lib_platform as _lp
+        _lp.check_nonroot()
         self.config = config or {}
         self._name = CAPABILITIES["name"]
 

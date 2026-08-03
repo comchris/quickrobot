@@ -11,7 +11,8 @@ from qr_api import _CONFIG
 from lib.lib_runner import PlaybookRunner
 from db.sqlite import pool as db_pool
 
-# Stale job statuses — non-running states eligible for cleanup
+# Stale job statuses — non-running log entry/job states eligible for cleanup.
+# Mirror of terminal/transitional states from lib.qr_engine_ids STAGE_STATE_MAP values.
 STALE_JOB_STATUSES = ("completed", "failed", "error", "queued")
 
 

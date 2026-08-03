@@ -257,7 +257,7 @@ class QrMcpEngine(BaseEngine):
                 except Exception as _e:
                     logger.debug("mcp config_override JSON parse failed: %s", _e)
                     co = {}
-            host = co.get("mcp_host") or os.environ.get("QUICKROBOT_MCP_HOST") or _CONFIG.get("host")
+            host = co.get("mcp_host") or os.environ.get("QUICKROBOT_MCP_HOST", "127.0.0.1")
 
             if pid:
                 try:

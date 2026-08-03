@@ -5,10 +5,10 @@ Triggered by QUICKROBOT_QUICKSETUP=true in .quickrobot.env after seed import.
 Runs as a background thread so the API remains responsive during setup.
 
 Multi-step flow:
-  1. Pre-flight: verify presets 20-30 exist in seed (SSOT)
-  2. Step A: POST /api/v1/instances — create router instance (preset 20)
+  1. Pre-flight: verify preset 100 exists in seed (SSOT)
+  2. Step A: POST /api/v1/instances — create router instance (preset 100)
   3. Wait A: poll until "running" (30min timeout, ESC=cancel)
-  4. Step B: PUT /api/v1/instances/{id}/config — reconfigure to download preset (21)
+  4. Step B: PUT /api/v1/instances/{id}/config — add download env+cli_flags on top of preset 100
   5. Wait B: poll until "running" again (30min timeout, ESC=cancel)
   6. Step C: health probe + full console report
 
@@ -27,7 +27,7 @@ import urllib.error
 from datetime import datetime, timezone
 
 from db.sqlite import pool as _pool
-from lib.qr_engine_ids import QR_ENGINE_LLAMA_SERVER
+from lib.qr_engine_ids import QR_ENGINE_LLAMA_SERVER, QR_DEFAULT_LOCALHOST
 from qr_api import _project_root
 
 # Pre-flight: verify DB + .env file state
@@ -35,8 +35,7 @@ from lib.lib_startup import ensure_db_and_env as _ensure_db_env
 _ensure_db_env(_project_root)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-PRESET_ROUTER_ID = 20         # QuickSetup-Router (fast start, no model)
-PRESET_DOWNLOAD_ID = 21       # QuickSetup-Download (model download trigger)
+PRESET_ROUTER_ID = 100         # 1-NoModel-ROUTER-Mode (fast start, tuned defaults)
 STEP_TIMEOUT_SEC = 30 * 60    # 30 minutes per step
 POLL_INTERVAL_SEC = 5         # Poll interval for status checks
 CANCEL_FLAG = threading.Event()
@@ -255,17 +254,17 @@ def _wait_for_running(inst_id, db_path, step_label, max_wait=STEP_TIMEOUT_SEC):
 # ── Multi-step execution ─────────────────────────────────────────────────────
 
 def _run_step_create_instance(db_path):
-    """Step A: Create router instance via API (preset 20).
+    """Step A: Create router instance via API (preset 100).
 
     Returns dict with instance_id, auth_token, port_assigned or None on failure.
     """
-    _print_step("STEP-A", "Creating router instance (preset 20)...")
+    _print_step("STEP-A", "Creating router instance (preset 100)...")
 
     payload = {
         "name": "QuickSetup",
         "engine_type_id": QR_ENGINE_LLAMA_SERVER,
         "node_id": 1,                    # localhost
-        "preset_id": PRESET_ROUTER_ID,   # QuickSetup-Router (no model, fast start)
+        "preset_id": PRESET_ROUTER_ID,   # 1-NoModel-ROUTER-Mode (tuned defaults)
         "config_override": {
             "env": {"LLAMA_ARG_HOST": QR_DEFAULT_LOCALHOST},  # 127.0.0.1 for localhost
         },
@@ -290,7 +289,10 @@ def _run_step_create_instance(db_path):
 
 
 def _run_step_reconfigure(db_path, inst_id, model_hf):
-    """Step B: Reconfigure instance to use download preset (preset 21).
+    """Step B: Add download config (HF_HUB_CACHE + cli_flags) on top of preset 100.
+
+    No preset switch needed — config_override layers on top of the existing
+    preset 100 config. This avoids the need for a separate "download preset".
 
     Args:
         db_path: Path to SQLite database
@@ -300,7 +302,7 @@ def _run_step_reconfigure(db_path, inst_id, model_hf):
     Returns:
         True if reconfigure succeeded, False otherwise.
     """
-    _print_step("STEP-B", f"Reconfiguring instance {inst_id} with download preset (21)...")
+    _print_step("STEP-B", f"Adding download config to instance {inst_id}...")
 
     # HF_HUB_CACHE base path — must come from .quickrobot.env, no fallback
     base_path = _QR_ENV.get("QUICKROBOT_API_MODEL_BASE_PATH", "")
@@ -330,21 +332,21 @@ def _run_step_reconfigure(db_path, inst_id, model_hf):
         cli_flags.append("--hf-repo {}".format(model_hf))
 
     payload = {
-        "preset_id": PRESET_DOWNLOAD_ID,
+        "preset_id": PRESET_ROUTER_ID,   # keep preset 100 (no switch)
         "cli_flags": cli_flags,
         "env": {
             "HF_HUB_CACHE": hf_cache_path,
         },
     }
 
-    # Use PUT /instances/<id> (api_update_instance) which properly handles preset_id.
-    # The fast-path for preset-only changes auto-triggers the reconfigure chain.
+    # Use PUT /instances/<id> to add env+cli_flags on top of preset 100.
+    # The config merge chain: preset 100 base → override (HF_HUB_CACHE + cli_flags).
     resp = _api_call("PUT", f"/api/v1/instances/{inst_id}", payload)
     if not resp or not resp.get("data"):
-        print(f"[qr] QUICKSETUP [STEP-B]: preset change failed — {resp.get('_error', resp)}")
+        print(f"[qr] QUICKSETUP [STEP-B]: config override failed — {resp.get('_error', resp)}")
         return False
 
-    print(f"[qr] QUICKSETUP [STEP-B]: switched to download preset, reconfigure triggered")
+    print(f"[qr] QUICKSETUP [STEP-B]: download config added, reconfigure triggered")
     return True
 
 
@@ -398,8 +400,8 @@ def run_quicksetup(db_path):
     _print_step("START", "Multi-step quicksetup initiated")
 
     # ── Pre-flight: verify presets in DB ─────────────────────────────
-    _print_step("PRE-FLIGHT", "Verifying presets 20-30 in database...")
-    preset_ids = [PRESET_ROUTER_ID, PRESET_DOWNLOAD_ID]  # IDs 20, 21 only
+    _print_step("PRE-FLIGHT", "Verifying preset 100 in database...")
+    preset_ids = [PRESET_ROUTER_ID]  # ID 100 only
     presets_verified = _verify_presets_in_db(db_path, preset_ids)
 
     found_count = sum(1 for _, (_, exists) in presets_verified.items() if exists)
@@ -407,16 +409,12 @@ def run_quicksetup(db_path):
 
     # Verify critical presets exist
     router_exists = presets_verified.get(PRESET_ROUTER_ID, (None, False))[1]
-    download_exists = presets_verified.get(PRESET_DOWNLOAD_ID, (None, False))[1]
 
     if not router_exists:
-        print(f"[qr] QUICKSETUP [PRE-FLIGHT]: preset {PRESET_ROUTER_ID} (QuickSetup-Router) NOT FOUND")
-        return 1
-    if not download_exists:
-        print(f"[qr] QUICKSETUP [PRE-FLIGHT]: preset {PRESET_DOWNLOAD_ID} (QuickSetup-Download) NOT FOUND")
+        print(f"[qr] QUICKSETUP [PRE-FLIGHT]: preset {PRESET_ROUTER_ID} (1-NoModel-ROUTER-Mode) NOT FOUND")
         return 1
 
-    print("[qr] QUICKSETUP [PRE-FLIGHT]: all required presets OK")
+    print("[qr] QUICKSETUP [PRE-FLIGHT]: required presets OK")
 
     # ── Step A: Create router instance ───────────────────────────────
     step_a_start = time.time()

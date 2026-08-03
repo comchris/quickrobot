@@ -266,7 +266,53 @@ def api_playbook_content(playbook_id):
 
     return success_single({
         "content": content,
+        "file_path": file_path,
+        "playbook_id": record.get("playbook_id"),
+        "version": record.get("version"),
+        "file_type": record.get("file_type"),
+        "usage_counter_since_update": record.get("usage_counter_since_update", 0),
+        "error_counter_since_update": record.get("error_counter_since_update", 0),
+        "created_at": record.get("created_at"),
         "file_size": record.get("file_size"),
         "actual_file_size": actual_size
     })
+
+
+def api_validate_playbook(playbook_id):
+    """Validate YAML syntax of a playbook file.
+
+    Args:
+        playbook_id: Integer primary key of the playbook.
+
+    Returns:
+        JSON with status and optional error message.
+    """
+    from db.sqlite import pool as _pool
+    import os as _os
+    import yaml as _yaml
+
+    record = None
+    with _pool(_CONFIG["db_path"]) as conn:
+        row = conn.execute(
+            "SELECT * FROM playbook_registry WHERE id = ?",
+            (playbook_id,),
+        ).fetchone()
+        if row:
+            record = {k: row[k] for k in row.keys()}
+
+    if not record:
+        return error_response("NOT_FOUND", f"Playbook ID {playbook_id} not found")
+
+    file_path = record.get("file_path", "")
+    full_path = _os.path.join(_project_root, file_path)
+
+    if not _os.path.isfile(full_path):
+        return error_response("FILE_NOT_FOUND", f"Playbook file not found: {full_path}")
+
+    try:
+        with open(full_path, 'r', encoding='utf-8') as f:
+            _yaml.safe_load(f)
+        return success_single({"valid": True})
+    except _yaml.YAMLError as e:
+        return success_single({"valid": False, "error": str(e)[:200]})
 

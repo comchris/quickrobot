@@ -1,0 +1,424 @@
+<!-- Engine Binary Templates — list page (BINARY-DL) -->
+<!-- Single-line header with controls and filters (consistent with prompts.html, engine_models.html) -->
+<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px;">
+  <h1 style="margin:0;font-size:1.3em;">Binary Templates</h1>
+  <span id="binary-count" style="display:inline-block;padding:2px 8px;background:#555;color:#fff;border-radius:10px;font-size:0.75em;font-weight:normal;"></span>
+  <form id="filter-form" method="get" action="/webui/engine_binaries" style="display:flex;gap:6px;align-items:center;margin:0;">
+    <label style="font-size:0.85em;color:#666;">Engine:</label>
+    <select name="engine_type_id" id="filter-engine" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+      <option value="">All engines</option>
+    </select>
+    <label style="font-size:0.85em;color:#666;">Version:</label>
+    <input type="text" name="search_version" id="filter-version" placeholder="Search version..." style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;width:140px;" />
+    <label style="font-size:0.85em;color:#666;">Status:</label>
+    <select name="is_active" id="filter-status" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+      <option value="">All</option>
+      <option value="1">Active</option>
+      <option value="0">Inactive</option>
+    </select>
+    <button type="submit" class="btn btn-primary" style="font-size:0.85em;padding:3px 8px;">Filter</button>
+    {% if filter_engine or filter_version or filter_status %}
+    <a href="/webui/engine_binaries" class="btn" style="padding:3px 8px;font-size:0.85em;text-decoration:none;background:#999;color:#fff;">Clear</a>
+    {% endif %}
+  </form>
+  <div style="display:flex;gap:6px;align-items:center;margin-left:auto;">
+    <button id="add-binary-btn" class="btn btn-primary" style="font-size:0.85em;padding:3px 8px;">+ Add Template</button>
+  </div>
+</div>
+
+<table>
+<thead><tr>
+  <th class="sortable" data-col="0">ID</th>
+  <th class="sortable" data-col="1">Name</th>
+  <th class="sortable" data-col="2">Engine</th>
+  <th class="sortable" data-col="3">Version</th>
+  <th class="sortable" data-col="4">Platform</th>
+  <th>Binary</th>
+  <th>URL</th>
+  <th>Checksum</th>
+  <th>Size</th>
+  <th class="sortable" data-col="5">Active</th>
+  <th class="sortable" data-col="6">Created</th>
+  <th>Actions</th>
+</tr></thead>
+<tbody id="binaries-tbody">
+  <tr><td colspan="12" style="text-align:center;color:#888;">Loading binary templates...</td></tr>
+</tbody>
+</table>
+
+<!-- Create/Edit Modal -->
+<div id="binary-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:999;align-items:center;justify-content:center;">
+  <div style="background:#fff;border-radius:6px;padding:20px;width:560px;max-width:95vw;max-height:90vh;overflow-y:auto;">
+    <h2 id="binary-modal-title" style="margin:0 0 16px 0;font-size:1.2em;">Add Binary Template</h2>
+    <form id="binary-form">
+      <input type="hidden" id="binary-id" value="" />
+      <div style="margin-bottom:10px;">
+        <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Name *</label>
+        <input type="text" id="binary-name" required style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;" placeholder="e.g., llama.cpp b10146 Ubuntu x64 CPU" />
+      </div>
+      <div style="display:flex;gap:10px;margin-bottom:10px;">
+        <div style="flex:1;">
+          <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Engine Type *</label>
+          <select id="binary-engine-type" required style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;" disabled>
+            <option value="">Loading engines...</option>
+          </select>
+        </div>
+        <div style="flex:1;">
+          <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Version *</label>
+          <input type="text" id="binary-version" required style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;" placeholder="e.g., b10146" />
+        </div>
+      </div>
+      <div style="display:flex;gap:10px;margin-bottom:10px;">
+        <div style="flex:1;">
+          <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Platform *</label>
+          <input type="text" id="binary-platform" required style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;" placeholder="e.g., ubuntu-x64-vulkan" />
+        </div>
+        <div style="flex:1;">
+          <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Binary Name *</label>
+          <input type="text" id="binary-binary-name" required style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;" placeholder="e.g., llama-server" />
+        </div>
+      </div>
+      <div style="margin-bottom:10px;">
+        <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Download URL *</label>
+        <input type="text" id="binary-url" required style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;" placeholder="https://github.com/..." />
+      </div>
+      <div style="display:flex;gap:10px;margin-bottom:10px;">
+        <div style="flex:1;">
+          <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">SHA256 Checksum</label>
+          <input type="text" id="binary-sha256" style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;" placeholder="Optional — verify after download" />
+        </div>
+        <div style="flex:1;">
+          <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">File Size (bytes)</label>
+          <input type="text" id="binary-file-size" style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;" placeholder="Optional — e.g., 16383837" />
+        </div>
+      </div>
+      <div style="display:flex;gap:10px;margin-bottom:10px;">
+        <div style="flex:1;">
+          <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Extract Type</label>
+          <select id="binary-extract-type" style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;">
+            <option value="none">none (direct binary)</option>
+            <option value="tar.gz" selected>tar.gz</option>
+            <option value="zip">zip</option>
+            <option value="gz">gz</option>
+          </select>
+        </div>
+        <div style="flex:1;">
+          <label style="display:block;font-size:0.85em;color:#666;margin-bottom:4px;">Target Path</label>
+          <input type="text" id="binary-target-path" style="width:100%;padding:6px 10px;border:1px solid #ccc;border-radius:4px;" value="/opt/quickrobot/binary-templates/{engine_type}/{version}-{platform}/" />
+        </div>
+      </div>
+      <div style="margin-bottom:16px;">
+        <label style="display:inline-flex;align-items:center;gap:6px;font-size:0.85em;">
+          <input type="checkbox" id="binary-is-active" checked />
+          Active (enabled for use)
+        </label>
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;">
+        <button type="button" id="binary-cancel-btn" class="btn" style="padding:4px 12px;font-size:0.85em;background:#999;color:#fff;">Cancel</button>
+        <button type="submit" class="btn btn-success" style="padding:4px 12px;font-size:0.85em;">Save Template</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script>
+(function() {
+  const API = window.qrSettings?.api || "";
+  let currentFilter = { engine_type_id: "", is_active: "" };
+
+  // Load engine types for filter dropdown (exclude system engines: id < 10)
+  function loadEngineFilter() {
+    fetch(API + "/api/v1/engines", { headers: { "X-API-Key": window.QR_API_TOKEN || "" } })
+      .then(r => r.json())
+      .then(d => {
+        const items = d.items || [];
+        const sel = document.getElementById("filter-engine");
+        sel.innerHTML = '<option value="">All engines</option>';
+        items.forEach(e => {
+          if (e.enabled && e.id >= 10) {
+            const opt = document.createElement("option");
+            opt.value = e.id;
+            opt.textContent = e.display_name;
+            sel.appendChild(opt);
+          }
+        });
+      })
+      .catch(e => console.error("loadEngineFilter:", e));
+  }
+
+  // Load engine types for binary template modal (exclude system engines: id < 10)
+  function loadBinaryEngineSelect() {
+    fetch(API + "/api/v1/engines", { headers: { "X-API-Key": window.QR_API_TOKEN || "" } })
+      .then(r => r.json())
+      .then(d => {
+        const items = d.items || [];
+        const sel = document.getElementById("binary-engine-type");
+        sel.innerHTML = '<option value="">Select engine...</option>';
+        // Sort by display order / ID for consistent UX
+        items.sort((a, b) => a.id - b.id);
+        items.forEach(e => {
+          if (e.enabled && e.id >= 10) {
+            const opt = document.createElement("option");
+            opt.value = e.id;
+            opt.textContent = e.display_name;
+            sel.appendChild(opt);
+          }
+        });
+        sel.disabled = false;
+      })
+      .catch(e => {
+        console.error("loadBinaryEngineSelect:", e);
+        const sel = document.getElementById("binary-engine-type");
+        sel.innerHTML = '<option value="">Error loading engines</option>';
+      });
+  }
+
+  // Load binaries list
+  function loadBinaries() {
+    const tbody = document.getElementById("binaries-tbody");
+    tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;color:#888;">Loading...</td></tr>';
+
+    let url = API + "/api/v1/engine_binaries?";
+    const params = [];
+    if (currentFilter.engine_type_id) params.push("engine_type_id=" + currentFilter.engine_type_id);
+    if (currentFilter.is_active !== "") params.push("is_active=" + currentFilter.is_active);
+    url += params.join("&");
+
+    fetch(url, { headers: { "X-API-Key": window.QR_API_TOKEN || "" } })
+      .then(r => r.json())
+      .then(d => {
+        const items = d.items || [];
+        document.getElementById("binary-count").textContent = items.length + " templates";
+        if (!items.length) {
+          tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;color:#888;">No binary templates found. Click "+ Add Template" to create one.</td></tr>';
+          return;
+        }
+        tbody.innerHTML = items.map(b => `
+          <tr data-id="${b.id}">
+            <td data-sort="${b.id}">${b.id}</td>
+            <td data-sort="${escHtml(b.name)}">${escHtml(b.name)}</td>
+            <td data-sort="${escHtml(b.engine_display_name || "")}">${escHtml(b.engine_display_name || "")}</td>
+            <td><code data-sort="${escHtml(b.version || "")}">${escHtml(b.version || "")}</code></td>
+            <td data-sort="${escHtml(b.platform || "")}">${escHtml(b.platform || "")}</td>
+            <td>${escHtml(b.binary_name || "")}</td>
+            <td><a href="${escHtml(b.download_url)}" target="_blank" rel="noopener" style="color:#2196f3;">${escHtml(truncate(b.download_url, 40))}</a></td>
+            <td title="${escHtml(b.sha256 || "")}">${escHtml(b.sha256_short || (b.sha256 ? "—" : ""))}</td>
+            <td data-sort="${b.file_size || 0}" style="color:#888;">${b.file_size ? formatBytes(b.file_size) : '—'}</td>
+            <td data-sort="${b.is_active ? '1' : '0'}">${b.is_active ? '<span style="color:#4caf50;font-weight:bold;">Active</span>' : '<span style="color:#999;">Inactive</span>'}</td>
+            <td class="age-cell" data-sort="${b.created_at || ''}">${escHtml(b.created_at || "")}</td>
+            <td style="white-space:nowrap;">
+              <button class="btn btn-primary inst-action" style="padding:2px 6px;font-size:0.75em;" onclick="_editBinary(${b.id})">Edit</button>
+              ${b.is_active ? '<button class="btn btn-secondary inst-action" style="padding:2px 6px;font-size:0.75em;" onclick="_deactivateBinary(' + b.id + ')">Deactivate</button>' : '<button class="btn btn-success inst-action" style="padding:2px 6px;font-size:0.75em;" onclick="_activateBinary(' + b.id + ')">Activate</button>'}
+              <button class="btn btn-danger inst-action" style="padding:2px 6px;font-size:0.75em;" onclick="_deleteBinary(${b.id})">Delete</button>
+            </td>
+          </tr>
+        `).join("");
+      })
+      .then(function() {
+        // Apply saved sort state (after tbody populated)
+        if (_sortCol >= 0 && _sortDir) {
+          binariesSortTable(_sortCol, _sortDir);
+          binariesApplyArrows(_sortCol, _sortDir);
+        }
+      })
+      .catch(e => {
+        tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;color:#f44;">Error loading: ' + escHtml(e.message) + '</td></tr>';
+      });
+  }
+
+  // Column sorting — ID(0 numeric), Name(1 string), Engine(2 string), Version(3 string), Platform(4 string), Active(9 numeric), Created(7 timestamp)
+  var _sortCol = parseInt(qrSettings.get('engine_binaries', 'sort_col', '-1'), 10);
+  var _sortDir = qrSettings.get('engine_binaries', 'sort_dir', '');
+  var ths = document.querySelectorAll('.sortable');
+
+  function binariesSortTable(col, dir) {
+    var table = ths[0] ? ths[0].closest('table') : null;
+    if (table) {
+      var tbody = table.querySelector('tbody');
+      if (tbody) {
+        var rows = Array.from(tbody.rows);
+        rows.sort(function(a, b) {
+          var cellA = a.cells[col] ? (a.cells[col].getAttribute('data-sort') || a.cells[col].textContent.trim()) : '';
+          var cellB = b.cells[col] ? (b.cells[col].getAttribute('data-sort') || b.cells[col].textContent.trim()) : '';
+          // Numeric sort: ID(0), Size(8)
+          if (col === 0 || col === 8) {
+            return dir === 'asc' ? (parseFloat(cellA.replace(/[^0-9.]/g, '')) || 0) - (parseFloat(cellB.replace(/[^0-9.]/g, '')) || 0) : (parseFloat(cellB.replace(/[^0-9.]/g, '')) || 0) - (parseFloat(cellA.replace(/[^0-9.]/g, '')) || 0);
+          }
+          // Boolean/Active sort: '1' > '0'
+          if (col === 9) {
+            var vA = cellA === '1' || cellA.toLowerCase() === 'active' ? 1 : 0;
+            var vB = cellB === '1' || cellB.toLowerCase() === 'active' ? 1 : 0;
+            return dir === 'asc' ? vA - vB : vB - vA;
+          }
+          // String sort for Name, Engine, Version, Platform
+          return dir === 'asc' ? cellA.localeCompare(cellB) : cellB.localeCompare(cellA);
+        });
+        rows.forEach(function(row) { tbody.appendChild(row); });
+      }
+    }
+  }
+
+  function binariesApplyArrows(col, dir) {
+    ths.forEach(function(t) {
+      t.textContent = t.textContent.replace(/\s*[\u2191\u2193]\s*$/, '').trim();
+    });
+    var arrow = dir === 'asc' ? ' \u2191' : ' \u2193';
+    ths[col].textContent = ths[col].textContent.trim() + arrow;
+  }
+
+  // Register click handlers synchronously — they operate on whatever tbody content exists at click time
+  ths.forEach(function(th) {
+    th.style.cursor = 'pointer';
+    th.addEventListener('click', function() {
+      var col = parseInt(this.getAttribute('data-col'), 10);
+      var dir = qrSettings.get('engine_binaries', 'sort_dir', '') === 'desc' ? 'asc' : 'desc';
+      qrSettings.set('engine_binaries', 'sort_col', col.toString());
+      qrSettings.set('engine_binaries', 'sort_dir', dir);
+      binariesSortTable(col, dir);
+      binariesApplyArrows(col, dir);
+    });
+  });
+
+  // Age column: render relative times — uses global qrFmtRelative from base.html
+  document.querySelectorAll('.age-cell').forEach(function(cell) {
+    var raw = cell.getAttribute('data-sort') || cell.textContent.trim();
+    cell.textContent = qrFmtRelative(raw);
+  });
+
+  // CRUD operations
+  window._editBinary = function(id) {
+    fetch(API + "/api/v1/engine_binaries/" + id, { headers: { "X-API-Key": window.QR_API_TOKEN || "" } })
+      .then(r => r.json())
+      .then(d => {
+        const b = d.data;
+        if (!b) return;
+        document.getElementById("binary-id").value = b.id;
+        document.getElementById("binary-modal-title").textContent = "Edit Binary Template";
+        document.getElementById("binary-name").value = b.name || "";
+        document.getElementById("binary-engine-type").value = b.engine_type_id || "";
+        document.getElementById("binary-version").value = b.version || "";
+        document.getElementById("binary-platform").value = b.platform || "";
+        document.getElementById("binary-binary-name").value = b.binary_name || "";
+        document.getElementById("binary-url").value = b.download_url || "";
+        document.getElementById("binary-sha256").value = b.sha256 || "";
+        document.getElementById("binary-file-size").value = b.file_size || "";
+        document.getElementById("binary-extract-type").value = b.extract_type || "none";
+        document.getElementById("binary-target-path").value = b.target_path || "/opt/quickrobot/binary-templates/{engine_type}/{version}-{platform}/";
+        document.getElementById("binary-is-active").checked = b.is_active === 1;
+        document.getElementById("binary-modal").style.display = "flex";
+      })
+      .catch(e => alert("Error loading template: " + e.message));
+  };
+
+  window._deleteBinary = function(id) {
+    if (!confirm("Delete this binary template? This cannot be undone.")) return;
+    fetch(API + "/api/v1/engine_binaries/" + id, { method: "DELETE", headers: { "X-API-Key": window.QR_API_TOKEN || "" } })
+      .then(r => r.json())
+      .then(d => {
+        if (d.status === "ok") { loadBinaries(); }
+        else { alert("Delete failed: " + (d.message || "unknown")); }
+      })
+      .catch(e => alert("Error: " + e.message));
+  };
+
+  window._deactivateBinary = function(id) {
+    fetch(API + "/api/v1/engine_binaries/" + id, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", "X-API-Key": window.QR_API_TOKEN || "" },
+      body: JSON.stringify({ is_active: 0 })
+    }).then(r => r.json()).then(d => { if (d.status === "ok") loadBinaries(); });
+  };
+
+  window._activateBinary = function(id) {
+    fetch(API + "/api/v1/engine_binaries/" + id, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", "X-API-Key": window.QR_API_TOKEN || "" },
+      body: JSON.stringify({ is_active: 1 })
+    }).then(r => r.json()).then(d => { if (d.status === "ok") loadBinaries(); });
+  };
+
+  // Modal form submit
+  document.getElementById("binary-form").addEventListener("submit", function(e) {
+    e.preventDefault();
+    const id = document.getElementById("binary-id").value;
+    const body = {
+      name: document.getElementById("binary-name").value,
+      engine_type_id: parseInt(document.getElementById("binary-engine-type").value),
+      version: document.getElementById("binary-version").value,
+      platform: document.getElementById("binary-platform").value,
+      binary_name: document.getElementById("binary-binary-name").value,
+      download_url: document.getElementById("binary-url").value,
+      sha256: document.getElementById("binary-sha256").value || null,
+      file_size: document.getElementById("binary-file-size").value ? parseInt(document.getElementById("binary-file-size").value) : null,
+      extract_type: document.getElementById("binary-extract-type").value,
+      target_path: document.getElementById("binary-target-path").value,
+      is_active: document.getElementById("binary-is-active").checked ? 1 : 0,
+    };
+    const method = id ? "PUT" : "POST";
+    const url = API + "/api/v1/engine_binaries" + (id ? "/" + id : "");
+    fetch(url, {
+      method: method,
+      headers: { "Content-Type": "application/json", "X-API-Key": window.QR_API_TOKEN || "" },
+      body: JSON.stringify(body),
+    })
+    .then(r => r.json())
+    .then(d => {
+      if (d.status === "ok") {
+        document.getElementById("binary-modal").style.display = "none";
+        document.getElementById("binary-id").value = "";
+        document.getElementById("binary-modal-title").textContent = "Add Binary Template";
+        loadBinaries();
+      } else {
+        alert("Error: " + (d.message || "Unknown error"));
+      }
+    })
+    .catch(e => alert("Error: " + e.message));
+  });
+
+  // Modal open/close handlers
+  document.getElementById("add-binary-btn").addEventListener("click", function() {
+    loadBinaryEngineSelect(); // ensure engine list is fresh
+    document.getElementById("binary-form").reset();
+    document.getElementById("binary-id").value = "";
+    document.getElementById("binary-modal-title").textContent = "Add Binary Template";
+    document.getElementById("binary-is-active").checked = true;
+    document.getElementById("binary-target-path").value = "/opt/quickrobot/binary-templates/{engine_type}/{version}-{platform}/";
+    document.getElementById("binary-extract-type").value = "tar.gz";
+    document.getElementById("binary-modal").style.display = "flex";
+  });
+  document.getElementById("binary-cancel-btn").addEventListener("click", function() {
+    document.getElementById("binary-modal").style.display = "none";
+  });
+
+  // Filter handlers — form submits via method="get" (server-side, consistent with prompts.html)
+  // currentFilter is used only for initial page load to pre-select values from URL params
+  window.addEventListener("DOMContentLoaded", function() {
+    const urlParams = new URLSearchParams(window.location.search);
+    const fe = urlParams.get("engine_type_id");
+    const fv = urlParams.get("search_version");
+    const fs = urlParams.get("is_active");
+    if (fe) { currentFilter.engine_type_id = fe; document.getElementById("filter-engine").value = fe; }
+    if (fv) { currentFilter.is_active = ""; document.getElementById("filter-version").value = fv; } // version is client-side filtered
+    if (fs) { currentFilter.is_active = fs; document.getElementById("filter-status").value = fs; }
+    loadEngineFilter();
+    loadBinaries();
+  });
+
+  // Utility helpers
+  function escHtml(s) { if (typeof s !== "string") return ""; return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
+  function truncate(s, n) { if (!s || s.length <= n) return s; return s.substring(0, n) + "..."; }
+  function formatBytes(bytes) {
+    if (bytes === null || bytes === undefined) return "—";
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    if (bytes === 0) return '0 B';
+    const i = Math.floor(Math.log(bytes) / Math.log(1024));
+    return (bytes / Math.pow(1024, i)).toFixed(1) + ' ' + sizes[i];
+  }
+})();
+</script>
+
+<div style="text-align:center;margin-top:16px;font-size:0.8em;color:#888;">
+  <a href="https://github.com/ggml-org/llama.cpp/releases" target="_blank" rel="noopener" style="color:#2196f3;text-decoration:none;">
+    View latest llama.cpp releases on GitHub →
+  </a>
+</div>

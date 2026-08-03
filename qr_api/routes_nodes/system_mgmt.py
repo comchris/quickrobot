@@ -110,7 +110,7 @@ def api_app_status():
 def api_cleanup_null_logs():
     """Remove orphaned log entries with NULL FK references.
 
-    After migration 010 changed FK constraints from ON DELETE CASCADE to
+    After migration 011 changed FK constraints from ON DELETE CASCADE to
     ON DELETE SET NULL, deleted nodes/instances leave behind log rows
     with NULL node_id or instance_id. This endpoint removes those
     orphaned entries on demand.
@@ -262,18 +262,38 @@ def api_cleanup_log_entries():
     # Protect running/recent jobs: never delete entries with status 'running', 'received', or 'queued'
     # unless the user explicitly filters by that status
     if not status_filter:
-        query = "DELETE FROM log_entries WHERE created_at < ? AND status NOT IN ('running','received','queued')"
+        where_clause = "created_at < ? AND status NOT IN ('running','received','queued')"
     else:
-        query = "DELETE FROM log_entries WHERE created_at < ?"
+        where_clause = "created_at < ?"
     params = [cutoff]
 
     if status_filter:
-        query += " AND status = ?"
+        where_clause += " AND status = ?"
         params.append(status_filter)
 
+    # Use recursive CTE to delete child rows first, then parents (self-referencing FK)
     with pool(_CONFIG["db_path"]) as conn:
-        cursor = conn.execute(query, params)
-        deleted = cursor.rowcount
+        # Pass 1: find all IDs to delete (entry + its descendants via parent_id chain)
+        ids_query = f"""
+            WITH RECURSIVE deleted_ids(id) AS (
+                SELECT id FROM log_entries WHERE {where_clause}
+                UNION
+                SELECT le.id FROM log_entries le
+                JOIN deleted_ids di ON le.parent_id = di.id
+            )
+            SELECT id FROM deleted_ids
+        """
+        rows = conn.execute(ids_query, params).fetchall()
+        ids_to_delete = [r[0] for r in rows]
+
+        # Pass 2: delete all found IDs (SQLite handles order automatically within transaction)
+        if ids_to_delete:
+            placeholders = ",".join("?" for _ in ids_to_delete)
+            del_query = f"DELETE FROM log_entries WHERE id IN ({placeholders})"
+            cursor = conn.execute(del_query, ids_to_delete)
+            deleted = cursor.rowcount
+        else:
+            deleted = 0
         conn.commit()
 
     return success_single({"deleted_count": deleted})

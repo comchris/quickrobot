@@ -44,7 +44,7 @@ from db.adapters.configs import (
 from db.adapters.instances import (
     create_instance, get_instance, list_instances, update_instance,
     transition_state, delete_instance, check_system_managed, merge_configs,
-    assign_port, log_action, get_instance_logs, cleanup_old_logs,
+    assign_port, log_action, get_instance_logs,
 )
 from db.adapters.logs import (
     log_instance_action, get_instance_logs_paginated,
@@ -78,7 +78,7 @@ __all__ = [
     # instances
     "create_instance", "get_instance", "list_instances", "update_instance",
     "transition_state", "delete_instance", "check_system_managed", "merge_configs",
-    "assign_port", "log_action", "get_instance_logs", "cleanup_old_logs",
+    "assign_port", "log_action", "get_instance_logs",
     # logs
     "log_instance_action", "get_instance_logs_paginated",
     "cleanup_old_logs", "get_action_history",

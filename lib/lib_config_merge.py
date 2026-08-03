@@ -268,7 +268,7 @@ def _lookup_model_base_path(node_id, db_path, engine_type_id=None):
 
 
 def _build_chain(conn, engine_type_id, preset_id, inst_config_override,
-                 supports_models, engine_name):
+                 supports_models, engine_name, db_path=None, instance_id=None, node_id=None):
     """Build a LayeredMergeChain from database + instance data.
 
     Internal function called by build_merged_config / build_config_layers.
@@ -280,6 +280,8 @@ def _build_chain(conn, engine_type_id, preset_id, inst_config_override,
         inst_config_override: Raw config_override JSON string or dict.
         supports_models: Whether this engine supports model parameters.
         engine_name: Engine name string.
+        db_path: Database path (for node bind address resolution).
+        instance_id: Instance ID (for node lookup).
 
     Returns:
         LayeredMergeChain with L1-L5 layers populated.
@@ -408,6 +410,28 @@ def _build_chain(conn, engine_type_id, preset_id, inst_config_override,
                                      cli_opts=preset_cli,
                                      model_params=cleaned,
                                      metadata=preset_metadata))
+
+    # ------------------------------------------------------------------
+    # Layer 4: Node bind address — resolved from node data, sits between
+    # preset (L3) and instance override (L5). Only injects if LLAMA_ARG_HOST
+    # is not already set by L1-L3 layers (preserves preset/override values).
+    # ------------------------------------------------------------------
+    if db_path and instance_id:
+        from lib.lib_config_level import resolve_node_bind_address
+        bind_addr = resolve_node_bind_address(db_path, node_id)
+        if bind_addr:
+            # Check if LLAMA_ARG_HOST already set by L1 or L3
+            existing_host = layer1_env.get("LLAMA_ARG_HOST")
+            has_preset_host = False
+            if preset_row and preset_row[0]:
+                preset_raw = json.loads(preset_row[0])
+                is_structured = any(k in preset_raw for k in ("env", "cli_opts", "model"))
+                if is_structured:
+                    preset_env_check = preset_raw.get("env") or {}
+                    has_preset_host = "LLAMA_ARG_HOST" in preset_env_check
+            if not existing_host and not has_preset_host:
+                chain.append(ConfigLevel(4, "node_bind_address",
+                                         env_vars={"LLAMA_ARG_HOST": bind_addr}))
 
     # ------------------------------------------------------------------
     # Layer 5: Instance override (FINAL — overrides everything)
@@ -888,7 +912,8 @@ def _build_config_layers(db_path, instance_id, preset_id, inst_config_override,
 
         # Build layers via internal helper
         chain = _build_chain(conn, engine_type_id, preset_id,
-                             inst_config_override, supports_models, engine_name)
+                             inst_config_override, supports_models, engine_name,
+                             db_path=db_path, instance_id=instance_id, node_id=inst["node_id"])
 
     merged, source_map = chain.get_merged()
     return merged, source_map, chain

@@ -307,3 +307,70 @@ def build_chain_from_rows(conn, engine_type_id: int, node_id: Optional[int] = No
             chain.append(ConfigLevel(4, "node_configs", env_vars=layer4_env))
 
     return chain
+
+
+def resolve_node_bind_address(db_path: str, node_id: int) -> Optional[str]:
+    """Resolve bind address from node data. Returns string or None.
+
+    Priority:
+      1. node_id == 1 → "127.0.0.1"
+      2. Node ipv4_address (or ipv6_address if preferred=ipv6)
+      3. DNS hostname resolution via socket.getaddrinfo()
+      4. None → falls back to engine default (L1)
+
+    Reads QUICKROBOT_PREFERRED_IP_FAMILY from os.environ (set at startup).
+    """
+    import os
+    import socket
+    from db.sqlite import pool
+
+    try:
+        preferred = os.environ.get("QUICKROBOT_PREFERRED_IP_FAMILY", "ipv4").lower()
+    except Exception:
+        preferred = "ipv4"
+
+    with pool(db_path) as conn:
+        node = conn.execute(
+            "SELECT hostname, ipv4_address, ipv6_address FROM nodes WHERE id = ?",
+            (node_id,),
+        ).fetchone()
+
+    if node_id == 1:
+        return "127.0.0.1"
+
+    if not node:
+        return None
+
+    # Direct IPs from discovery (most reliable — no network needed)
+    ipv4 = (node["ipv4_address"] or "").strip() if node["ipv4_address"] else ""
+    ipv6 = (node["ipv6_address"] or "").strip() if node["ipv6_address"] else ""
+
+    if preferred == "ipv4" and ipv4:
+        return ipv4
+    if preferred == "ipv6" and ipv6:
+        return ipv6
+    # Fallback to the other family if preferred not available
+    if preferred == "ipv4" and ipv6:
+        return ipv6
+    if preferred == "ipv6" and ipv4:
+        return ipv4
+
+    # DNS hostname resolution (may fail — returns None, caller uses L1 default)
+    hostname = (node["hostname"] or "").strip()
+    if not hostname:
+        return None
+
+    try:
+        results = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        family = socket.AF_INET if preferred == "ipv4" else socket.AF_INET6
+        for result in results:
+            if result[0] == family:
+                return result[4][0]
+        # If exact family not found, take first result (no silent failure)
+        if results:
+            logger.debug("[qr] DNS resolved %s → %s (preferred=%s)", node_id, hostname, preferred)
+            return results[0][4][0]
+    except socket.gaierror:
+        logger.warning("[qr] DNS resolution failed for node %d (%s)", node_id, hostname)
+
+    return None

@@ -314,6 +314,138 @@ def check_port_available(port, host=None):
         return False
 
 
+def _classify_node_error(msg, host_name="unknown"):
+    """Classify an ansible error message into structured diagnostic data.
+
+    Analyzes the raw ansible error message and returns a (message, diagnostic) tuple.
+
+    Args:
+        msg: Raw error message string from ansible playbook output.
+        host_name: The hostname or IP that failed.
+
+    Returns:
+        tuple — (human_readable_message, diagnostic_dict_or_None)
+        diagnostic_dict has keys: failure_type, hostname, suggestion
+        Returns (msg, None) if no classification matches.
+    """
+    msg_lower = msg.lower()
+
+    # DNS resolution failure
+    if "could not resolve" in msg_lower or "name or service not known" in msg_lower:
+        return (f"Node {host_name} unreachable — DNS resolution failed (hostname '{host_name}' does not resolve)",
+                {"failure_type": "dns_resolution", "hostname": host_name,
+                 "suggestion": f"Verify hostname resolves: getent hosts {host_name}"})
+
+    # Connection refused (wrong port or service down)
+    if "connection refused" in msg_lower:
+        return (f"Node {host_name} unreachable — connection refused (SSH may be down or wrong port)",
+                {"failure_type": "connection_refused", "hostname": host_name,
+                 "suggestion": "Check that SSH is running on the target and port matches ansible_port"})
+
+    # Connection timeout (firewall or offline)
+    if "timed out" in msg_lower or "timeout" in msg_lower:
+        return (f"Node {host_name} unreachable — connection timed out (host may be offline or firewall blocking)",
+                {"failure_type": "connection_timeout", "hostname": host_name,
+                 "suggestion": f"Test connectivity: ping {host_name} and check firewall rules"})
+
+    # SSH authentication failure
+    if any(kw in msg_lower for kw in ("auth", "permission denied", "password", "unauthorized")):
+        return (f"Node {host_name} unreachable — SSH authentication failed (check user/key/credentials)",
+                {"failure_type": "ssh_auth", "hostname": host_name,
+                 "suggestion": "Verify ansible_user and ansible_key_path are correct"})
+
+    # Python 3 missing (our preflight check)
+    if "python 3" in msg_lower and "required" in msg_lower:
+        return (f"Node {host_name} — {msg}",
+                {"failure_type": "python_missing", "hostname": host_name,
+                 "suggestion": "Install Python 3: apt install -y python3 (Debian/Ubuntu)"})
+
+    # Generic task failure with message
+    if msg:
+        detail = msg.split("Task failed: ")[-1].strip() if "Task failed:" in msg else msg.strip()
+        if detail:
+            return (f"Node {host_name} — {detail}",
+                    {"failure_type": "task_failure", "hostname": host_name,
+                     "suggestion": f"Check ansible output for task details: {detail[:100]}"})
+
+    return None
+
+
+def _extract_node_error(result):
+    """Extract detailed error message and structured diagnostic from ansible playbook output.
+
+    Walks through all plays/tasks looking for:
+    1. Host-level unreachable flag with msg (DNS/timeout/refused)
+    2. Task-level failed flag with host msg
+    3. Python 3 preflight check failure
+    4. Task name as fallback
+
+    Returns a tuple of (human_readable_message, diagnostic_dict_or_None).
+    diagnostic_dict has keys: failure_type, hostname, suggestion.
+    Falls back to ("Node validation failed", None) if no detail available.
+
+    Args:
+        result: Dict from run_playbook() with 'results' key containing parsed ansible output.
+
+    Returns:
+        tuple — (str message, dict|None diagnostic)
+    """
+    plays = result.get("results", {}).get("plays", [])
+    if not plays:
+        return ("Node validation failed", None)
+
+    for play in plays:
+        for task in play.get("tasks", []):
+            # Strategy 1: Check hosts dict for unreachable/failed with detailed msg
+            hosts = task.get("hosts", {})
+            if isinstance(hosts, dict):
+                for host_name, host_result in hosts.items():
+                    msg = host_result.get("msg", "") or ""
+                    diagnostic = None
+
+                    if host_result.get("unreachable", False) and msg:
+                        diagnostic = _classify_node_error(msg, host_name)
+                    elif host_result.get("failed", False) and msg:
+                        # Try to classify the failure
+                        diagnostic = _classify_node_error(msg, host_name)
+                        if diagnostic is None:
+                            detail = msg.split("Task failed: ")[-1].strip() if "Task failed:" in msg else msg.strip()
+                            diagnostic = (f"Node {host_name} — {detail}",
+                                          {"failure_type": "task_failure", "hostname": host_name,
+                                           "suggestion": f"Check ansible output: {detail[:100]}"})
+
+                    if diagnostic is not None:
+                        return diagnostic
+
+            # Strategy 2: Check legacy task results list (compat with older ansible versions)
+            for r in task.get("results", []):
+                msg = r.get("msg", "") or ""
+                host = r.get("host", "unknown")
+                diagnostic = None
+
+                if r.get("unreachable", False) and msg:
+                    diagnostic = _classify_node_error(msg, host)
+                elif r.get("failed", False) and msg:
+                    diagnostic = _classify_node_error(msg, host)
+                    if diagnostic is None:
+                        detail = msg.split("Task failed: ")[-1].strip() if "Task failed:" in msg else msg.strip()
+                        diagnostic = (f"Node {host} — {detail}",
+                                      {"failure_type": "task_failure", "hostname": host,
+                                       "suggestion": f"Check ansible output: {detail[:100]}"})
+
+                if diagnostic is not None:
+                    return diagnostic
+
+    # Fallback: use task name from the first failing task
+    for play in plays:
+        for task in play.get("tasks", []):
+            if task.get("failed", False):
+                task_name = task.get("task", {}).get("name", "Node validation failed")
+                return (task_name, {"failure_type": "unknown", "hostname": "unknown",
+                                    "suggestion": f"Playbook task '{task_name}' failed"})
+
+    return ("Node validation failed", None)
+
 
 def validate_node(db_path, node_id):
     """Validate SSH connectivity and collect full node inventory.
@@ -341,7 +473,9 @@ def validate_node(db_path, node_id):
     node = get_node(db_path, node_id)
     if node is None:
         return {"connected": False, "error": f"Node {node_id} not found",
-                "available_devices": [], "capabilities": {}}
+                "available_devices": [], "capabilities": {},
+                "diagnostic": {"failure_type": "not_found", "hostname": "unknown",
+                               "suggestion": f"Node ID {node_id} does not exist in database"}}
 
     hostname = node.get("hostname", "")
 
@@ -359,35 +493,15 @@ def validate_node(db_path, node_id):
         else:
             result = r.get("result") or {}
 
-        if result["failed"]:
-            error_msg = "Node validation failed"
-            # Try to extract error from playbook results
-            for play in result.get("results", {}).get("plays", []):
-                for task in play.get("tasks", []):
-                    if task.get("failed", False):
-                        error_msg = task.get("task", {}).get("name", error_msg)
-                        break
-            return {"connected": False, "error": error_msg,
-                    "available_devices": [], "capabilities": {}}
+        # Enhanced error extraction from ansible playbook output.
+        # Returns (message, diagnostic_dict) for structured error reporting.
+        error_msg, diagnostic = _extract_node_error(result)
 
-        # Extra guard: check ping task explicitly for connectivity failure.
-        # Some ansible versions may not propagate 'failed' correctly when
-        # the SSH connection fails but playbook continues with failed_when:false.
-        for play in result.get("results", {}).get("plays", []):
-            for task in play.get("tasks", []):
-                if task.get("task", {}).get("name") == "Check connectivity":
-                    hosts = task.get("hosts", {})
-                    if isinstance(hosts, dict):
-                        for host_name, host_result in hosts.items():
-                            if host_result.get("failed", False) or host_result.get("unreachable", False):
-                                return {"connected": False,
-                                        "error": f"Node {host_name} unreachable (ping failed)",
-                                        "available_devices": [], "capabilities": {}}
-                    for r in task.get("results", []):
-                        if r.get("failed", False) or r.get("unreachable", False):
-                            return {"connected": False,
-                                    "error": "Node unreachable (ping failed)",
-                                    "available_devices": [], "capabilities": {}}
+        # If playbook had errors, return failure state with diagnostic
+        if r.get("failed") or result.get("failed"):
+            return {"connected": False, "error": error_msg,
+                    "available_devices": [], "capabilities": {},
+                    "diagnostic": diagnostic}
 
         # Parse debug output to extract inventory data
         ips = []
@@ -783,6 +897,21 @@ def scan_models(playbook_id="scan_models_remote", engine_type_id=None, limit=Non
         else:
             results = r.get("result") or {}
 
+        # Collect per-host failure info from playbook results (for reporting)
+        _host_failures = []
+        try:
+            for play in results.get("results", {}).get("plays", []):
+                for task in play.get("tasks", []):
+                    host_results = task.get("hosts", {})
+                    if isinstance(host_results, dict):
+                        for hostname, host_data in host_results.items():
+                            failed = host_data.get("failed", False)
+                            msg = host_data.get("msg", "")
+                            if failed and isinstance(msg, str):
+                                _host_failures.append({"host": hostname, "error": msg})
+        except Exception:
+            pass
+
         if results["failed"]:
             raise RuntimeError("Model scan playbook reported failures")
 
@@ -1021,7 +1150,9 @@ def scan_models(playbook_id="scan_models_remote", engine_type_id=None, limit=Non
 
     except Exception as exc:
         logging.warning("Non-critical failure in model scan: %s", str(exc))
-        pass
+        # Ensure _host_failures is defined even on outer exception
+        if '_host_failures' not in dir():
+            _host_failures = [{"host": "unknown", "error": str(exc)}]
 
     # Log the scan execution (outside try — always runs)
     log_ansible_action(db_path, "scan_models", None, None,
@@ -1039,6 +1170,7 @@ def scan_models(playbook_id="scan_models_remote", engine_type_id=None, limit=Non
          "total_files_found": total_files,
          "modified_model_ids": modified_model_ids,
          "unresolved_draft_ids": unresolved_draft_ids,
+         "host_failures": _host_failures if '_host_failures' in dir() else [],
      }
 
 

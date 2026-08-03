@@ -205,15 +205,20 @@ document.querySelectorAll('.node-action').forEach(function(btn) {
     var id = this.getAttribute('data-id');
     var origHTML = btn.innerHTML;
 
+    var row = this.closest('tr');
+    var nodeId = row.cells[0].textContent.trim();
+    var nodeName = row.cells[1].textContent.trim();
+    var hostName = row.cells[2].textContent.trim();
+    var ageCell = row.querySelector('.age-cell');
+    var ageRaw = ageCell ? (ageCell.getAttribute('data-ts-utc') || ageCell.getAttribute('data-sort') || '') : '';
+    var ageStr = qrFmtRelative(ageRaw);
+
     if (action === 'delete') {
-      var name = this.closest('tr').cells[0].textContent.trim();
-      if (!confirm('Remove host "' + name + '"?\nThis will undeploy all instances on the node.')) return;
+      if (!confirm('Remove host "' + nodeName + '" (' + nodeId + ')?\nHost: ' + hostName + '\nAdded: ' + ageStr + '\nThis will undeploy all instances on the node.')) return;
     } else if (action === 'reboot') {
-      var name = this.closest('tr').cells[0].textContent.trim();
-      if (!confirm('Reboot host "' + name + '"?\nThe node will restart.')) return;
+      if (!confirm('Reboot host "' + nodeName + '" (' + nodeId + ')?\nHost: ' + hostName + '\nAdded: ' + ageStr)) return;
     } else if (action === 'shutdown') {
-      var name = this.closest('tr').cells[0].textContent.trim();
-      if (!confirm('Shutdown host "' + name + '"?\nThe node will power off.')) return;
+      if (!confirm('Shutdown host "' + nodeName + '" (' + nodeId + ')?\nHost: ' + hostName + '\nAdded: ' + ageStr)) return;
     }
 
     btn.disabled = true;

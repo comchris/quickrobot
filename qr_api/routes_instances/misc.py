@@ -11,7 +11,7 @@ from flask import request, Response
 from qr_api.lib_responses import success_single, error_response
 from qr_api import _CONFIG
 from lib.qr_engine_ids import QR_DEFAULT_LOCALHOST, QR_ENGINE_PORT_DEFAULTS, \
-    QR_ENGINE_LLAMA_SERVER_NAME
+    QR_ENGINE_LLAMA_SERVER_NAME, QR_STATE_LOADING
 from db.adapters.instances import get_instance as _gi, check_system_managed as _csm
 from db.adapters.nodes import get_node as _gn
 
@@ -51,7 +51,7 @@ def api_model_load_sse(inst_id):
         """Transition instance from 'loading' to 'running' when SSE detects completion."""
         try:
             cur = conn.execute("SELECT state FROM instances WHERE id=?", (inst_id,)).fetchone()
-            if cur and cur["state"] == "loading":
+            if cur and cur["state"] == QR_STATE_LOADING:
                 conn.execute(
                     "UPDATE instances SET state='running', last_state_change=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
                     (inst_id,),
@@ -123,7 +123,7 @@ def api_proxy_remote(subpath):
 
     node_hostname = inst.get("node_hostname") or inst.get("ipv4_address", QR_DEFAULT_LOCALHOST)
     engine_type = inst.get("engine_type_name", "")
-    default_port = QR_ENGINE_PORT_DEFAULTS.get(engine_type, 8080)
+    default_port = QR_ENGINE_PORT_DEFAULTS.get(engine_type, QR_ENGINE_PORT_DEFAULTS[QR_ENGINE_LLAMA_SERVER_NAME])
     port = inst.get("port_assigned") or default_port
 
     # Build target URL — avoid double slashes

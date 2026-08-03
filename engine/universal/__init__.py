@@ -22,7 +22,11 @@ configuration stored in instances.config_override.
 
 import logging
 
-from lib.qr_engine_ids import QR_DEFAULT_LOCALHOST
+from lib.qr_engine_ids import (
+    QR_DEFAULT_LOCALHOST,
+    QR_ENGINE_UNIVERSAL_NAME,
+    QR_JOB_DEPLOY, QR_JOB_REBUILD, QR_JOB_RECONFIGURE, QR_JOB_RESTART, QR_JOB_UNDEPLOY,
+)
 from engine.base import BaseEngine
 from lib.lib_constants import DEFAULT_ANSIBLE_USER
 
@@ -30,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 
 CAPABILITIES = {
-    "name": "universal",
+    "name": QR_ENGINE_UNIVERSAL_NAME,
     "display_name": "Universal systemd service",
     "supports_models": False,
     "supports_presets": True,
@@ -40,7 +44,7 @@ CAPABILITIES = {
     "sub_pages": [
         {"path": "/engines/universal/config", "label": "Config", "order": 1},
     ],
-    "supported_jobs": ["deploy", "undeploy", "restart", "reconfigure"],
+    "supported_jobs": [QR_JOB_DEPLOY, QR_JOB_UNDEPLOY, QR_JOB_RESTART, QR_JOB_RECONFIGURE],
 }
 
 
@@ -57,7 +61,7 @@ class UniversalEngine(BaseEngine):
     """
 
     def __init__(self):
-        self._name = "universal"
+        self._name = QR_ENGINE_UNIVERSAL_NAME
 
     def get_status(self, instance_id, db_path=None):
         """Get remote status via systemctl (no HTTP health endpoint)."""

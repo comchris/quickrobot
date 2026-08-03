@@ -24,6 +24,7 @@ import logging
 from lib.lib_engine_config import set_config as _set_config, get_config as _get_config
 from lib.lib_engine_command import execute as _execute, forward_request as _forward_request
 from lib.lib_engine_resources import list_resources as _list_res, get_presets as _get_preset, set_active_preset as _set_preset
+from lib.qr_engine_ids import QR_STATE_RUNNING, QR_STATE_STOPPED
 
 logger = logging.getLogger(__name__)
 
@@ -256,10 +257,10 @@ def derive_service_state(pid, db_state=None):
             import psutil as _psutil
             proc = _psutil.Process(pid)
             if proc.status() != "zombie":
-                return "running"
+                return QR_STATE_RUNNING
         except Exception as _e:
             logger.debug("psutil Process status check for pid %d failed: %s", pid, _e)
             pass
     if db_state and db_state not in ("unconfigured",):
         return db_state
-    return "stopped"
+    return QR_STATE_STOPPED

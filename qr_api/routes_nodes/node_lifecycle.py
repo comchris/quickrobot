@@ -124,8 +124,16 @@ def api_create_node():
             _uqt(_CONFIG["db_path"], task_id, 'failed', duration_ms=0)
         except Exception as _e:
             logger.debug("task update failed (node_create): %s", _e)
+        # Include structured diagnostic for programmatic clients
+        diag = disc_result.get("diagnostic")
+        if diag:
+            diag["hostname"] = hostname
+            detail = {"diagnostic": diag}
+        else:
+            detail = None
         return error_response("NODE_UNREACHABLE",
-            f"Node '{name}' ({hostname}) — {disc_result.get('error', 'validation failed')}")
+            f"Node '{name}' ({hostname}) — {disc_result.get('error', 'validation failed')}",
+            detail=detail)
 
     # Extract stale QR service info from validate_node output
     sqrs = disc_result.get("stale_qr_services", {})

@@ -10,8 +10,23 @@
   gather_facts: no
   become: yes
   pre_tasks:
-    - name: Verify host is reachable
+    - name: Check connectivity
       ansible.builtin.ping:
+
+    - name: Check Python 3 availability
+      command: which python3
+      register: _python3_check
+      changed_when: false
+      failed_when: false
+
+    - name: Set Python 3 missing fact
+      set_fact:
+        _python3_missing: "{{ _python3_check.rc != 0 }}"
+
+    - name: Fail early if Python 3 missing
+      fail:
+        msg: "Python 3 is required on the remote node. Install with: apt install -y python3 (Debian/Ubuntu) or yum install -y python3 (RHEL/CentOS)"
+      when: _python3_missing
 
   tasks:
     - name: Ensure /opt/quickrobot exists
@@ -180,6 +195,29 @@
           {% endif %}
         _gpu_memory_mb: "{{ (_nvidia_output.stdout.split(',')[1] | trim | int if (_nvidia_output.rc == 0 and _nvidia_output.stdout | length > 0) else None) }}"
 
+    # Resolve DNS hostname to IP if inventory_hostname is not already an IP
+    - name: Resolve hostname to IP address
+      ansible.builtin.shell: |
+        # Only resolve if inventory_hostname is not already a numeric IP
+        HOSTNAME="{{ inventory_hostname }}"
+        if echo "$HOSTNAME" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+          echo "RESOLVED=$HOSTNAME"
+        else
+          # Use getent for DNS resolution (glibc, works on Debian/Ubuntu/RHEL)
+          RESOLVED=$(getent hosts "$HOSTNAME" 2>/dev/null | head -1 | awk '{print $1}')
+          if [ -z "$RESOLVED" ]; then
+            # Fallback: try nslookup, then host command
+            RESOLVED=$(nslookup "$HOSTNAME" 2>/dev/null | grep "Address:" | tail -1 | awk '{print $2}')
+          fi
+          if [ -z "$RESOLVED" ]; then
+            RESOLVED=$(host "$HOSTNAME" 2>/dev/null | grep "has address" | tail -1 | awk '{print $4}')
+          fi
+          echo "RESOLVED=${RESOLVED:-}"
+        fi
+      register: _dns_resolve
+      changed_when: false
+      failed_when: false
+
     - name: Output structured inventory
       ansible.builtin.debug:
         msg:
@@ -192,7 +230,8 @@
                 {% set _dummy = _v4.append(_ip) %}
               {% endif %}
             {% endfor %}
-            {{ _v4[0] if _v4 else None }}
+            {# Prefer discovered IP from ip addr, fallback to DNS-resolved #}
+            {{ (_v4[0] if _v4 else '') or (_dns_resolve.stdout | regex_search('RESOLVED=([^\s]+)', '\\1') | default('', true)) }}
           ipv6_address: >-
             {% set _v6 = [] %}
             {% for _line in (_ip_output.stdout_lines | default([])) %}

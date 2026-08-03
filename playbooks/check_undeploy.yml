@@ -1,11 +1,12 @@
 # @name: Check Undeploy
 # @playbook_id: check_undeploy
 # @version: 2
+# @timeout: 60
 # check_undeploy.yml — Verify undeploy artifacts removed
 - hosts: "{{ inventory_host }}"
   become: yes
   vars:
-    unit_name: "qr-{{ instance_id }}-{{ engine_type | default('rpc') }}"
+    unit_name: "qr-{{ instance_id }}-{{ engine_type | default('llama_rpc') }}"
   tasks:
     - name: Check service file removed
       stat:

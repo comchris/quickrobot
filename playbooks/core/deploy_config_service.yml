@@ -16,6 +16,7 @@
       llama_server:        { env: "../templates/llama_server_env.j2",   svc: "../templates/llama_server_service.j2" }
       llama_rpc:           { env: "../templates/rpc_env.j2",            svc: "../templates/rpc_service.j2" }
       iperf3:              { env: "../templates/iperf3_env.j2",         svc: "../templates/iperf3_service.j2" }
+      subprocess:          { env: "../templates/subprocess_env.j2",     svc: "../templates/subprocess_service.j2" }
       universal:           { env: "../templates/universal_env.j2",      svc: "../templates/universal_service.j2" }
       timestamp_proxy:     { env: "../templates/timestamp_proxy_env.j2", svc: "../templates/timestamp_proxy_service.j2" }
 

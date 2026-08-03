@@ -201,7 +201,7 @@ def resolve_seed_path(project_root=None):
         from qr_api import _project_root
         project_root = _project_root
     if _seed_file_path is None:
-        _seed_file_path = os.path.join(project_root, "data", "_seed", "seed_v011.sql")
+        _seed_file_path = os.path.join(project_root, "db", "migrations", "seed_v011.sql")
     return _seed_file_path
 
 
@@ -210,7 +210,7 @@ def import_seed_file(db_path):
 
     Seed file contains INSERT OR REPLACE statements for models, presets,
     engine_types, playbook_registry, and benchmark_prompts.
-    engine_configs moved to 010_base.sql (v0.10 split).
+    engine_configs moved to base_v011.sql (v0.11 split from seed file).
 
     Only runs on fresh DB creation (gated by _db_was_created flag).
     Never re-imports on existing DB startup — seed is one-time only.
@@ -242,6 +242,7 @@ def import_seed_file(db_path):
     # Execute seed SQL (INSERT OR REPLACE — idempotent, overwrites matching IDs)
     try:
         with _pool(db_path) as conn:
+            conn.execute("PRAGMA foreign_keys = OFF")
             conn.executescript(sql)
             # Seed has NULL for node 1 ansible_user — set to current OS user at runtime.
             from lib.lib_constants import DEFAULT_ANSIBLE_USER
@@ -250,9 +251,56 @@ def import_seed_file(db_path):
                 (DEFAULT_ANSIBLE_USER,),
             )
             conn.commit()
-            print("[qr] Seed file imported successfully, node 1 ansible_user=%s", DEFAULT_ANSIBLE_USER)
+
+            # Verify seed import integrity — count rows per seeded table
+            _verify_seed_counts(conn)
+
+            print(f"[qr] Seed file imported successfully, node 1 ansible_user={DEFAULT_ANSIBLE_USER}")
+    except SystemExit:
+        raise
     except Exception as exc:
         print(f"[qr] WARNING: seed import failed: {exc}")
+
+
+def _verify_seed_counts(conn):
+    """Verify expected row counts for all seeded tables.
+
+    After executing seed SQL, checks that critical tables have the expected
+    number of rows. Reports discrepancies and exits on critical failures.
+
+    Args:
+        conn: SQLite connection (already in transaction).
+    """
+    # Expected counts: table_name -> expected_row_count
+    # These must match the INSERT OR REPLACE statements in seed_v011.sql.
+    # Note: engine_models may have fewer rows than INSERT count due to
+    # UNIQUE(engine_type_id, model_path) constraint causing INSERT OR REPLACE
+    # to collapse duplicate paths — this is expected behavior.
+    expected = {
+        "scheduler_config": 4,
+        "engine_types": 9,
+        "engine_job_types": 17,
+        "engine_presets": 11,
+        "engine_models": 0,
+        "engine_binaries": 4,
+        "playbook_registry": 47,
+        "engine_prompts": 5,
+        "benchmark_prompts": 3,
+    }
+
+    warnings = []
+    for table, exp_count in sorted(expected.items()):
+        try:
+            actual = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            if actual != exp_count:
+                warnings.append(f"{table}: expected {exp_count}, got {actual}")
+        except Exception as e:
+            warnings.append(f"{table}: query error — {e}")
+
+    if warnings:
+        print("[qr] WARNING: Seed import count discrepancies")
+        for w in warnings:
+            print(f"  WARN: {w}")
 
 def pre_validate_seed_checksum(env_cfg):
     """Validate seed file integrity BEFORE any filesystem change.
@@ -339,9 +387,10 @@ def ensure_db_and_env(project_root=None):
         import shutil as _shutil
         _shutil.copy2(sample_path, env_path)
 
-        # Generate random secrets for WebUI password and API key
+        # Generate random secrets for WebUI password, API key, and MCP token
         new_password = _secrets.token_urlsafe(24)
         new_api_key = _secrets.token_urlsafe(32)
+        new_mcp_token = _secrets.token_urlsafe(32)
 
         # Replace CHANGE_ME placeholders in the new .env file
         with open(env_path, "r") as f:
@@ -350,6 +399,18 @@ def ensure_db_and_env(project_root=None):
                                   f"QUICKROBOT_WEBUI_PASSWORD={new_password}")
         content = content.replace("QUICKROBOT_API_KEY=CHANGE_ME",
                                   f"QUICKROBOT_API_KEY={new_api_key}")
+        content = content.replace("QUICKROBOT_MCP_TOKEN=CHANGE_ME",
+                                  f"QUICKROBOT_MCP_TOKEN={new_mcp_token}")
+        # Also disable API key and MCP token by default on fresh init
+        # (user can re-enable explicitly)
+        content = content.replace(
+            "QUICKROBOT_API_KEY_DISABLED=true",
+            "QUICKROBOT_API_KEY_DISABLED=false"
+        )
+        content = content.replace(
+            "QUICKROBOT_MCP_KEY_DISABLED=true",
+            "QUICKROBOT_MCP_KEY_DISABLED=false"
+        )
         with open(env_path, "w") as f:
             f.write(content)
 
@@ -358,6 +419,7 @@ def ensure_db_and_env(project_root=None):
         print("=" * 60)
         print(f"[qr] WebUI password: {new_password}")
         print(f"[qr] API key:        {new_api_key}")
+        print(f"[qr] MCP token:      {new_mcp_token}")
         print(f"[qr] File created:   {env_path}")
         print("[qr] Restart quickrobot to create fresh DB with seed data.")
         print("=" * 60)

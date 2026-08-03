@@ -34,6 +34,7 @@ from lib.qr_engine_ids import (
     QR_DEFAULT_LOCALHOST, get_port_default, get_name_by_id,
     QR_FORBIDDEN_HOSTS, QR_ENGINE_PORT_DEFAULTS, get_system_instance_id,
     QR_HEALTH_CHECK_SLEEP, QR_ENGINE_SUBPROCESS,
+    QR_STATE_DEPLOYED,
     QR_WEBUI_RESTART_ADOPT, QR_MCP_RESTART_ADOPT, QR_SCHEDULER_RESTART_ADOPT,
 )
 from lib.lib_time import utcnow_str
@@ -798,7 +799,7 @@ def start_system_engine(engine_name, env_config, api_host, api_port, python_exe=
             if adopt:
                 logger.info("[qr-system] %s: orphaned process (pid=%d) — adopting (RESTART_ADOPT=true)", engine_name, old_pid)
                 try:
-                    transition_state(db_path, inst_id, "deployed")
+                    transition_state(db_path, inst_id, QR_STATE_DEPLOYED)
                 except Exception as _e:
                     logger.debug("transition_state deploy failed for %s (id=%d): %s", engine_name, inst_id, _e)
                     pass
@@ -814,7 +815,7 @@ def start_system_engine(engine_name, env_config, api_host, api_port, python_exe=
         else:
             # True existing child — skip
             try:
-                transition_state(db_path, inst_id, "deployed")
+                transition_state(db_path, inst_id, QR_STATE_DEPLOYED)
             except Exception as _e:
                 logger.debug("transition_state deployed (existing child) failed for %s (id=%d): %s", engine_name, inst_id, _e)
                 pass
@@ -897,7 +898,7 @@ def start_system_engine(engine_name, env_config, api_host, api_port, python_exe=
     if inst:
         try:
             update_instance(db_path, inst_id, pid_last_known=new_pid)
-            transition_state(db_path, inst_id, "deployed")
+            transition_state(db_path, inst_id, QR_STATE_DEPLOYED)
         except Exception as _e:
             logger.debug("post-spawn update+transition failed for %s (id=%d): %s", engine_name, inst_id, _e)
             pass
@@ -1326,6 +1327,12 @@ def build_subprocess_env(engine_name, env_config, api_host, api_port, instance_c
         env["QUICKROBOT_MCP_READ"] = _resolve_mcp_flag("mcp_allow_reads", "QUICKROBOT_MCP_READ")
         env["QUICKROBOT_MCP_WRITE"] = _resolve_mcp_flag("mcp_allow_writes", "QUICKROBOT_MCP_WRITE")
         env["QUICKROBOT_MCP_FULLPROXY"] = _resolve_mcp_flag("mcp_allow_proxy", "QUICKROBOT_MCP_FULLPROXY")
+        # MCP SSE auth token (MCP-DUAL-TOKEN) — passed only to MCP subprocess
+        env["QUICKROBOT_MCP_TOKEN"] = env_config.get("QUICKROBOT_MCP_TOKEN", "")
+        # MCP key disabled flag — controls whether SSE endpoint requires auth
+        mcp_key_disabled = env_config.get("QUICKROBOT_MCP_KEY_DISABLED", "false")
+        if mcp_key_disabled:
+            env["QUICKROBOT_MCP_KEY_DISABLED"] = mcp_key_disabled
 
         disable_dns = env_config.get("QUICKROBOT_MCP_DISABLE_DNS_REBINDING", "")
         if disable_dns:

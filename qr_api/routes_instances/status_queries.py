@@ -19,8 +19,15 @@ from lib.qr_engine_ids import (
     QR_ENGINE_SUBPROCESS_NAME, QR_ENGINE_SCHEDULER_NAME,
     QR_ENGINE_TIMESTAMP_PROXY_NAME,
     QR_ENGINE_API, QR_ENGINE_LLAMA_SERVER, QR_ENGINE_LLAMA_RPC,
-    QR_ENGINE_SUBPROCESS,
-    QR_JOB_DEPLOY, QR_JOB_DEPLOY_FAST, QR_JOB_RECONFIGURE,
+    QR_ENGINE_SUBPROCESS, QR_ENGINE_UNIVERSAL,
+    QR_JOB_DEPLOY, QR_JOB_DEPLOY_FAST, QR_JOB_DEPLOY_BINARY, QR_JOB_RECONFIGURE,
+)
+from lib.lib_engine_states import (
+    QR_STATE_RUNNING, QR_STATE_STOPPED, QR_STATE_STARTING,
+    QR_STATE_STOPPING, QR_STATE_ERROR, QR_STATE_UNCONFIGURED,
+    QR_STATE_DEPLOYED, QR_STATE_DEPLOYING, QR_STATE_CONFIGURING,
+    QR_STATE_LOADING, QR_STATE_UPDATING, QR_STATE_BUILD_ERROR,
+    QR_STATE_COMPILING,
 )
 
 
@@ -242,6 +249,7 @@ def _engine_get_instance_status(db_path, instance_id):
 
 def api_create_instance():
     """Create a new engine instance."""
+    import sys as _sys; print(f"[PRINT] api_create_instance called for instance", file=_sys.stderr, flush=True)
     from db.adapters.instances import create_instance, merge_configs, assign_port
     from db.adapters.engine_types import get_engine_type
     body, is_err = require_json()
@@ -462,10 +470,50 @@ def api_create_instance():
     except Exception as _e:
         logger.debug("api_create_instance: node_hostname update failed (non-critical): %s", _e)
 
+    # BINARY-DL: Extract binary_template_id from request body (orthogonal to preset)
+    _binary_template_id = None
+    if "binary_template_id" in body:
+        try:
+            _binary_template_id = int(body.get("binary_template_id"))
+        except (ValueError, TypeError):
+            pass
+
+    # Template persistence (Issue C): resolve template and merge metadata + ID into config_override.
+    # binary_template_id is always stored (for rebuild chain detection).
+    # Metadata (if any) is merged on top for subprocess/universal engines.
+    if _binary_template_id is not None:
+        try:
+            from db.sqlite import pool as _pool_bin
+            with _pool_bin(_CONFIG["db_path"]) as _conn_bin:
+                _bin_row = _conn_bin.execute(
+                    "SELECT metadata FROM engine_binaries WHERE id=? AND is_active=1",
+                    (_binary_template_id,),
+                ).fetchone()
+            # Always persist binary_template_id reference for rebuild detection
+            config_override["binary_template_id"] = _binary_template_id
+            if _bin_row and _bin_row.get("metadata"):
+                try:
+                    _bin_meta = json.loads(_bin_row["metadata"])
+                    if isinstance(_bin_meta, dict):
+                        for _k, _v in _bin_meta.items():
+                            config_override[_k] = _v
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        except Exception as _e:
+            logger.debug("api_create_instance inst=%d: template lookup failed: %s", instance.get("id", "??") if instance else "?", _e)
+
+    # Persist updated config_override (includes merged template metadata) to DB
+    try:
+        from db.adapters.instances import update_instance as _ui_co
+        _ui_co(_CONFIG["db_path"], instance["id"], config_override=config_override)
+    except Exception as _e:
+        logger.debug("api_create_instance inst=%d: config_override persistence failed: %s", instance.get("id", "??") if instance else "?", _e)
+
     # Auto-deploy if enabled and deploy_requested flag not explicitly false
     auto_deploy = _CONFIG.get("create_and_autodeploy", True)
     deploy_flag = body.get("deploy", True)
     do_deploy = auto_deploy and (isinstance(deploy_flag, bool) and deploy_flag or str(deploy_flag).lower() != "false")
+    logger.warning("[qr] api_create_instance: auto_deploy=%s deploy_flag=%s do_deploy=%s _binary_template_id=%s _skip_build=%s", auto_deploy, deploy_flag, do_deploy, _binary_template_id, _skip_build)
     # Cleanup orphaned records on create failure (QUICKROBOT_CLEANUP_ON_CREATE_FAIL)
     _qr_env = _CONFIG.get("qr_env_config", {})
     cleanup_fail = _qr_env.get("QUICKROBOT_CLEANUP_ON_CREATE_FAIL", "true").lower() == "true"
@@ -474,9 +522,14 @@ def api_create_instance():
             # Use RUNNER-1 staged chain for consistent job/task tracking
             from lib.lib_runner import PlaybookRunner
             _job_type = QR_JOB_DEPLOY_FAST if _skip_build else QR_JOB_DEPLOY
+            # Apply binary template chain selection (§3.2A)
+            if _binary_template_id is not None:
+                _job_type = QR_JOB_DEPLOY_BINARY
+            logger.warning("[qr] api_create_instance: entering deploy block job_type=%s binary_template_id=%s", _job_type, _binary_template_id)
             runner = PlaybookRunner(_CONFIG["db_path"])
             result = runner.chain(instance["id"], job_type=_job_type,
-                                  actor="api", skip_build=_skip_build, async_mode=True)
+                                  actor="api", skip_build=_skip_build, async_mode=True,
+                                  binary_template_id=_binary_template_id)
             if not result.get("success", False):
                 err_msg = result.get("message", "deploy failed")
                 # Cleanup orphaned instance on deploy failure
@@ -495,8 +548,10 @@ def api_create_instance():
                                       details={"name": name, "cleanup_error": str(_ce)})
                 return error_response("DEPLOY_FAILED", f"Deploy preflight failed: {err_msg}")
         except Exception as exc:
-            # Best-effort auto-deploy — keep instance for async build tracking
-            pass
+            # Log the actual error so we can diagnose auto-deploy failures
+            import traceback as _tb
+            logger.error("[qr] api_create_instance(%d): auto-deploy failed (binary_template_id=%s): %s\n%s",
+                         instance["id"], _binary_template_id, exc, _tb.format_exc())
 
     # Attach preset/engine mismatch warning to response for agents
     if _preset_engine_mismatch:
@@ -696,39 +751,40 @@ def api_list_instances():
     # Pre-compute available actions per instance (state + engine_type derived).
     # Actions are deterministic — no AJAX needed client-side.
     _LLAMA_ACTIONS = {
-        "unconfigured":   [{"name": "deploy", "label": "Deploy"}, {"name": "delete", "label": "Delete"}],
-        "configuring":    [{"name": "stop", "label": "Stop"}],
-        "deploying":      [{"name": "stop", "label": "Stop"}],
-        "deployed":       [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "deploy", "label": "Deploy"}, {"name": "undeploy", "label": "Undeploy"}, {"name": "delete", "label": "Delete"}],
-        "starting":       [{"name": "stop", "label": "Stop"}],
-        "loading":        [{"name": "stop", "label": "Stop"}],
-        "running":        [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "stop", "label": "Stop"}],
-        "stopping":       [{"name": "start", "label": "Start"}],
-        "stopped":        [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "deploy", "label": "Deploy"}, {"name": "undeploy", "label": "Undeploy"}],
-        "error":          [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "deploy", "label": "Deploy"}, {"name": "undeploy", "label": "Undeploy"}, {"name": "delete", "label": "Delete"}],
-        "updating":       [],
-        "compiling":      [],
-        "build_error":    [{"name": "deploy", "label": "Deploy"}, {"name": "start", "label": "Start"}, {"name": "undeploy", "label": "Undeploy"}, {"name": "delete", "label": "Delete"}],
-        "timeout":        [{"name": "deploy", "label": "Deploy"}],
+        QR_STATE_UNCONFIGURED:   [{"name": "deploy", "label": "Deploy"}, {"name": "delete", "label": "Delete"}],
+        QR_STATE_CONFIGURING:    [{"name": "stop", "label": "Stop"}],
+        QR_STATE_DEPLOYING:      [{"name": "stop", "label": "Stop"}],
+        QR_STATE_DEPLOYED:       [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "deploy", "label": "Deploy"}, {"name": "undeploy", "label": "Undeploy"}, {"name": "delete", "label": "Delete"}],
+        QR_STATE_STARTING:       [{"name": "stop", "label": "Stop"}],
+        QR_STATE_LOADING:        [{"name": "stop", "label": "Stop"}],
+        QR_STATE_RUNNING:        [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "stop", "label": "Stop"}],
+        QR_STATE_STOPPING:       [{"name": "start", "label": "Start"}],
+        QR_STATE_STOPPED:        [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "deploy", "label": "Deploy"}, {"name": "undeploy", "label": "Undeploy"}],
+        QR_STATE_ERROR:          [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "rebuild", "label": "Rebuild"}, {"name": "deploy", "label": "Deploy"}, {"name": "undeploy", "label": "Undeploy"}, {"name": "delete", "label": "Delete"}],
+        QR_STATE_UPDATING:       [],
+        QR_STATE_COMPILING:      [],
+         QR_STATE_BUILD_ERROR:    [{"name": "deploy", "label": "Deploy"}, {"name": "start", "label": "Start"}, {"name": "undeploy", "label": "Undeploy"}, {"name": "delete", "label": "Delete"}],
+         "timeout":        [{"name": "deploy", "label": "Deploy"}],
+
 
     }
     _SUBPROCESS_ACTIONS = {
-        "unconfigured":   [{"name": "deploy", "label": "Deploy"}, {"name": "delete", "label": "Delete"}],
-        "configuring":    [{"name": "stop", "label": "Stop"}],
-        "deployed":       [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "delete", "label": "Delete"}],
-        "starting":       [{"name": "stop", "label": "Stop"}],
-        "running":        [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "stop", "label": "Stop"}],
-        "stopping":       [{"name": "start", "label": "Start"}],
-        "stopped":        [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "deploy", "label": "Deploy"}],
-        "error":          [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "deploy", "label": "Deploy"}, {"name": "delete", "label": "Delete"}],
-        "build_error":    [{"name": "deploy", "label": "Deploy"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "delete", "label": "Delete"}],
-        "timeout":        [{"name": "deploy", "label": "Deploy"}],
-    }
+        QR_STATE_UNCONFIGURED:   [{"name": "deploy", "label": "Deploy"}, {"name": "delete", "label": "Delete"}],
+        QR_STATE_CONFIGURING:    [{"name": "stop", "label": "Stop"}],
+        QR_STATE_DEPLOYED:       [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "undeploy", "label": "Undeploy"}, {"name": "delete", "label": "Delete"}],
+        QR_STATE_STARTING:       [{"name": "stop", "label": "Stop"}],
+        QR_STATE_RUNNING:        [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "stop", "label": "Stop"}],
+        QR_STATE_STOPPING:       [{"name": "start", "label": "Start"}],
+        QR_STATE_STOPPED:        [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "deploy", "label": "Deploy"}, {"name": "undeploy", "label": "Undeploy"}],
+        QR_STATE_ERROR:          [{"name": "reconfig_restart", "label": "Reconfig/Restart"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "deploy", "label": "Deploy"}, {"name": "undeploy", "label": "Undeploy"}, {"name": "delete", "label": "Delete"}],
+         QR_STATE_BUILD_ERROR:    [{"name": "deploy", "label": "Deploy"}, {"name": "start", "label": "Start"}, {"name": "stop", "label": "Stop"}, {"name": "undeploy", "label": "Undeploy"}, {"name": "delete", "label": "Delete"}],
+         "timeout":        [{"name": "deploy", "label": "Deploy"}],
+     }
     # System-managed engines: use restart_system endpoint instead of standard stop/start
     _SYSTEM_ACTIONS = {
-        "running":        [{"name": "restart_system", "label": "Restart"}],
-        "stopped":        [{"name": "start", "label": "Start"}],
-        "error":          [{"name": "restart_system", "label": "Restart"}],
+        QR_STATE_RUNNING:        [{"name": "restart_system", "label": "Restart"}],
+        QR_STATE_STOPPED:        [{"name": "start", "label": "Start"}],
+        QR_STATE_ERROR:          [{"name": "restart_system", "label": "Restart"}],
     }
 
     for inst in instances:
@@ -1013,7 +1069,7 @@ def api_update_instance(inst_id):
     if preset_only:
         from db.adapters.instances import transition_state as _ts, log_action as _log
         current_state = instance.get("state", "")
-        if current_state in ("running", "stopped", "error"):
+        if current_state in (QR_STATE_RUNNING, QR_STATE_STOPPED, QR_STATE_ERROR):
             lock = _get_deploy_lock(inst_id)
             if not lock.acquire(blocking=False):
                 return error_response("BUSY", f"Config update already in progress for instance {inst_id}")
@@ -1057,7 +1113,7 @@ def api_update_instance(inst_id):
                 # Uses deploy_config_env + service_start playbooks through job/task system.
                 # Creates proper job+task records so SSE progress bar and task log work.
                 # No git clone/pull, no cmake build. Works identically regardless of running or stopped state.
-                if current_state in ("running", "stopped", "error") and config_update_needed:
+                if current_state in (QR_STATE_RUNNING, QR_STATE_STOPPED, QR_STATE_ERROR) and config_update_needed:
                     lock = _get_deploy_lock(inst_id)
                     if not lock.acquire(blocking=False):
                         return error_response("BUSY", f"Config update already in progress for instance {inst_id}")
@@ -1085,14 +1141,14 @@ def api_update_instance(inst_id):
                         lock.release()
             else:
                 # Standard flow: stopped/unconfigured/error/deployed → redeploy
-                was_running = current_state == "running"
-                if current_state in ("running", "stopped", "unconfigured", "error", "deployed"):
+                was_running = current_state == QR_STATE_RUNNING
+                if current_state in (QR_STATE_RUNNING, QR_STATE_STOPPED, QR_STATE_UNCONFIGURED, QR_STATE_ERROR, QR_STATE_DEPLOYED):
                     try:
                         # Step 1: Stop if running, verify stopped
                         if was_running:
                             try:
                                 _ts(_CONFIG["db_path"], inst_id, "stopping")
-                                _log(_CONFIG["db_path"], inst_id, "stop", "received")
+                                _log(_CONFIG["db_path"], inst_id, QR_JOB_STOP, "received")
                             except Exception as _e:
                                 logger.debug("api_update_instance inst=%d: stopping state transition before deploy: %s", inst_id, _e)
 
@@ -1174,14 +1230,14 @@ def api_delete_instance(inst_id):
 
     # Run engine-specific undeploy chain via RUNNER-1 (if deployed with a node)
     chain_result = {"success": True, "message": "skipped"}
-    if node_id is not None and inst.get("state") not in ("unconfigured",):
+    if node_id is not None and inst.get("state") not in (QR_STATE_UNCONFIGURED,):
         from lib.lib_runner import PlaybookRunner
         runner = PlaybookRunner(_CONFIG["db_path"])
         chain_result = runner.chain(inst_id, job_type="undeploy", actor="api")
 
     ud_success = chain_result.get("success", False) if chain_result else True
     # If no node or unconfigured state, undeploy was skipped — consider success
-    if node_id is None or inst.get("state") == "unconfigured":
+    if node_id is None or inst.get("state") == QR_STATE_UNCONFIGURED:
         ud_success = True
 
     # DESIGN-5: Atomic delete — only remove from DB if remote undeploy succeeded.
@@ -1206,7 +1262,7 @@ def api_delete_instance(inst_id):
                 from db.adapters.instances import list_instances as _list_all
                 remaining = [i for i in _list_all(_CONFIG["db_path"], node_id=node_id)
                                 if i.get("engine_type_name") in (QR_ENGINE_LLAMA_SERVER_NAME, QR_ENGINE_LLAMA_RPC_NAME)
-                                and i.get("state") not in ("unconfigured",)]
+                                and i.get("state") not in (QR_STATE_UNCONFIGURED,)]
                 if len(remaining) == 0:
                     # Last instance on this node — trigger shared build cleanup
                     nd = _gi(_CONFIG["db_path"], inst_id) or {}

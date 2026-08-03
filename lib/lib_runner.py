@@ -41,6 +41,7 @@ from lib.qr_engine_ids import (
     QR_ENGINE_LLAMA_RPC_NAME,
     QR_ENGINE_TIMESTAMP_PROXY_NAME,
     QR_ENGINE_UNIVERSAL_NAME,
+    QR_ENGINE_SUBPROCESS_NAME,
     QR_ENGINE_PORT_DEFAULTS,
     STAGE_STATE_MAP,
     SKIPABLE_STAGES,
@@ -49,6 +50,7 @@ from lib.qr_engine_ids import (
     QR_JOB_REBUILD,
     QR_JOB_RECONFIGURE,
     QR_JOB_DEPLOY_FAST,
+    QR_JOB_DEPLOY_BINARY,
     QR_JOB_UNDEPLOY,
     QR_JOB_BIND,
     QR_JOB_UNBIND,
@@ -72,9 +74,26 @@ from lib.qr_engine_ids import (
     QR_STAGE_HEALTH_CHECK,
     QR_STAGE_UNDEPLOY,
     QR_STAGE_VERIFY,
+    QR_STAGE_BINARY_DOWNLOAD,
+    QR_STAGE_REBOOT,
+    QR_STAGE_APT_UPDATE,
+    QR_STAGE_APT_UPGRADE,
+    QR_STATE_ERROR,
+    QR_STATE_BUILD_ERROR,
+    QR_STATE_DEPLOYING,
+    QR_STATE_CONFIGURING,
+    QR_STATE_COMPILING,
+    QR_STATE_UPDATING,
+    QR_STATE_LOADING,
+    QR_STATE_STOPPED,
+    QR_STATE_RUNNING,
+    QR_STATE_STARTING,
     QR_TIMEOUT_COMPILE,
     QR_TIMEOUT_SOURCE,
     QR_TIMEOUT_DEFAULT,
+    QR_NODE_SRC_DIR,
+    QR_NODE_BUILD_DIR,
+    QR_BINARY_TEMPLATE_ROOT,
     _QR_UNDEPLOY_CHAINS,
 )
 
@@ -94,77 +113,110 @@ class PlaybookIntegrityError(Exception):
 
 DEFAULT_STAGE_CHAINS = {
         QR_ENGINE_LLAMA_SERVER_NAME: [
-            {"stage": "preflight",   "playbook": "preflight_check"},
-            {"stage": "deps",        "playbook": "install_deps"},
-            {"stage": "source",      "playbook": "source_llama"},
-            {"stage": "compile",     "playbook": "build_compile_llama"},
-            {"stage": "config_svc",  "playbook": "deploy_config_service"},
-            {"stage": "config_env",  "playbook": "deploy_config_env"},
-            {"stage": "start",       "playbook": "service_start"},
+            {"stage": QR_STAGE_PREFLIGHT,   "playbook": "preflight_check"},
+            {"stage": QR_STAGE_DEPS,        "playbook": "install_deps"},
+            {"stage": QR_STAGE_SOURCE,      "playbook": "source_llama"},
+            {"stage": QR_STAGE_COMPILE,     "playbook": "build_compile_llama"},
+            {"stage": QR_STAGE_CONFIG_SVC,  "playbook": "deploy_config_service"},
+            {"stage": QR_STAGE_CONFIG_ENV,  "playbook": "deploy_config_env"},
+            {"stage": QR_STAGE_START,       "playbook": "service_start"},
         ],
        QR_ENGINE_LLAMA_RPC_NAME: [
-            {"stage": "preflight",   "playbook": "preflight_check"},
-            {"stage": "deps",        "playbook": "install_deps"},
-            {"stage": "source",      "playbook": "source_llama"},
-            {"stage": "compile",     "playbook": "build_compile_llama"},
-            {"stage": "config_svc",  "playbook": "deploy_config_service"},
-            {"stage": "config_env",  "playbook": "deploy_config_env"},
-            {"stage": "start",       "playbook": "service_start"},
+            {"stage": QR_STAGE_PREFLIGHT,   "playbook": "preflight_check"},
+            {"stage": QR_STAGE_DEPS,        "playbook": "install_deps"},
+            {"stage": QR_STAGE_SOURCE,      "playbook": "source_llama"},
+            {"stage": QR_STAGE_COMPILE,     "playbook": "build_compile_llama"},
+            {"stage": QR_STAGE_CONFIG_SVC,  "playbook": "deploy_config_service"},
+            {"stage": QR_STAGE_CONFIG_ENV,  "playbook": "deploy_config_env"},
+            {"stage": QR_STAGE_START,       "playbook": "service_start"},
         ],
         QR_ENGINE_IPERF3_NAME: [
-            {"stage": "preflight",   "playbook": "preflight_check"},
-            {"stage": "deps",        "playbook": "install_deps"},
-            {"stage": "config_svc",  "playbook": "deploy_config_service"},
-            {"stage": "config_env",  "playbook": "deploy_config_env"},
-            {"stage": "start",       "playbook": "service_start"},
+            {"stage": QR_STAGE_PREFLIGHT,   "playbook": "preflight_check"},
+            {"stage": QR_STAGE_DEPS,        "playbook": "install_deps"},
+            {"stage": QR_STAGE_CONFIG_SVC,  "playbook": "deploy_config_service"},
+            {"stage": QR_STAGE_CONFIG_ENV,  "playbook": "deploy_config_env"},
+            {"stage": QR_STAGE_START,       "playbook": "service_start"},
         ],
         QR_ENGINE_UNIVERSAL_NAME: [
-            {"stage": "preflight",   "playbook": "preflight_check"},
-            {"stage": "deps",        "playbook": "install_deps"},
-            {"stage": "config_svc",  "playbook": "deploy_config_service"},
-            {"stage": "config_env",  "playbook": "deploy_config_env"},
-            {"stage": "start",       "playbook": "service_start"},
+            {"stage": QR_STAGE_PREFLIGHT,   "playbook": "preflight_check"},
+            {"stage": QR_STAGE_DEPS,        "playbook": "install_deps"},
+            {"stage": QR_STAGE_CONFIG_SVC,  "playbook": "deploy_config_service"},
+            {"stage": QR_STAGE_CONFIG_ENV,  "playbook": "deploy_config_env"},
+            {"stage": QR_STAGE_START,       "playbook": "service_start"},
       ],
         QR_ENGINE_TIMESTAMP_PROXY_NAME: [
-            {"stage": "preflight",   "playbook": "preflight_check"},
-            {"stage": "deploy",      "playbook": "deploy_timestamp_proxy"},
-            {"stage": "config_svc",  "playbook": "deploy_config_service"},
-            {"stage": "config_env",  "playbook": "deploy_config_env"},
-            {"stage": "start",       "playbook": "service_start"},
+            {"stage": QR_STAGE_PREFLIGHT,   "playbook": "preflight_check"},
+            {"stage": "deploy",              "playbook": "deploy_timestamp_proxy"},
+            {"stage": QR_STAGE_CONFIG_SVC,  "playbook": "deploy_config_service"},
+            {"stage": QR_STAGE_CONFIG_ENV,  "playbook": "deploy_config_env"},
+            {"stage": QR_STAGE_START,       "playbook": "service_start"},
       ],
+        # Binary download — preflight → binary_download → config_svc → config_env → start
+        # Replaces source + compile stages with a binary download stage.
+        # Used when preset references an engine_binary template.
+        QR_JOB_DEPLOY_BINARY: {
+            QR_ENGINE_LLAMA_SERVER_NAME: [
+                {"stage": QR_STAGE_PREFLIGHT,       "playbook": "preflight_check"},
+                {"stage": QR_STAGE_BINARY_DOWNLOAD, "playbook": "deploy_binary_llama"},
+                {"stage": QR_STAGE_CONFIG_SVC,      "playbook": "deploy_config_service"},
+                {"stage": QR_STAGE_CONFIG_ENV,      "playbook": "deploy_config_env"},
+                {"stage": QR_STAGE_START,           "playbook": "service_start"},
+            ],
+            QR_ENGINE_LLAMA_RPC_NAME: [
+                {"stage": QR_STAGE_PREFLIGHT,       "playbook": "preflight_check"},
+                {"stage": QR_STAGE_BINARY_DOWNLOAD, "playbook": "deploy_binary_llama"},
+                {"stage": QR_STAGE_CONFIG_SVC,      "playbook": "deploy_config_service"},
+                {"stage": QR_STAGE_CONFIG_ENV,      "playbook": "deploy_config_env"},
+                {"stage": QR_STAGE_START,           "playbook": "service_start"},
+            ],
+            QR_ENGINE_SUBPROCESS_NAME: [
+                {"stage": QR_STAGE_PREFLIGHT,       "playbook": "preflight_check"},
+                {"stage": QR_STAGE_BINARY_DOWNLOAD, "playbook": "deploy_binary_subprocess"},
+                {"stage": QR_STAGE_CONFIG_SVC,      "playbook": "deploy_config_service"},
+                {"stage": QR_STAGE_CONFIG_ENV,      "playbook": "deploy_config_env"},
+                {"stage": QR_STAGE_START,           "playbook": "service_start"},
+            ],
+            QR_ENGINE_UNIVERSAL_NAME: [
+                {"stage": QR_STAGE_PREFLIGHT,       "playbook": "preflight_check"},
+                {"stage": QR_STAGE_BINARY_DOWNLOAD, "playbook": "deploy_binary_universal"},
+                {"stage": QR_STAGE_CONFIG_SVC,      "playbook": "deploy_config_service"},
+                {"stage": QR_STAGE_CONFIG_ENV,      "playbook": "deploy_config_env"},
+                {"stage": QR_STAGE_START,           "playbook": "service_start"},
+            ],
+        },
         # Fast deploy — config_svc + config_env + start only (no source/compile)
         # Used for new instances when skip_build=True: still deploys service files,
         # assumes binary already exists or will be provided separately.
-        "deploy_fast": {
+        QR_JOB_DEPLOY_FAST: {
             QR_ENGINE_LLAMA_SERVER_NAME: [
-                {"stage": "config_svc",  "playbook": "deploy_config_service"},
-                {"stage": "config_env",  "playbook": "deploy_config_env"},
-                {"stage": "start",       "playbook": "service_start"},
+                {"stage": QR_STAGE_CONFIG_SVC,  "playbook": "deploy_config_service"},
+                {"stage": QR_STAGE_CONFIG_ENV,  "playbook": "deploy_config_env"},
+                {"stage": QR_STAGE_START,       "playbook": "service_start"},
             ],
             QR_ENGINE_LLAMA_RPC_NAME: [
-                {"stage": "config_svc",  "playbook": "deploy_config_service"},
-                {"stage": "config_env",  "playbook": "deploy_config_env"},
-                {"stage": "start",       "playbook": "service_start"},
+                {"stage": QR_STAGE_CONFIG_SVC,  "playbook": "deploy_config_service"},
+                {"stage": QR_STAGE_CONFIG_ENV,  "playbook": "deploy_config_env"},
+                {"stage": QR_STAGE_START,       "playbook": "service_start"},
             ],
             QR_ENGINE_IPERF3_NAME: [
-                {"stage": "config_svc",  "playbook": "deploy_config_service"},
-                {"stage": "config_env",  "playbook": "deploy_config_env"},
-                {"stage": "start",       "playbook": "service_start"},
+                {"stage": QR_STAGE_CONFIG_SVC,  "playbook": "deploy_config_service"},
+                {"stage": QR_STAGE_CONFIG_ENV,  "playbook": "deploy_config_env"},
+                {"stage": QR_STAGE_START,       "playbook": "service_start"},
             ],
             QR_ENGINE_UNIVERSAL_NAME: [
-                {"stage": "config_svc",  "playbook": "deploy_config_service"},
-                {"stage": "config_env",  "playbook": "deploy_config_env"},
-                {"stage": "start",       "playbook": "service_start"},
+                {"stage": QR_STAGE_CONFIG_SVC,  "playbook": "deploy_config_service"},
+                {"stage": QR_STAGE_CONFIG_ENV,  "playbook": "deploy_config_env"},
+                {"stage": QR_STAGE_START,       "playbook": "service_start"},
             ],
             QR_ENGINE_TIMESTAMP_PROXY_NAME: [
-                {"stage": "config_svc",  "playbook": "deploy_config_service"},
-                {"stage": "config_env",  "playbook": "deploy_config_env"},
-                {"stage": "start",       "playbook": "service_start"},
+                {"stage": QR_STAGE_CONFIG_SVC,  "playbook": "deploy_config_service"},
+                {"stage": QR_STAGE_CONFIG_ENV,  "playbook": "deploy_config_env"},
+                {"stage": QR_STAGE_START,       "playbook": "service_start"},
             ],
         },
         # Health check — runs instance_health_check playbook once, returns status
-        "health_check": [
-            {"stage": "health_check",  "playbook": "instance_health_check"},
+        QR_JOB_HEALTH_CHECK: [
+            {"stage": QR_STAGE_HEALTH_CHECK,  "playbook": "instance_health_check"},
         ],
 }
 
@@ -187,7 +239,7 @@ class PlaybookRunner:
 
     # ── Job & Task Creation ────────────────────────────────────────
 
-    def create_deploy_job(self, instance_id, job_type="deploy", priority=5, actor="api"):
+    def create_deploy_job(self, instance_id, job_type="deploy", priority=5, actor="api", binary_template_id=None):
         """Create a deploy job for an instance; return (job, tasks) tuple.
 
         Args:
@@ -195,6 +247,8 @@ class PlaybookRunner:
             job_type: Type of operation (deploy, rebuild, etc.).
             priority: Scheduler priority (1=highest).
             actor: Who triggered this (api, agent, system).
+            binary_template_id: Optional explicit binary template ID — overrides
+                                preset's binary_id for chain resolution and extra_vars.
 
         Returns:
             Tuple of (job_dict, list_of_task_dicts).
@@ -207,7 +261,7 @@ class PlaybookRunner:
             raise ValueError(f"Instance {instance_id} not found")
 
         engine_name = inst.get("engine_type_name", "")
-        stages = self._get_stage_chain(engine_name, job_type, inst)
+        stages = self._get_stage_chain(engine_name, job_type, inst, binary_template_id=binary_template_id)
 
         # Compute merged env/cli_opts for config/start stages — needed for extra_vars
         # during task creation (pre-computed in details_json).
@@ -246,7 +300,7 @@ class PlaybookRunner:
                    VALUES (NULL, ?, ?, ?, ?, 'queued', ?,
                            strftime('%Y-%m-%dT%H:%M:%SZ','now'),
                            NULL, NULL, 0, 1, ?)""",
-                (job_type, engine_name, instance_id, inst.get("node_id"), actor, json.dumps({"job_type": job_type})),
+                 (job_type, engine_name, instance_id, inst.get("node_id"), actor, json.dumps({"job_type": job_type, "binary_template_id": binary_template_id})),
             )
             job_id = cursor.lastrowid
 
@@ -270,7 +324,7 @@ class PlaybookRunner:
                 # Pre-compute SSOT extra_vars at creation time — avoids re-fetching
                 # instance + engine_configs during task execution (Issue 1B).
                 try:
-                    computed_vars = self._build_extra_vars(inst, s["stage"], merged_cli_opts, merged_env)
+                    computed_vars = self._build_extra_vars(inst, s["stage"], merged_cli_opts, merged_env, binary_template_id=binary_template_id)
                     details_payload = {"playbook": s["playbook"], "extra_vars": computed_vars}
                 except Exception as _e:
                     logger.debug("extra_vars build failed for stage %s: %s", s["stage"], _e)
@@ -309,20 +363,20 @@ class PlaybookRunner:
         with pool(self.db_path) as conn:
             # Check for existing enabled health check
             existing = conn.execute(
-                "SELECT id FROM log_entries WHERE instance_id=? AND job_type='health_check' AND parent_id IS NULL",
+                f"SELECT id FROM log_entries WHERE instance_id=? AND job_type='{QR_JOB_HEALTH_CHECK}' AND parent_id IS NULL",
                 (instance_id,),
             ).fetchone()
             if existing:
                 return None  # Already exists
 
             cursor = conn.execute(
-                """INSERT INTO log_entries
+                f"""INSERT INTO log_entries
                    (parent_id, job_type, engine_type_name, instance_id, status, actor,
                     created_at, started_at, finished_at, task_stage, stage_playbook,
                     retry_count, max_retries, details_json)
-                   VALUES (NULL, 'health_check', NULL, ?, 'queued', 'system',
+                   VALUES (NULL, '{QR_JOB_HEALTH_CHECK}', NULL, ?, 'queued', 'system',
                            strftime('%Y-%m-%dT%H:%M:%SZ','now'), NULL, NULL, NULL, NULL,
-                           0, 1, '{}')""",
+                           0, 1, '{{}}')""",
                 (instance_id,),
             )
             job_id = cursor.lastrowid
@@ -339,18 +393,18 @@ class PlaybookRunner:
                 hpb_reg_id = None
                 hpb_ver = None
             conn.execute(
-                """INSERT INTO log_entries
+                f"""INSERT INTO log_entries
                    (parent_id, job_type, engine_type_name, instance_id, status, actor,
                     created_at, started_at, finished_at, task_stage, stage_playbook,
                     retry_count, max_retries, playbook_registry_id, playbook_version, details_json)
-                   VALUES (?, 'health_check', NULL, ?, 'queued', 'system',
-                           strftime('%Y-%m-%dT%H:%M:%SZ','now'), NULL, NULL, 'health_probe',
-                           'playbooks/core/service_start.yml', 0, 1, ?, ?, '{}')""",
+                   VALUES (?, '{QR_JOB_HEALTH_CHECK}', NULL, ?, 'queued', 'system',
+                           strftime('%Y-%m-%dT%H:%M:%SZ','now'), NULL, NULL, '{QR_STAGE_HEALTH_CHECK}',
+                           'playbooks/core/service_start.yml', 0, 1, ?, ?, '{{}}')""",
                 (job_id, instance_id, hpb_reg_id, hpb_ver),
             )
             conn.commit()
 
-            return {"id": job_id, "job_type": "health_check", "status": "queued"}
+            return {"id": job_id, "job_type": QR_JOB_HEALTH_CHECK, "status": "queued"}
 
     def create_periodic_health_check(self, instance_id):
         """Create a one-shot health check task for periodic scheduler runs.
@@ -382,31 +436,31 @@ class PlaybookRunner:
         with pool(self.db_path) as conn:
             # Create job header row
             cursor = conn.execute(
-                """INSERT INTO log_entries
+                f"""INSERT INTO log_entries
                    (parent_id, job_type, engine_type_name, instance_id, status, actor,
                     created_at, started_at, finished_at, task_stage, stage_playbook,
                     retry_count, max_retries, details_json)
-                   VALUES (NULL, 'health_check', ?, ?, 'queued', 'system',
+                   VALUES (NULL, '{QR_JOB_HEALTH_CHECK}', ?, ?, 'queued', 'system',
                            strftime('%Y-%m-%dT%H:%M:%SZ','now'), NULL, NULL, NULL, NULL,
-                           0, 1, '{}')""",
+                           0, 1, '{{}}')""",
                 (inst["engine_type_name"], instance_id),
             )
             job_id = cursor.lastrowid
 
             # Create task row using the health_check chain playbook
             conn.execute(
-                """INSERT INTO log_entries
+                f"""INSERT INTO log_entries
                    (parent_id, job_type, engine_type_name, instance_id, status, actor,
                     created_at, started_at, finished_at, task_stage, stage_playbook,
                     retry_count, max_retries, details_json)
-                   VALUES (?, 'health_check', ?, ?, 'queued', 'system',
-                           strftime('%Y-%m-%dT%H:%M:%SZ','now'), NULL, NULL, 'health_check',
-                           'instance_health_check', 0, 1, '{}')""",
+                   VALUES (?, '{QR_JOB_HEALTH_CHECK}', ?, ?, 'queued', 'system',
+                           strftime('%Y-%m-%dT%H:%M:%SZ','now'), NULL, NULL, '{QR_STAGE_HEALTH_CHECK}',
+                           'instance_health_check', 0, 1, '{{}}')""",
                 (job_id, inst["engine_type_name"], instance_id),
             )
             conn.commit()
 
-        return {"id": job_id, "job_type": "health_check", "status": "queued"}
+        return {"id": job_id, "job_type": QR_JOB_HEALTH_CHECK, "status": "queued"}
 
     def cancel_job(self, job_id):
         """Cancel all tasks in a job."""
@@ -495,6 +549,21 @@ class PlaybookRunner:
         playbook_path = self._resolve_playbook(task["playbook"])
         stage = task["stage"]
 
+        # Load binary_template_id from parent job's details_json for binary chain
+        _binary_template_id = None
+        try:
+            with pool(self.db_path) as conn:
+                job_row = conn.execute(
+                    "SELECT details_json FROM log_entries WHERE id=? AND parent_id IS NULL",
+                    (task["job_id"],),
+                ).fetchone()
+                if job_row and job_row["details_json"]:
+                    import json as _json
+                    _details = _json.loads(job_row["details_json"])
+                    _binary_template_id = _details.get("binary_template_id")
+        except Exception:
+            pass  # Non-critical — chain will default to git_build
+
         # Integrity check: verify playbook checksum + size against DB
         # Lookup MUST succeed with valid data — a failed lookup is a hard failure, not a silent skip.
         playbook_ref = task.get("playbook", "")
@@ -535,7 +604,8 @@ class PlaybookRunner:
         # Compute merged env/cli_opts for config/start stages.
         # Uses engine CAPABILITIES["env_builder"] — if the key is missing, the
         # engine does not participate in the config merge chain (iperf3,
-        # universal, subprocess use their own extra_vars paths).
+        # universal use their own extra_vars paths). For engines without an
+        # env_builder (e.g., subprocess), fall back to preset cli_opts/env.
         engine_type_name = inst.get("engine_type_name", "")
         merged_cli_opts = None
         merged_env = None
@@ -560,13 +630,36 @@ class PlaybookRunner:
                         result = builder(self.db_path, instance_id)
                         merged_cli_opts = result.get("cli_args")
                         merged_env = result.get("env")
+                else:
+                    # No env_builder — fall back to preset config_template
+                    # This handles subprocess, iperf3, universal engine types.
+                    try:
+                        from db.sqlite import pool as _pool
+                        with _pool(self.db_path) as _conn:
+                            preset_row = _conn.execute(
+                                "SELECT config_template FROM engine_presets WHERE id=(SELECT preset_id FROM instances WHERE id=?)",
+                                (instance_id,),
+                            ).fetchone()
+                            if preset_row:
+                                ct = json.loads(preset_row["config_template"] or "{}")
+                                merged_env = ct.get("env")
+                                _cli = ct.get("cli_opts")
+                                if isinstance(_cli, list):
+                                    # Join list into space-separated string for ansible
+                                    merged_cli_opts = " ".join(str(x) for x in _cli)
+                                logger.debug("[qr-runner] Preset fallback: merged_cli_opts=%s merged_env=%s", merged_cli_opts, bool(merged_env))
+                            else:
+                                logger.warning("[qr-runner] Preset fallback: no config_template for preset_id of instance %d", instance_id)
+                    except Exception as _e2:
+                        logger.warning("[qr-runner] Preset fallback failed: %s", _e2)
             except Exception as exc:
                 logger.warning(
                     "[qr-runner] Env builder failed for instance %d (%s): %s",
                     instance_id, engine_type_name, exc,
                 )
 
-        extra_vars = self._build_extra_vars(inst, stage, merged_cli_opts, merged_env, task)
+        print(f"[DEBUG-PT1] execute_task_phase1: stage={stage} binary_template_id={_binary_template_id}", file=__import__('sys').stderr)
+        extra_vars = self._build_extra_vars(inst, stage, merged_cli_opts, merged_env, task, binary_template_id=_binary_template_id)
 
         # Update task sub-row to running and parent job-header to running
         with pool(self.db_path) as conn:
@@ -647,9 +740,10 @@ class PlaybookRunner:
         if stage == QR_STAGE_COMPILE and inst.get("node_id"):
             build_lock = get_node_build_lock(inst["node_id"])
 
+        result = None
         try:
             if build_lock is not None:
-                build_lock.acquire(timeout=300)
+                build_lock.acquire(timeout=QR_TIMEOUT_DEFAULT)
             logger.info(
                 "[qr-runner] PLAYBOOK RUN: playbook=%s limit=%s node_id=%s inventory_host=%s",
                 playbook_path, node_hostname,
@@ -669,7 +763,7 @@ class PlaybookRunner:
             else:
                 error_msg = self._extract_error(result)
                 # Stop stage is idempotent: already-stopped or no hosts matched = success
-                if stage == "stop" and error_msg:
+                if stage == QR_STAGE_STOP and error_msg:
                     low = error_msg.lower()
                     if "no hosts matched" in low or "empty ansible" in low or "already stopped" in low:
                         success = True
@@ -742,10 +836,10 @@ class PlaybookRunner:
             if not action_type:
                 # Fallback for unknown stages — try common prefix mapping
                 _fallback = {
-                    "preflight": "validate_node", "deps": "apt_update",
-                    "source": "ansible_execute", "compile": "update_and_compile",
-                    "config_svc": "config_change", "config_env": "config_change",
-                    "start": "restart_instance", "stop": "stop_instance",
+                    QR_STAGE_PREFLIGHT: "validate_node", QR_STAGE_DEPS: "apt_update",
+                    QR_STAGE_SOURCE: "ansible_execute", QR_STAGE_COMPILE: "update_and_compile",
+                    QR_STAGE_CONFIG_SVC: "config_change", QR_STAGE_CONFIG_ENV: "config_change",
+                    QR_STAGE_START: "restart_instance", QR_STAGE_STOP: "stop_instance",
                 }
                 action_type = _fallback.get(_stage, "ansible_execute")
             node_id = inst.get("node_id") if inst else None
@@ -865,7 +959,7 @@ class PlaybookRunner:
 
         # Set instance state based on job type — SSOT lookup from JOB_FINAL_STATES
         # bind/unbind are not in the dict — they preserve the pre-operation state
-        ERROR_STATES = frozenset(["error", "build_error", "timeout"])
+        ERROR_STATES = frozenset([QR_STATE_ERROR, QR_STATE_BUILD_ERROR, "timeout"])
 
         if job_type == QR_JOB_HEALTH_CHECK:
             # Health check = discrepancy detector.
@@ -873,7 +967,7 @@ class PlaybookRunner:
             # Only update if there's an unexpected mismatch.
             # Skip if instance is in a transition state (deploy/rebuild chain active).
             
-            _TRANSITIONING = frozenset(["deploying", "configuring", "compiling", "updating", "loading"])
+            _TRANSITIONING = frozenset([QR_STATE_DEPLOYING, QR_STATE_CONFIGURING, QR_STATE_COMPILING, QR_STATE_UPDATING, QR_STATE_LOADING])
 
             task_run = conn.execute(
                 "SELECT results_json FROM log_entries "
@@ -901,7 +995,7 @@ class PlaybookRunner:
                     "[qr-runner] HC parse failure for inst=%d — marking error", instance_id,
                 )
                 # Guard: preserve stopped state instead of overwriting with error
-                if pre_state == "stopped":
+                if pre_state == QR_STATE_STOPPED:
                     new_state = pre_state
                 else:
                     new_state = "error"
@@ -933,7 +1027,7 @@ class PlaybookRunner:
 
                     if service_state is None:
                         # Parse failure — preserve current state if intentionally stopped
-                        if pre_state == "stopped":
+                        if pre_state == QR_STATE_STOPPED:
                             new_state = pre_state
                         else:
                             new_state = "error"
@@ -941,7 +1035,7 @@ class PlaybookRunner:
                         new_state = "running"
                         # Guard: don't correct stopped→running if a stop job is active
                         # (would collide with the user-initiated stop chain)
-                        if pre_state == "stopped":
+                        if pre_state == QR_STATE_STOPPED:
                             has_stop_job = conn.execute(
                                 "SELECT 1 FROM log_entries WHERE instance_id=? "
                                 "AND parent_id IS NULL AND job_type IN ('stop', 'undeploy') "
@@ -954,7 +1048,7 @@ class PlaybookRunner:
                     elif service_state in ("inactive", "failed", "deactivating"):
                         # Guard: user intentionally stopped the instance — preserve stopped
                         # Don't overwrite intentional stop with error from health check
-                        if pre_state == "stopped":
+                        if pre_state == QR_STATE_STOPPED:
                             new_state = pre_state  # preserve stopped
                         else:
                             new_state = "error"
@@ -999,7 +1093,7 @@ class PlaybookRunner:
             # This prevents instances from getting stuck in "loading" when no WebUI SSE
             # client is connected to monitor model load progress.
             elif engine_type_name == QR_ENGINE_LLAMA_SERVER_NAME and job_type in (QR_JOB_START, QR_JOB_RESTART):
-                if pre_state in ("running", "starting", "deploying", "configuring"):
+                if pre_state in (QR_STATE_RUNNING, QR_STATE_STARTING, QR_STATE_DEPLOYING, QR_STATE_CONFIGURING):
                     new_state = pre_state
 
         # HS-1: Preserve error state when deploy/rebuild tasks actually failed.
@@ -1066,7 +1160,7 @@ class PlaybookRunner:
                 ).fetchone()
                 if source_run and source_run["results_json"]:
                     import re as _re
-                    bm = _re.search(r'commit=([a-f0-9]{7})', str(source_run["results_json"]))
+                    bm = _re.search(r'commit=([a-zA-Z0-9][a-zA-Z0-9._-]*)', str(source_run["results_json"]))
                     if bm:
                         conn.execute(
                             "UPDATE instances SET build_number=? WHERE id=?",
@@ -1076,9 +1170,29 @@ class PlaybookRunner:
                 logger.debug("build_number update failed for instance %d: %s", instance_id, _e)
                 pass  # Non-critical
 
+        # Extract build_number from binary template version (deploy_binary)
+        if job_type == QR_JOB_DEPLOY_BINARY:
+            try:
+                binary_run = conn.execute(
+                    "SELECT results_json FROM log_entries WHERE parent_id=? AND task_stage='binary_download' ORDER BY id DESC LIMIT 1",
+                    (job_id,),
+                ).fetchone()
+                if binary_run and binary_run["results_json"]:
+                    _bv = json.loads(binary_run["results_json"])
+                    _extra = _bv.get("extra_vars", {})
+                    _ver = _extra.get("binary_version") or _extra.get("version", "")
+                    if _ver:
+                        conn.execute(
+                            "UPDATE instances SET build_number=? WHERE id=?",
+                            (_ver, instance_id),
+                        )
+            except Exception as _e:
+                logger.debug("build_number update failed for instance %d (binary): %s", instance_id, _e)
+                pass  # Non-critical
+
     # ── Sync Chain (API Route Integration) ─────────────────────────
 
-    def chain(self, instance_id, job_type="deploy", actor="api", skip_build=False, async_mode=False):
+    def chain(self, instance_id, job_type="deploy", actor="api", skip_build=False, async_mode=False, binary_template_id=None):
         """Execute full stage chain synchronously for API route.
 
         Creates a deploy job, executes all tasks sequentially, collects
@@ -1092,6 +1206,8 @@ class PlaybookRunner:
             skip_build: If True, skip source+compile stages (build lock not acquired).
             async_mode: If True, create job + tasks and return immediately without
                         executing tasks. Scheduler picks up tasks within next poll cycle.
+            binary_template_id: Optional explicit binary template ID — overrides
+                                preset's binary_id for chain resolution and extra_vars.
 
         Returns:
             dict matching api_deploy_instance response shape:
@@ -1178,7 +1294,7 @@ class PlaybookRunner:
 
         # Async mode: create job + tasks, update instance state, return immediately.
         if async_mode:
-            job, tasks = self.create_deploy_job(instance_id, job_type, priority=5, actor=actor)
+            job, tasks = self.create_deploy_job(instance_id, job_type, priority=5, actor=actor, binary_template_id=binary_template_id)
             # Update instance state immediately — visible in WebUI before scheduler picks up task.
             # The first task's stage determines the initial display state (deploying/configuring/etc.)
             from db.sqlite import pool
@@ -1204,7 +1320,7 @@ class PlaybookRunner:
 
         try:
             # Create the deploy job + tasks
-            job, tasks = self.create_deploy_job(instance_id, job_type, priority=5, actor=actor)
+            job, tasks = self.create_deploy_job(instance_id, job_type, priority=5, actor=actor, binary_template_id=binary_template_id)
 
             result["job_id"] = job["id"]
             task_ids = []
@@ -1380,7 +1496,7 @@ class PlaybookRunner:
                 params.append(node_id)
 
             if conditions:
-                query += " WHERE " + " AND ".join(conditions)
+                query += " AND " + " AND ".join(conditions)
             query += " ORDER BY j.created_at DESC LIMIT 100"
 
             rows = conn.execute(query, params).fetchall()
@@ -1435,7 +1551,7 @@ class PlaybookRunner:
                 params.append(instance_id)
 
             if conditions:
-                query += " WHERE " + " AND ".join(conditions)
+                query += " AND " + " AND ".join(conditions)
             query += " ORDER BY le.created_at DESC LIMIT 200"
 
             rows = conn.execute(query, params).fetchall()
@@ -1470,13 +1586,13 @@ class PlaybookRunner:
 
     # ── Internal Helpers ───────────────────────────────────────────
 
-    def _get_stage_chain(self, engine_name, job_type, instance):
+    def _get_stage_chain(self, engine_name, job_type, instance, binary_template_id=None):
         """Get the stage chain for an engine type + job type.
 
         Args:
             engine_name: Engine type name (e.g., 'llama_server').
             job_type: Job type (deploy, rebuild, etc.).
-            instance: Instance dict from DB.
+            instance: Instance dict from DB (may be None for node-level operations).
 
         Returns:
             List of stage dicts: [{stage, playbook}, ...].
@@ -1485,6 +1601,23 @@ class PlaybookRunner:
             ValueError: If engine_name has no registered stage chain and a full deploy is requested.
         """
         if engine_name not in DEFAULT_STAGE_CHAINS:
+            # Check persisted binary_template_id in config_override (re-deploy detection)
+            _co = (instance.get("config_override") or {}) if instance else {}
+            if isinstance(_co, str):
+                try:
+                    _co = json.loads(_co)
+                except (json.JSONDecodeError, TypeError):
+                    _co = {}
+            _persisted_btid = _co.get("binary_template_id")
+            if _persisted_btid is not None and engine_name in DEFAULT_STAGE_CHAINS.get("deploy_binary", {}):
+                _bt_chain = DEFAULT_STAGE_CHAINS[QR_JOB_DEPLOY_BINARY][engine_name]
+                logger.debug(
+                    "[qr] Re-deploy detected for inst=%s via config_override.binary_template_id=%s, using deploy_binary chain",
+                    instance.get("id", "??"), _persisted_btid,
+                )
+                if job_type == QR_JOB_REBUILD:
+                    return [s for s in _bt_chain if s["stage"] != QR_STAGE_DEPS]
+                return _bt_chain
             if job_type == QR_JOB_DEPLOY:
                 raise ValueError(
                     f"Engine '{engine_name}' has no registered stage chain. "
@@ -1497,19 +1630,34 @@ class PlaybookRunner:
             if job_type == QR_JOB_RECONFIGURE:
                 return []
             if job_type == QR_JOB_START:
-                return [{"stage": "start", "playbook": "service_start"}]
+                return [{"stage": QR_STAGE_START, "playbook": "service_start"}]
             if job_type == QR_JOB_RESTART:
-                return [{"stage": "stop", "playbook": "service_stop"},
-                        {"stage": "start", "playbook": "service_start"}]
+                return [{"stage": QR_STAGE_STOP, "playbook": "service_stop"},
+                        {"stage": QR_STAGE_START, "playbook": "service_start"}]
             if job_type == QR_JOB_STOP:
-                return [{"stage": "stop", "playbook": "service_stop"}]
+                return [{"stage": QR_STAGE_STOP, "playbook": "service_stop"}]
             # undeploy below handles its own chain
 
         if job_type == QR_JOB_REBUILD:
-            # Pre-flight check + source pull + compile → config rewrite (no restart)
+            # Check persisted binary_template_id in config_override (binary-deploy detection).
+            # This ensures rebuild uses the same chain as the original deploy.
+            _co = (instance.get("config_override") or {}) if instance else {}
+            if isinstance(_co, str):
+                try:
+                    _co = json.loads(_co)
+                except Exception:
+                    _co = {}
+            _persisted_btid = _co.get("binary_template_id")
+            if _persisted_btid is not None and engine_name in DEFAULT_STAGE_CHAINS.get(
+                QR_JOB_DEPLOY_BINARY, {}
+            ):
+                # Binary-deployed instance: rebuild via binary chain (skip DEPS only).
+                return [s for s in DEFAULT_STAGE_CHAINS[QR_JOB_DEPLOY_BINARY][engine_name]
+                        if s["stage"] != QR_STAGE_DEPS]
+            # Git-build instance: standard rebuild chain (compile + config).
             return [
                 s for s in DEFAULT_STAGE_CHAINS[engine_name]
-                if s["stage"] != QR_STAGE_DEPS
+                if s["stage"] not in (QR_STAGE_DEPS, QR_STAGE_SOURCE)
             ]
 
         if job_type == QR_JOB_RECONFIGURE:
@@ -1525,7 +1673,12 @@ class PlaybookRunner:
         if job_type == QR_JOB_DEPLOY_FAST:
             # Fast deploy: config_svc + config_env + start (no source/compile)
             # Used for new instances with skip_build=True when binary exists.
-            return DEFAULT_STAGE_CHAINS["deploy_fast"].get(engine_name, [])
+            return DEFAULT_STAGE_CHAINS[QR_JOB_DEPLOY_FAST].get(engine_name, [])
+
+        if job_type == QR_JOB_DEPLOY_BINARY:
+            # Binary download: preflight → binary_download → config_svc → config_env → start
+            # Replaces source + compile stages; uses deploy_binary_llama playbook.
+            return DEFAULT_STAGE_CHAINS[QR_JOB_DEPLOY_BINARY].get(engine_name, [])
 
         if job_type == QR_JOB_UNDEPLOY:
             # Engine-specific undeploy chain: stop → engine-undeploy → verify
@@ -1541,16 +1694,16 @@ class PlaybookRunner:
 
         if job_type == QR_JOB_START:
             # Simple start: only start the systemd unit, no build/config
-            return [{"stage": "start", "playbook": "service_start"}]
+            return [{"stage": QR_STAGE_START, "playbook": "service_start"}]
 
         if job_type == QR_JOB_RESTART:
             # Restart: stop → start (no RPC health probes)
-            return [{"stage": "stop", "playbook": "service_stop"},
-                    {"stage": "start", "playbook": "service_start"}]
+            return [{"stage": QR_STAGE_STOP, "playbook": "service_stop"},
+                    {"stage": QR_STAGE_START, "playbook": "service_start"}]
 
         if job_type == QR_JOB_STOP:
             # Stop: just stop the systemd service
-            return [{"stage": "stop", "playbook": "service_stop"}]
+            return [{"stage": QR_STAGE_STOP, "playbook": "service_stop"}]
 
         if job_type == QR_JOB_DEPLOY:
             # Full deploy — use registered chain
@@ -1558,21 +1711,21 @@ class PlaybookRunner:
 
         if job_type == QR_JOB_REBOOT:
             # Async fire-and-forget reboot — returns immediately
-            return [{"stage": "reboot", "playbook": "reboot_node"}]
+            return [{"stage": QR_STAGE_REBOOT, "playbook": "reboot_node"}]
 
         if job_type == QR_JOB_APT_UPDATE:
             # Node-level apt update
-            return [{"stage": "apt_update", "playbook": "apt_update"}]
+            return [{"stage": QR_STAGE_APT_UPDATE, "playbook": "apt_update"}]
 
         if job_type == QR_JOB_APT_UPGRADE:
             # Node-level apt upgrade
-            return [{"stage": "apt_upgrade", "playbook": "apt_upgrade"}]
+            return [{"stage": QR_STAGE_APT_UPGRADE, "playbook": "apt_upgrade"}]
 
         if job_type == QR_JOB_APT_ALL:
             # Combined: apt update then apt upgrade
             return [
-                {"stage": "apt_update", "playbook": "apt_update"},
-                {"stage": "apt_upgrade", "playbook": "apt_upgrade"},
+                {"stage": QR_STAGE_APT_UPDATE, "playbook": "apt_update"},
+                {"stage": QR_STAGE_APT_UPGRADE, "playbook": "apt_upgrade"},
             ]
 
         # Unknown job_type — fail explicitly instead of silent fallback
@@ -1580,6 +1733,70 @@ class PlaybookRunner:
             f"Unknown job_type '{job_type}' for engine '{engine_name}'. "
             f"Known types: deploy, rebuild, reconfigure, undeploy, bind, unbind, start, restart, stop, reboot"
         )
+
+    def _get_instance_binary_ref(self, instance_id, binary_template_id=None):
+        """Look up binary reference from explicit template ID or preset config_template.
+
+        If binary_template_id is provided, bypasses preset lookup entirely
+        (orthogonal preset/template design — see §3.2A of binary-download-template.md).
+        Otherwise falls back to preset's config_template.binary_id.
+
+        Args:
+            instance_id: Integer primary key of the instance.
+            binary_template_id: Optional explicit template ID — overrides preset lookup.
+
+        Returns:
+            Dict with binary template data (from engine_binaries table), or None.
+        """
+        from db.sqlite import pool
+
+        # Fast path: explicit template ID bypasses preset entirely
+        if binary_template_id is not None:
+            with pool(self.db_path) as conn:
+                binary = conn.execute(
+                    "SELECT * FROM engine_binaries WHERE id=? AND is_active=1",
+                    (binary_template_id,),
+                ).fetchone()
+            return dict(binary) if binary else None
+
+        # Fallback: look up preset, read binary_id from config_template
+        with pool(self.db_path) as conn:
+            inst = conn.execute(
+                "SELECT i.preset_id, p.config_template FROM instances i "
+                "JOIN engine_presets p ON i.preset_id = p.id WHERE i.id=?",
+                (instance_id,),
+            ).fetchone()
+
+        if not inst or not inst["config_template"]:
+            return None
+
+        try:
+            config = json.loads(inst["config_template"])
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+        binary_id = config.get("binary_id")
+        if not binary_id:
+            return None
+
+        with pool(self.db_path) as conn:
+            binary = conn.execute(
+                "SELECT * FROM engine_binaries WHERE id=? AND is_active=1",
+                (binary_id,),
+            ).fetchone()
+
+        return dict(binary) if binary else None
+
+    def _get_binary_chain_for_engine(self, engine_name):
+        """Return the binary download stage chain for an engine type.
+
+        Args:
+            engine_name: Engine type name (e.g., 'llama_server').
+
+        Returns:
+            List of stage dicts, or empty list if engine not supported.
+        """
+        return DEFAULT_STAGE_CHAINS.get("deploy_binary", {}).get(engine_name, [])
 
     def _resolve_playbook(self, playbook_rel):
         """Resolve a playbook reference to full path.
@@ -1678,7 +1895,7 @@ class PlaybookRunner:
 
         return "pass"
 
-    def _build_extra_vars(self, instance, stage, merged_cli_opts=None, merged_env=None, task=None):
+    def _build_extra_vars(self, instance, stage, merged_cli_opts=None, merged_env=None, task=None, binary_template_id=None):
         """Build extra_vars dict for ansible-playbook execution.
 
         Args:
@@ -1687,6 +1904,7 @@ class PlaybookRunner:
             merged_cli_opts: Pre-merged CLI options list (from deploy_instance route).
             merged_env: Pre-merged env dict (from deploy_instance route).
             task: Optional task dict (for health_probe metadata like _rpc_instance_id).
+            binary_template_id: Optional explicit template ID — overrides preset lookup.
 
         Returns:
             Dict of extra vars.
@@ -1697,7 +1915,7 @@ class PlaybookRunner:
             try:
                 payload = json.loads(task["details_json"])
                 precomputed = payload.get("extra_vars")
-                if precomputed and stage == "stop":
+                if precomputed and stage == QR_STAGE_STOP:
                     # Stop stage only needs base params — no merge chain needed.
                     return precomputed
             except (json.JSONDecodeError, TypeError):
@@ -1710,9 +1928,72 @@ class PlaybookRunner:
             except (json.JSONDecodeError, TypeError):
                 pass
 
+        # Binary template: resolve binary reference once for all stages.
+        # When binary_template_id is provided (explicit or from preset config_template),
+        # compute the resolved binary_path so that config_svc/config_env stages use it
+        # in ExecStart instead of falling back to git-build path.
+        binary_ref = None
+        if binary_template_id is not None:
+            binary_ref = self._get_instance_binary_ref(instance.get("id"), binary_template_id=binary_template_id)
+        elif not binary_template_id and instance.get("preset_id"):
+            # Fallback: check preset config_template.binary_id (backward compat)
+            _btid_fallback = self._get_instance_binary_ref(instance.get("id"), binary_template_id=None)
+            if _btid_fallback:
+                binary_ref = _btid_fallback
+
+        # Binary download stage vars — only injected during binary_download stage
+        binary_vars = {}
+        if stage == QR_STAGE_BINARY_DOWNLOAD and binary_ref:
+            binary_vars = {
+                "binary_download_url": binary_ref.get("download_url", ""),
+                "binary_checksum": binary_ref.get("sha256"),
+                "binary_file_size": binary_ref.get("file_size"),
+                "binary_extract_type": binary_ref.get("extract_type", "none"),
+                "binary_target_path": binary_ref.get("target_path", f"{QR_BINARY_TEMPLATE_ROOT}{{engine_type}}/{{version}}-{{platform}}/"),
+                "binary_version": binary_ref.get("version", ""),
+                "binary_platform": binary_ref.get("platform", ""),
+                "binary_engine_type": instance.get("engine_type_name", ""),
+                "binary_binary_name": binary_ref.get("binary_name", ""),
+                "binary_template_type": binary_ref.get("template_type", "binary"),
+            }
+
+        # Subprocess/universal: inject template metadata from engine_binaries or config_override
+        # metadata is a JSON TEXT column storing engine-specific fields (cli_opts, service_name, etc.)
+        _engine_name = instance.get("engine_type_name", "")
+        _subprocess_vars = {}
+        if _engine_name in (QR_ENGINE_SUBPROCESS_NAME, QR_ENGINE_UNIVERSAL_NAME):
+            # Priority 1: fresh template data from binary_ref (new deploy)
+            if binary_ref and binary_ref.get("metadata"):
+                try:
+                    _tmpl_meta = json.loads(binary_ref["metadata"])
+                except (json.JSONDecodeError, TypeError):
+                    _tmpl_meta = {}
+            else:
+                # Priority 2: persisted metadata from config_override (re-deploy)
+                co_meta = config_override.get("metadata") or config_override.get("_binary_template_metadata")
+                try:
+                    _tmpl_meta = json.loads(co_meta) if isinstance(co_meta, str) else (co_meta or {})
+                except (json.JSONDecodeError, TypeError):
+                    _tmpl_meta = {}
+
+            # Flatten metadata fields into extra_vars for playbook consumption
+            if isinstance(_tmpl_meta, dict):
+                if _tmpl_meta.get("cli_opts"):
+                    _subprocess_vars["merged_cli_opts"] = _tmpl_meta["cli_opts"]
+                if _tmpl_meta.get("env_vars"):
+                    _subprocess_vars["template_env_vars"] = _tmpl_meta.get("env_vars") or "{}"
+                if _tmpl_meta.get("service_name"):
+                    _subprocess_vars["template_service_name"] = _tmpl_meta["service_name"]
+                if _tmpl_meta.get("working_dir"):
+                    _subprocess_vars["template_working_dir"] = _tmpl_meta["working_dir"]
+                if _tmpl_meta.get("start_command"):
+                    _subprocess_vars["template_start_command"] = _tmpl_meta["start_command"]
+                if _tmpl_meta.get("env_passthrough"):
+                    _subprocess_vars["template_env_passthrough"] = _tmpl_meta.get("env_passthrough") or "[]"
+
         # For health_probe stages (RPC), inject vars from task metadata or DB lookup
         rpc_vars = {}
-        if stage == "health_probe":
+        if stage == QR_STAGE_HEALTH_PROBE:
             try:
                 # Prefer RPC ID from task metadata (_rpc_instance_id set by _get_stage_chain)
                 rpc_id = None
@@ -1787,6 +2068,21 @@ class PlaybookRunner:
 
         # DEBUG: log config_override values used
 
+        # Binary path override: when a binary template is used, set binary_path
+        # to the extracted binary location. This overrides the engine_configs default
+        # so systemd ExecStart points to the downloaded binary, not git-build path.
+        _binary_path = (merged_env or {}).get("binary_path") if merged_env else None
+        if not _binary_path:
+            _binary_path = ec_rows.get("binary_path", "")
+        if binary_ref:
+            # Construct the full path: target_path + binary_name
+            # e.g., /opt/quickrobot/binary-templates/llama_server/b10146-ubuntu-x64-cpu/llama-server
+            _tp = binary_ref.get("target_path", f"{QR_BINARY_TEMPLATE_ROOT}{{engine_type}}/{{version}}-{{platform}}/")
+            _tp = _tp.replace("{engine_type}", instance.get("engine_type_name", "")) \
+                     .replace("{version}", binary_ref.get("version", "")) \
+                     .replace("{platform}", binary_ref.get("platform", ""))
+            _binary_path = _tp + binary_ref.get("binary_name", "llama-server")
+
         extra = {
             # Host / identity — used by all playbooks
             "inventory_host": instance.get("node_hostname") or instance.get("ipv4_address", ""),
@@ -1811,14 +2107,14 @@ class PlaybookRunner:
             # Build source paths + cmake commands + git pull
             # Use merged_env (Layer 1-5 merge including per-instance overrides) as primary source,
             # fall back to ec_rows (engine_configs defaults) for keys not overridden at Layer 5.
-            "node_src_dir": (merged_env or {}).get("node_src_dir") or ec_rows.get("node_src_dir", "/opt/quickrobot/llama.cpp"),
-            "node_build_dir": (merged_env or {}).get("node_build_dir") or ec_rows.get("node_build_dir", "/opt/quickrobot/llama.cpp/build"),
+             "node_src_dir": (merged_env or {}).get("node_src_dir") or ec_rows.get("node_src_dir", QR_NODE_SRC_DIR),
+             "node_build_dir": (merged_env or {}).get("node_build_dir") or ec_rows.get("node_build_dir", QR_NODE_BUILD_DIR),
             "node_build_set_cmd": (merged_env or {}).get("node_build_set_cmd") or ec_rows.get("node_build_set_cmd"),
             "node_build_run_cmd": (merged_env or {}).get("node_build_run_cmd") or ec_rows.get("node_build_run_cmd"),
             "node_git_pull_cmd": (merged_env or {}).get("node_git_pull_cmd") or ec_rows.get("node_git_pull_cmd", "git pull origin main"),
             "git_clone_url": (merged_env or {}).get("git_clone_url") or ec_rows.get("git_clone_url", "https://github.com/ggml-org/llama.cpp.git"),
             # Binary path — used in service templates for ExecStart
-            "binary_path": (merged_env or {}).get("binary_path") or ec_rows.get("binary_path", ""),
+            "binary_path": _binary_path,
             # Additional apt dependencies from engine_configs (install_deps stage)
             "node_build_install_depends": (merged_env or {}).get("node_build_install_depends") or ec_rows.get("node_build_install_depends"),
         }
@@ -1840,15 +2136,28 @@ class PlaybookRunner:
         # RPC health check stages override inventory_host, unit_name, rpc_id
         extra.update(rpc_vars)
 
+        # Binary download stage overrides: inject template vars from preset binary_ref
+        if binary_vars:
+            extra.update(binary_vars)
+
+        # Subprocess/universal template metadata overrides
+        if _subprocess_vars:
+            extra.update(_subprocess_vars)
+
         # Health check stage requires unit_name for systemctl probe
-        if stage == "health_check":
+        if stage == QR_STAGE_HEALTH_CHECK:
             _eng_name = instance.get("engine_type_name", "instance")
             extra["unit_name"] = f"qr-{instance['id']}-{_eng_name}"
 
         # Pass merged CLI opts for env file generation (CONFIG-1)
         if merged_cli_opts is not None:
             extra["merged_cli_opts"] = merged_cli_opts
-        if merged_env is not None:
+        # For subprocess/universal/iperf3 engines without presets, merged_env stays None.
+        # Always ensure merged_env is set (empty dict if no preset merge) so Jinja2 templates
+        # {% for k, v in merged_env.items() %} don't fail with 'undefined' error.
+        if merged_env is None:
+            extra["merged_env"] = {}
+        else:
             extra["merged_env"] = merged_env
 
         # Include UUID map from chain() context for preflight playbook verification

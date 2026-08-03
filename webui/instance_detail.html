@@ -50,13 +50,18 @@
 {% endfor %}
 </div>
 
-{# Source Build (llama.cpp only) — moved to top area #}
+{# Build Source (llama.cpp only) — moved to top area #}
 {% if is_llama %}
 <div class="detail-card" style="margin-bottom:12px;">
-  <label>Source Build</label>
+  <label>Build Source</label>
   <div style="display:flex;gap:8px;align-items:center;margin-bottom:4px;">
-    <span style="color:#888;font-size:0.85em;">Build #:</span>
+    <span style="color:#888;font-size:0.85em;">{{ 'Template:' if build_number and build_number|length > 7 else 'Commit:' }}</span>
     <code id="build-number" style="background:#f5f5f5;padding:2px 6px;border-radius:3px;">{{ build_number | default('N/A') }}</code>
+    {% if build_number and build_number|length == 7 %}
+    <span style="font-size:0.75em;color:#888;">(git-build)</span>
+    {% elif build_number %}
+    <span style="font-size:0.75em;color:#888;">(binary template)</span>
+    {% endif %}
   </div>
   <div style="display:flex;gap:8px;align-items:center;">
     <span style="color:#888;font-size:0.85em;">Threads:</span>

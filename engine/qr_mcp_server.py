@@ -56,6 +56,9 @@ from pathlib import Path
 import lib.lib_logging as _ll
 logger = _ll.create_logger("mcp")
 
+# Root guard — Windows-compatible (no-op on Windows)
+import lib.lib_platform as _lib_platform
+
 
 
 from lib.qr_engine_ids import (
@@ -103,6 +106,16 @@ ALLOW_PROXY = _mcp_bool("QUICKROBOT_MCP_FULLPROXY", "MCP_ALLOW_PROXY", QR_MCP_DE
 # Uses the shared gatekeeper token (QUICKROBOT_API_KEY).
 _mcp_api_token_raw = os.environ.get("QUICKROBOT_API_KEY", "").strip()
 MCP_API_TOKEN = _mcp_api_token_raw or None  # None = no auth for this proxy
+
+# MCP SSE endpoint auth token — gates the /sse connection on port 8040.
+# When set, clients must present this token to connect via SSE.
+# Falls back to QUICKROBOT_API_KEY if not set (backward compat).
+_mcp_sse_token_raw = os.environ.get("QUICKROBOT_MCP_TOKEN", "").strip()
+_mcp_key_disabled = os.environ.get("QUICKROBOT_MCP_KEY_DISABLED", "false").lower() in ("true", "1", "yes")
+if _mcp_key_disabled:
+    MCP_SSE_TOKEN = None  # Auth disabled — no token required
+else:
+    MCP_SSE_TOKEN = _mcp_sse_token_raw or (_mcp_api_token_raw if _mcp_api_token_raw else None)
 
 # Single-toggle security — all values from .env, no hardcoded strings or branching.
 _disable = os.getenv("QUICKROBOT_MCP_DISABLE_DNS_REBINDING", "false").lower() in ("true", "1", "yes")
@@ -209,56 +222,9 @@ def _normalize_engine_type(engine_type):
 
 if ALLOW_READS:
     @mcp.tool()
-    def list_instances(instance_ids: int | list[int] = None) -> str:
-        """List all instances with full details (config_override, ansible_vars, uuids).
-
-        Use list_instances_summary() for operational overview — 95% less data.
-
-        Args:
-            instance_ids: Filter to specific instances. Accepts a single int or list of ints.
-                         If omitted, returns all instances.
-        """
-        if not instance_ids:
-            return _api_call("GET", "/instances")
-        # Normalize single int to list
-        ids = [instance_ids] if isinstance(instance_ids, int) else instance_ids
-        raw = _api_call("GET", "/instances")
-        try:
-            data = json.loads(raw)
-            all_items = data.get("items", []) if isinstance(data, dict) else []
-            id_set = set(str(i) for i in ids)
-            filtered = [i for i in all_items if str(i.get("id", "")) in id_set]
-            return json.dumps({"status": "ok", "total": len(filtered), "items": filtered})
-        except Exception as _e:
-            logger.debug("list_instances compact JSON parse failed: %s", _e)
-            return raw
-
-    @mcp.tool()
     def get_instance_status(instance_id: int) -> str:
         """Detailed status of a specific instance including merged_config (env+cli_opts)."""
         return _api_call("GET", f"/instances/{instance_id}/status")
-
-    @mcp.tool()
-    def list_nodes() -> str:
-        """Full node list with capabilities JSON (CPU, RAM, GPU, OS, hardware inventory).
-
-        Use list_nodes_summary() for operational overview — 98% less data.
-        """
-        return _api_call("GET", "/nodes")
-
-    @mcp.tool()
-    def list_presets(engine_type: str = QR_ENGINE_LLAMA_SERVER_NAME) -> str:
-        """List presets with full config_template JSON (env vars, CLI options).
-
-        Use list_presets_summary() for selection — 77% less data.
-
-        Args:
-            engine_type: Engine type filter (default: llama_server). Empty string returns all.
-        """
-        _et = _normalize_engine_type(engine_type)
-        if _et is None:
-            return _api_call("GET", "/engine/presets")
-        return _api_call("GET", f"/engine/{_et}/presets")
 
     @mcp.tool()
     def get_preset(preset_id: int, engine_type: str = QR_ENGINE_LLAMA_SERVER_NAME) -> str:
@@ -272,20 +238,6 @@ if ALLOW_READS:
         if _et is None:
             return _api_call("GET", f"/engine/presets/{preset_id}")
         return _api_call("GET", f"/engine/{_et}/presets/{preset_id}")
-
-    @mcp.tool()
-    def list_models(engine_type: str = QR_ENGINE_LLAMA_SERVER_NAME) -> str:
-        """List models with SHA256 hashes, verification timestamps, and model_params JSON.
-
-        Use list_models_summary() for selection — 79% less data.
-
-        Args:
-            engine_type: Engine type filter (default: llama_server). Empty string returns all.
-        """
-        _et = _normalize_engine_type(engine_type)
-        if _et is None:
-            return _api_call("GET", "/engine/models")
-        return _api_call("GET", f"/engine/{_et}/models")
 
     @mcp.tool()
     def get_model(model_id: int, engine_type: str = QR_ENGINE_LLAMA_SERVER_NAME) -> str:
@@ -304,7 +256,7 @@ if ALLOW_READS:
     def list_instances_summary(instance_ids: int | list[int] = None) -> str:
         """Compact instance list (id, name, state, engine, node, port).
 
-        Prefer for all operational decisions — 95% less data than list_instances().
+        Prefer for all operational decisions — uses the full API endpoint internally and compresses response.
 
         Args:
             instance_ids: Filter to specific instances. Accepts a single int or list of ints.
@@ -343,7 +295,7 @@ if ALLOW_READS:
     def list_nodes_summary() -> str:
         """Compact node list (id, name, hostname, status, ping_state).
 
-        Prefer for availability checks — 98% less data than list_nodes().
+        Prefer for availability checks — uses the full API endpoint internally and compresses response.
         """
         raw = _api_call("GET", "/nodes")
         try:
@@ -491,6 +443,27 @@ if ALLOW_READS:
         """
         return _api_call("GET", f"/nodes/{node_id}")
 
+    @mcp.tool()
+    def list_binary_templates(engine_type: str = QR_ENGINE_LLAMA_SERVER_NAME) -> str:
+        """List available binary download templates for an engine type.
+
+        Binary templates define pre-built binaries (download URL, checksum, platform)
+        as an alternative to git clone + cmake build. Templates are orthogonal to presets —
+        a preset defines WHAT to run; a binary template defines HOW to deliver it.
+
+        Args:
+            engine_type: Engine type filter (default: llama_server). Accepts 'llama_server',
+                         'llama_rpc', or empty string for all engines.
+
+        Returns list of templates with: id, name, version, platform, binary_name, download_url, sha256
+
+        Example: list_binary_templates('llama_rpc') to find RPC server binaries.
+        """
+        _et = _normalize_engine_type(engine_type)
+        if _et is None:
+            return _api_call("GET", "/engine_binaries")
+        return _api_call("GET", f"/engine_binaries/by_engine/{_et}")
+
 
 # ============================================================================
 # WRITE TOOLS
@@ -503,6 +476,7 @@ if ALLOW_WRITES:
         engine_type_id: int = QR_ENGINE_LLAMA_SERVER,
         node_id: int = None,
         preset_id: int = None,
+        binary_template_id: int = None,
         config_override: dict = None,
         skip_build: bool = None
     ) -> str:
@@ -525,16 +499,22 @@ if ALLOW_WRITES:
             engine_type_id: Engine type ID (21=llama_server, 22=llama_rpc, 31=iperf3, 12=subprocess)
             node_id: Target node ID (required for remote engines)
             preset_id: Preset ID to use for initial config
+            binary_template_id: Optional binary template ID for pre-built download instead of git build.
+                                Use list_binary_templates() to discover available templates.
             config_override: Additional config overrides as JSON object
             skip_build: If true, skip git clone + cmake compile (use existing binary).
                         If false, full deploy including source+compile.
                         If None (default), uses engine_configs.skip_build setting.
+                        For new instances on fresh nodes, leave as None (full deploy).
+                        For redeploys on nodes with existing binary, set to True.
         """
         body = {"name": name, "engine_type_id": engine_type_id}
         if node_id is not None:
             body["node_id"] = node_id
         if preset_id is not None:
             body["preset_id"] = preset_id
+        if binary_template_id is not None:
+            body["binary_template_id"] = binary_template_id
         if config_override:
             body["config_override"] = config_override
         if skip_build is not None:
@@ -544,13 +524,18 @@ if ALLOW_WRITES:
     @mcp.tool()
     def deploy_instance(
         instance_id: int,
+        binary_template_id: int = None,
         start_after_deploy: bool = False,
         skip_build: bool = None
     ) -> str:
         """Deploy/redeploy an instance on its target node via the staged playbook chain.
 
         The engine type is determined from the instance record in the DB — no need to specify it.
-        Runs preflight → deps → source → compile → config → start stages with per-stage progress.
+        The chain varies based on parameters:
+        - With binary_template_id: preflight → binary_download → config_svc → config_env → start (5 stages)
+        - Without skip_build (git build): preflight → deps → source → compile → config_svc → config_env → start (7 stages)
+        - With skip_build=True: config_svc → config_env → start (3 stages, fast reconfig)
+
         Use after creating an instance, changing preset, or updating config.
 
         **Cluster note:** After binding RPCs to a server (PUT /instances/<id>), only the server
@@ -558,13 +543,19 @@ if ALLOW_WRITES:
 
         Args:
             instance_id: ID of the instance to deploy (non-system-managed only)
+            binary_template_id: Optional binary template ID for pre-built download instead of git build.
+                                Use list_binary_templates() to discover available templates.
             start_after_deploy: If true, auto-start the service after deploy completes (default: false).
                                 Most agents should leave this false and call start_instance() explicitly.
             skip_build: If true, skip git clone + cmake compile (use existing binary).
                         If false, full deploy including source+compile.
                         If None (default), uses engine_configs.skip_build setting.
+                        For new instances on fresh nodes, leave as None (full deploy).
+                        For redeploys on nodes with existing binary, set to True.
         """
         body = {}
+        if binary_template_id is not None:
+            body["binary_template_id"] = binary_template_id
         if start_after_deploy:
             body["start_after_deploy"] = True
         if skip_build is not None:
@@ -617,6 +608,22 @@ if ALLOW_WRITES:
         return _api_call("POST", f"/instances/{instance_id}/restart", timeout=30)
 
     @mcp.tool()
+    def undeploy_instance(instance_id: int) -> str:
+        """Stop a running instance's service and remove its systemd unit file from the remote node.
+
+        Instance record remains in DB with state 'unconfigured'. Use to cleanly decommission
+        an instance before deleting it, or to temporarily stop an instance while keeping
+        its configuration for future redeployment.
+
+        Uses 30s timeout — stop + cleanup on remote node takes time.
+        If the operation takes longer, poll via list_instances_summary().
+
+        Args:
+            instance_id: ID of the instance to undeploy
+        """
+        return _api_call("POST", f"/instances/{instance_id}/undeploy", timeout=30)
+
+    @mcp.tool()
     def change_preset(instance_id: int, preset_id: int, skip_build: bool = True) -> str:
         """Change an instance's preset and apply config changes without full redeploy.
 
@@ -642,17 +649,18 @@ if ALLOW_WRITES:
 
     @mcp.tool()
     def delete_instance(instance_id: int, force: bool = False) -> str:
-        """Delete an instance and its associated data.
+        """Delete an instance from the database.
+
+        With force=False (default): attempts remote undeploy first via POST /instances/<id>/undeploy.
+        If the remote node is offline and undeploy fails, the instance is still deleted from DB.
+
+        With force=True: skips state check, deletes directly from DB.
 
         Args:
             instance_id: ID of the instance to delete
-            force: Force delete without checking state (default: false). Use when
-                  instance is stuck in a transitional state (e.g., 'deploying' with no response).
+            force: Skip graceful undeploy, delete directly from DB (default: false)
         """
-        path = f"/instances/{instance_id}"
-        if force:
-            return _api_call("POST", f"{path}/force-delete", timeout=30)
-        return _api_call("DELETE", path, timeout=30)
+        return _api_call("DELETE", f"/instances/{instance_id}", timeout=30)
 
     @mcp.tool()
     def create_node(
@@ -689,7 +697,7 @@ if ALLOW_WRITES:
             body["ipv4_address"] = ipv4_address
         if model_base_path is not None:
             body["model_base_path"] = model_base_path
-        return _api_call("POST", "/nodes", body, timeout=30)
+        return _api_call("POST", "/nodes", body, timeout=60)
 
     @mcp.tool()
     def delete_node(node_id: int, stop_running: bool = False) -> str:
@@ -724,7 +732,7 @@ if ALLOW_WRITES:
         Args:
             node_id: ID of the node to discover
         """
-        return _api_call("POST", f"/nodes/{node_id}/discover", timeout=30)
+        return _api_call("POST", f"/nodes/{node_id}/discover", timeout=60)
 
     @mcp.tool()
     def toggle_node_active(node_id: int, is_active: bool) -> str:
@@ -909,10 +917,8 @@ if __name__ == "__main__":
     global _mcp_instance
     _mcp_instance = mcp
 
-    # Root guard — refuse to run as root (non-interactive HTTP server)
-    if _os.getuid() == 0:
-        logger.error("[qr-mcp] this robot won't run as root")
-        _sys.exit(1)
+    # Root guard — Windows-compatible (no-op on Windows)
+    _lib_platform.check_nonroot()
 
     parser = _argparse.ArgumentParser(description="Quickrobot MCP SSE Server")
     parser.add_argument("--port", type=int, default=None, help="Port to bind (overrides QUICKROBOT_MCP_PORT)")
@@ -1032,13 +1038,75 @@ if __name__ == "__main__":
     )
     logger.info("[qr-mcp] Health check thread started (interval=10s, kill=10s)")
 
+    # ── MCP SSE token status ──────────────────────────────────────────────
+    mcp_token_source = "QUICKROBOT_MCP_TOKEN" if os.environ.get("QUICKROBOT_MCP_TOKEN") else "QUICKROBOT_API_KEY (fallback)"
+    logger.info("[qr-mcp] SSE auth token source: %s", mcp_token_source)
+
     # MCP server — SSE transport only (reverted from broken dual transport, 2026-07-14).
     # The dual transport (sse_app + streamable_http mounted on custom Starlette)
     # broke session management: initialize returns 202 "Accepted" but subsequent
     # messages to the same session get "Could not find session".
     # FastMCP.run(transport="sse") uses host/port from constructor, not run() args.
-    logger.info("[qr-mcp] Transport: SSE only (llama.cpp UI). Reverted 2026-07-14.")
-    mcp.run(transport="sse")
+
+    # ── MCP SSE Auth Wrapper ──────────────────────────────────────────────
+    # Wrap the FastMCP SSE app to require token auth on /sse connections.
+    # Accepts ?token= query param (works with EventSource browsers) or
+    # X-MCP-Token header for programmatic clients.
+    def _wrap_sse_for_auth(app):
+        """Wrap FastMCP SSE app routes with token validation."""
+        from starlette.routing import Route as StarletteRoute
+
+        def _sse_auth_handler(orig_handler):
+            async def handler(scope, receive, send):
+                if scope["method"] != "GET":
+                    return await orig_handler(scope, receive, send)
+
+                # Parse query string for ?token= param
+                qs = scope.get("query_string", b"").decode()
+                params = {}
+                if qs:
+                    for part in qs.split("&"):
+                        kv = part.split("=", 1)
+                        if len(kv) == 2:
+                            params[kv[0]] = kv[1]
+
+                # Header auth takes priority (programmatic clients)
+                token = scope.get("headers", [])
+                token_header = None
+                for name, value in token:
+                    if name.decode().lower() in ("x-mcp-token", "authorization"):
+                        token_header = value.decode()
+                        break
+
+                client_token = params.get("token", "") or token_header
+                if MCP_SSE_TOKEN and client_token != MCP_SSE_TOKEN:
+                    await send({
+                        "type": "http.response.start",
+                        "status": 401,
+                        "headers": [[b"content-type", b"application/json"], [b"access-control-allow-origin", b"*"]],
+                    })
+                    await send({
+                        "type": "http.response.body",
+                        "body": b'{"error":"unauthorized"}',
+                    })
+                    return
+                return await orig_handler(scope, receive, send)
+            return handler
+
+        for route in app.routes:
+            if isinstance(route, StarletteRoute) and route.path == "/sse":
+                route.handle = _sse_auth_handler(route.handle)
+        return app
+
+    if MCP_SSE_TOKEN:
+        logger.info("[qr-mcp] MCP SSE token loaded (prefix=%s...)", MCP_SSE_TOKEN[:8])
+        sse_app = mcp.sse_app()
+        _wrapped_app = _wrap_sse_for_auth(sse_app)
+        import uvicorn as _uvicorn
+        _uvicorn.run(_wrapped_app, host=mcp_host_env, port=mcp_port_env, log_level="info")
+    else:
+        logger.info("[qr-mcp] MCP SSE token: using API key (backward compat)")
+        mcp.run(transport="sse")
 
 # Global mcp reference for runtime refresh (set during startup in __main__)
 _mcp_instance = None

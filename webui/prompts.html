@@ -25,7 +25,7 @@
 
     <button type="button" id="apply-refresh-btn" class="btn btn-primary" style="padding:4px 10px;font-size:0.85em;">Apply &amp; Refresh</button>
     <button type="button" id="check-all-btn" class="btn btn-success" style="padding:4px 10px;font-size:0.85em;" title="Compute SHA-256 for all listed prompts and flag mismatches">&#9881; Check All</button>
-    <button type="button" id="refresh-mcp-btn" class="btn btn-info" style="padding:4px 10px;font-size:0.85em;margin-left:4px;" title="Re-read DB and re-register MCP prompts/resources. Requires browser reload for llama.cpp UI.">&#8635; Refresh MCP</button>
+    <button type="button" id="refresh-mcp-btn" class="btn btn-primary" style="padding:4px 10px;font-size:0.85em;margin-left:4px;" title="Re-read DB and re-register MCP prompts/resources. Requires browser reload for llama.cpp UI.">&#8635; Refresh MCP</button>
     <button type="button" id="override-checksums-btn" class="btn btn-warning" style="padding:4px 10px;font-size:0.85em;margin-left:4px;" title="Update DB checksum/size to match current disk files for all prompts">&#9881; Override Checksums</button>
     <span id="check-all-status" style="font-size:0.8em;color:#666;"></span>
     {% if filter_type or filter_search or filter_role %}
@@ -81,6 +81,7 @@
 
 // Async function to check a single prompt's checksum.
 // Compares DB-registered checksum (from row) against disk content hash.
+// Returns: { ok, status } where ok=true means match, status is the display string.
 async function checkPromptChecksum(row) {
     const promptId = row.getAttribute('data-prompt-id');
     const dbChecksum = row.querySelector('.status-cell').getAttribute('data-checksum') || '';
@@ -88,10 +89,13 @@ async function checkPromptChecksum(row) {
     
     if (!dbChecksum) {
         statusCell.innerHTML = '<span style="color:gray;">&#9645;</span> no checksum';
-        return;
+        return { ok: false, status: 'no checksum' };
     }
     
     try {
+        // Set "checking..." status immediately for live feedback
+        statusCell.innerHTML = '<span style="color:#999;">&#9645;</span> checking...';
+        
         // Read current content from disk (via API endpoint)
         const resp = await qrApi('/prompts/' + encodeURIComponent(promptId) + '/content', {}, true);
         if (resp.status === 'ok') {
@@ -105,14 +109,18 @@ async function checkPromptChecksum(row) {
             
             if (dbChecksum === actual) {
                 statusCell.innerHTML = '<span style="color:green;">&#10004;</span> match';
+                return { ok: true, status: 'match' };
             } else {
                 statusCell.innerHTML = '<span style="color:orange;">&#9888;</span> mismatch';
+                return { ok: false, status: 'mismatch' };
             }
         } else {
             statusCell.innerHTML = '<span style="color:red;">&#10008;</span> error';
+            return { ok: false, status: 'error' };
         }
     } catch (e) {
         statusCell.innerHTML = '<span style="color:red;">&#10008;</span> ' + e.message;
+        return { ok: false, status: 'error' };
     }
 }
 
@@ -169,39 +177,31 @@ document.addEventListener('DOMContentLoaded', function() {
         const btn = this;
         const statusEl = document.getElementById('check-all-status');
         btn.disabled = true;
-        btn.textContent = 'Re-checking...';
+        btn.textContent = 'Checking...';
         statusEl.textContent = '';
         
         let checked = 0, matched = 0, failed = 0;
         const totalRows = rows.length;
         
         for (const row of rows) {
-            await checkPromptChecksum(row);
+            const result = await checkPromptChecksum(row);
             checked++;
             
-            // Check if status cell shows match/mismatch/error
-            const statusSpan = row.querySelector('.status-cell span');
-            if (statusSpan) {
-                const txt = statusSpan.textContent.trim();
-                if (txt === '\u2713' || txt === '✓' || txt.includes('match') || txt === 'match') {
-                    matched++;
-                } else if (txt === '✗' || txt === '\u2718' || txt.includes('error') || txt.includes('✗')) {
-                    failed++;
-                } else if (txt.includes('mismatch') || txt.includes('\u26a0\ufe0f')) {
-                    matched++; // still counted as checked, but not fully OK
-                }
+            // Use return value instead of re-reading DOM
+            if (result && result.ok) {
+                matched++;
+            } else if (result) {
+                failed++;
             }
         }
         
-        // Build result text and color
+        // Build result text — matches playbook pattern: "Done: X ok"
         let resultText = `Checked ${checked}/${totalRows}: ${matched} ok`;
         if (failed > 0) resultText += `, ${failed} fail`;
         
         let btnClass = 'btn-success';
         let statusColor = '#4caf50';
         
-        // Bug 1: if checked != matched -> warning (orange)
-        // Bug 2: if checked < totalRows -> error (red)
         if (checked < totalRows) {
             btnClass = 'btn-danger';
             statusColor = '#f44336';
@@ -322,8 +322,11 @@ document.addEventListener('DOMContentLoaded', function() {
         rows.sort(function(a, b) {
             var cellA = a.cells[col] ? (a.cells[col].getAttribute('data-sort') || a.cells[col].textContent.trim()) : '';
             var cellB = b.cells[col] ? (b.cells[col].getAttribute('data-sort') || b.cells[col].textContent.trim()) : '';
+            // Strip non-numeric chars before parseInt for robust numeric comparison
+            // (design doc § Numeric Sort Patterns Reference — prevents NaN from "v1", "unknown", etc.)
+            var stripNum = function(s) { return parseFloat(s.replace(/[^0-9.-]/g, '')) || 0; };
             if (col === 0 || col === 4 || col === 6 || col === 7) {
-                return dir === 'asc' ? (parseInt(cellA, 10) || 0) - (parseInt(cellB, 10) || 0) : (parseInt(cellB, 10) || 0) - (parseInt(cellA, 10) || 0);
+                return dir === 'asc' ? stripNum(cellA) - stripNum(cellB) : stripNum(cellB) - stripNum(cellA);
             }
             return dir === 'asc' ? cellA.localeCompare(cellB) : cellB.localeCompare(cellA);
         });

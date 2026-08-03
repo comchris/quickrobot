@@ -40,6 +40,7 @@ import sys
 import threading
 import time
 from datetime import datetime
+from dotenv import load_dotenv
 
 # LOG-CONSOLIDATE: use shared dual logger (console + file) with runtime level control
 import lib.lib_logging as _ll
@@ -50,37 +51,26 @@ from lib.qr_engine_ids import (
     QR_ENGINE_LLAMA_SERVER_NAME, QR_ENGINE_LLAMA_RPC_NAME,
     QR_ENGINE_MCP_NAME, QR_ENGINE_SCHEDULER_NAME, QR_ENGINE_SUBPROCESS_NAME,
     QR_ENGINE_TIMESTAMP_PROXY_NAME, QR_ENGINE_UNIVERSAL_NAME, QR_ENGINE_WEBUI, QR_ENGINE_WEBUI_NAME,
+    QR_ENGINE_IPERF3_NAME, QR_ENGINE_PORT_DEFAULTS,
     QR_FORBIDDEN_HOSTS,
+    QR_JOB_DEPLOY, QR_JOB_RESTART, QR_JOB_RECONFIGURE, QR_JOB_STOP, QR_JOB_START, QR_JOB_UNDEPLOY,
+    QR_STATE_COMPILING, QR_STATE_CONFIGURING, QR_STATE_DEPLOYED, QR_STATE_DEPLOYING, QR_STATE_ERROR,
+    QR_STATE_LOADING, QR_STATE_RUNNING, QR_STATE_STOPPED, QR_STATE_UNCONFIGURED, QR_STATE_UPDATING,
     _QR_NAV_DISPLAY_NAMES, _QR_NAV_LLAMA_NAMES, _QR_NAV_NO_CONFIG,
     _QR_NAV_SHORT_ALIASES, _QR_NAV_SECTION_MAP, _QR_SYSTEM_NAMES,
     _QR_EMPTY,
     get_id_by_name, is_llamacpp_engine,
 )
 
-# Source .quickrobot.env into os.environ (same pattern as quickrobot.py entry point)
-# so this process inherits PYTHONPYCACHEPREFIX and other env settings from the shell.
+# Source .quickrobot.env into os.environ so this process inherits PYTHONPYCACHEPREFIX
+# and other env settings from the shell.
 _env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".quickrobot.env")
 if os.path.isfile(_env_file):
-    with open(_env_file, "r") as _f:
-        for _line in _f:
-            _line = _line.strip()
-            if not _line or _line.startswith("#"):
-                continue
-            if "=" not in _line:
-                continue
-            _k, _, _v = _line.partition("=")
-            _k = _k.strip()
-            _v = _v.strip()
-            if len(_v) >= 2 and ((_v[0] == '"' and _v[-1] == '"') or (_v[0] == "'" and _v[-1] == "'")):
-                _v = _v[1:-1]
-            os.environ[_k] = _v
-    del _f, _line, _k, _v  # clean up loop vars (only defined if file existed)
-del _env_file  # always defined above
+    load_dotenv(_env_file)
 
-# Root guard — same as main process, refuse to run as root
-if os.getuid() == 0:
-    print("this robot won't run as root", file=sys.stderr)
-    sys.exit(1)
+# Root guard — same as main process, refuse to run as root (Windows: no-op)
+import lib.lib_platform as _lib_platform
+_lib_platform.check_nonroot()
 
 from flask import Flask, request, Response, jsonify, redirect, url_for, render_template, send_from_directory, session
 from markupsafe import Markup
@@ -563,50 +553,85 @@ TABLE_HEADER = """\
 # Engine config metadata: descriptions and input types per engine type
 # Used by the generic engine config page renderer
 ENGINE_CONFIG_META = {
-    "llama_rpc": {
-        "display_title": "LLAMA.cpp RPC Server Global Engine Config",
-        "fields": {
-            "base_port": {"description": "Default port for first instance on the remote Host"},
-            "binary_path": {"description": "Absolute path to ggml-rpc-server binary on remote host (e.g. /opt/quickrobot/llama.cpp/build/bin/ggml-rpc-server)"},
-            "default_timeout": {"description": "Default runtime to be used in seconds for the benchmark"},
-            "restart_policy": {"description": "Systemd unit restart policy (always/on-failure/no)"},
-            "start_on_boot": {"description": "Enable systemd unit on boot (true/false)"},
-            "skip_build": {"description": "Skip cmake rebuild during deploy if binary already exists on remote host"},
-            "polling_interval_local_sec": {"description": "Action log polling interval for local instances in seconds (minimum 10)"},
-            "polling_interval_remote_sec": {"description": "Action log polling interval for remote nodes in seconds (minimum 10)"},
-            "playbook_dir": {"description": "Subdirectory under playbooks/ for custom deploy/undeploy scripts (e.g. 'custom', 'llama')"},
-        },
-        "dropdowns": ["restart_policy", "start_on_boot", "skip_build"],
-    },
-   "iperf3": {
-          "display_title": "Iperf3 Global Engine Config",
-        "fields": {
-               "base_port": {"description": "Base port for iperf3 server instance allocation (range 9900-9904)"},
-               "restart_policy": {"description": "Systemd restart policy"},
-               "start_on_boot": {"description": "Enable systemd unit on boot (true/false)"},
-               "target_host": {"description": "Server hostname/IP for client mode (used as target_host in CLI)"},
-               "target_port": {"description": "Server port for client mode (used as target_port in CLI)"},
-                  "polling_interval_local_sec": {"description": "Action log polling interval for local instances in seconds (minimum 10)"},
-                   "polling_interval_remote_sec": {"description": "Action log polling interval for remote nodes in seconds (minimum 10)"},
-               },
-          "dropdowns": ["restart_policy", "start_on_boot"],
+     QR_ENGINE_LLAMA_RPC_NAME: {
+          "display_title": "LLAMA.cpp RPC Server Global Engine Config",
+          "fields": {
+              "base_port": {"description": "Default port for first instance on the remote Host"},
+              "binary_path": {"description": "Absolute path to ggml-rpc-server binary on remote host (e.g. /opt/quickrobot/llama.cpp/build/bin/ggml-rpc-server)"},
+              "default_timeout": {"description": "Default runtime to be used in seconds for the benchmark"},
+              "restart_policy": {
+                  "description": "Systemd unit restart policy (always/on-failure/no)",
+                  "input_type": "select",
+                  "options": ["no", "always", "on-success", "on-failure", "on-abnormal", "on-watchdog", "on-failure:N"]
+              },
+              "start_on_boot": {
+                  "description": "Enable systemd unit on boot (true/false)",
+                  "input_type": "select",
+                  "options": ["true", "false"]
+              },
+              "skip_build": {
+                  "description": "Skip cmake rebuild during deploy if binary already exists on remote host",
+                  "input_type": "select",
+                  "options": ["true", "false"]
+              },
+              "polling_interval_local_sec": {"description": "Action log polling interval for local instances in seconds (minimum 10)"},
+              "polling_interval_remote_sec": {"description": "Action log polling interval for remote nodes in seconds (minimum 10)"},
+              "playbook_dir": {"description": "Subdirectory under playbooks/ for custom deploy/undeploy scripts (e.g. 'custom', 'llama')"},
+          },
+          # dropdowns list kept for backward compat; rendering reads input_type/options from fields
+          "dropdowns": ["restart_policy", "start_on_boot", "skip_build"],
       },
-"llama_server": {
-             "display_title": "LLAMA.cpp Server Global Engine Config",
-             "fields": {
-                 "base_port": {"description": "Default port for first instance on the remote Host"},
-                 "binary_path": {"description": "Path to llama-server binary on remote Host"},
-                 "model_root_path": {"description": "Root path searched by model scan playbook (default: /mnt/llama/gguf/models)"},
-                 "restart_policy": {"description": "Systemd unit restart policy"},
-                 "start_on_boot": {"description": "Enable systemd unit on boot"},
-                 "skip_build": {"description": "Skip cmake rebuild if binary already exists"},
-                 "polling_interval_local_sec": {"description": "Action log polling interval for local instances in seconds (minimum 10)"},
-                 "polling_interval_remote_sec": {"description": "Action log polling interval for remote nodes in seconds (minimum 10)"},
-                 "llama_seed": {"description": "Random seed value passed as LLAMA_ARG_SEED to llama-server (default: 1337)"},
-                 "playbook_dir": {"description": "Subdirectory under playbooks/ for custom deploy/undeploy scripts (e.g. 'custom', 'llama')"},
-             },
-           "dropdowns": ["restart_policy", "start_on_boot", "skip_build"],
-        },
+    QR_ENGINE_IPERF3_NAME: {
+           "display_title": "Iperf3 Global Engine Config",
+         "fields": {
+                "base_port": {"description": "Base port for iperf3 server instance allocation (range 9900-9904)"},
+                "restart_policy": {
+                    "description": "Systemd restart policy",
+                    "input_type": "select",
+                    "options": ["no", "always", "on-success", "on-failure", "on-abnormal", "on-watchdog", "on-failure:N"]
+                },
+                "start_on_boot": {
+                    "description": "Enable systemd unit on boot (true/false)",
+                    "input_type": "select",
+                    "options": ["true", "false"]
+                },
+                "target_host": {"description": "Server hostname/IP for client mode (used as target_host in CLI)"},
+                "target_port": {"description": "Server port for client mode (used as target_port in CLI)"},
+                   "polling_interval_local_sec": {"description": "Action log polling interval for local instances in seconds (minimum 10)"},
+                    "polling_interval_remote_sec": {"description": "Action log polling interval for remote nodes in seconds (minimum 10)"},
+                },
+           # dropdowns list kept for backward compat; rendering reads input_type/options from fields
+           "dropdowns": ["restart_policy", "start_on_boot"],
+       },
+    QR_ENGINE_LLAMA_SERVER_NAME: {
+               "display_title": "LLAMA.cpp Server Global Engine Config",
+              "fields": {
+                  "base_port": {"description": "Default port for first instance on the remote Host"},
+                  "binary_path": {"description": "Path to llama-server binary on remote Host"},
+                  "model_root_path": {"description": "Root path searched by model scan playbook (default: /mnt/llama/gguf/models)"},
+                  "restart_policy": {
+                      "description": "Systemd unit restart policy",
+                      "input_type": "select",
+                      "options": ["no", "always", "on-success", "on-failure", "on-abnormal", "on-watchdog", "on-failure:N"]
+                  },
+                  "start_on_boot": {
+                      "description": "Enable systemd unit on boot",
+                      "input_type": "select",
+                      "options": ["true", "false"]
+                  },
+                  "skip_build": {
+                      "description": "Skip cmake rebuild if binary already exists",
+                      "input_type": "select",
+                      "options": ["true", "false"]
+                  },
+                  "polling_interval_local_sec": {"description": "Action log polling interval for local instances in seconds (minimum 10)"},
+                  "polling_interval_remote_sec": {"description": "Action log polling interval for remote nodes in seconds (minimum 10)"},
+                  "llama_seed": {"description": "Random seed value passed as LLAMA_ARG_SEED to llama-server (default: 1337)"},
+                  "playbook_dir": {"description": "Subdirectory under playbooks/ for custom deploy/undeploy scripts (e.g. 'custom', 'llama')"},
+              },
+            # dropdowns list kept for backward compat; rendering now reads input_type/options from fields
+            "dropdowns": ["restart_policy", "start_on_boot", "skip_build"],
+         },
   "quickrobot-api": {
          "display_title": "Quickrobot API Service Global Config",
          "fields": {
@@ -732,11 +757,11 @@ def render_nav(active, engine_types=None):
                   llama_section["items"].append('<li><a href="/webui/rpccluster">Herd</a></li>')
 
     # Static misc nav items
-    if "iperf3" in [e.get("name") for e in engine_types or []]:
+    if QR_ENGINE_IPERF3_NAME in [e.get("name") for e in engine_types or []]:
         misc_section["items"].append('<li><a href="/webui/iperf3">iperf;3</a></li>')
 
    # Static LLAMA.cpp section items (merged pages)
-    if "llama_rpc" in [e.get("name") for e in engine_types or []]:
+    if QR_ENGINE_LLAMA_RPC_NAME in [e.get("name") for e in engine_types or []]:
         llama_section["items"].append('<li><a href="/webui/rpc">RPC</a></li>')
 
     # Static system nav items
@@ -745,6 +770,7 @@ def render_nav(active, engine_types=None):
         "quickrobot-mcp" in [e.get("name") for e in engine_types or []]:
         system_section["items"].append('<li><a href="/webui/prompts">Prompts</a></li>')
         system_section["items"].append('<li><a href="/webui/playbooks">Playbooks</a></li>')
+        system_section["items"].append('<li><a href="/webui/engine_binaries">Templates</a></li>')
 
     # System engine config links (api, webui, mcp, scheduler)
     _sys_links = {
@@ -1273,6 +1299,23 @@ def webui_model_create():
                            engines_nav=engines_nav, **nav, content=Markup(content))
 
 
+
+@app.route("/webui/engine_binaries")
+@login_required
+def webui_engine_binaries():
+     """Binary templates management page (BINARY-DL)."""
+     nav, engines_nav = render_nav("engine_binaries", get_engine_types())
+     filter_engine = request.args.get("engine_type_id", "")
+     filter_version = request.args.get("search_version", "")
+     filter_status = request.args.get("is_active", "")
+     content = render_template('engine_binaries.html',
+                               filter_engine=filter_engine,
+                               filter_version=filter_version,
+                               filter_status=filter_status)
+     return render_template('base.html', title="Binary Templates",
+                             engines_nav=engines_nav, **nav, content=Markup(content))
+
+
 @app.route("/webui/instances")
 @login_required
 def webui_instances():
@@ -1347,6 +1390,27 @@ def webui_instances():
         nm = node_map.get(hn, {})
         inst["_node_ping_state"] = nm.get("ping_state", "unknown") if hn else None
         inst["_node_is_active"] = nm.get("is_active", 1) if hn else 1
+
+    # Enrich binary_template_id → template name for llama_server/llama_rpc instances
+    _db_path_w = os.path.join(os.getcwd(), "data", "quickrobot.db")
+    try:
+        import sqlite3 as _sqlite3
+        with _sqlite3.connect(_db_path_w) as _conn_b:
+            _conn_b.row_factory = _sqlite3.Row
+            _bt_names = {r["id"]: r["name"] for r in _conn_b.execute(
+                "SELECT id, name FROM engine_binaries WHERE is_active=1").fetchall()}
+        for inst in filtered:
+            co = inst.get("config_override") or {}
+            if isinstance(co, str):
+                try: co = json.loads(co)
+                except Exception: co = {}
+            _btid = co.get("binary_template_id")
+            if _btid is not None and _btid in _bt_names:
+                inst["_bt_name"] = _bt_names[_btid]
+            else:
+                inst["_bt_name"] = ""
+    except Exception:
+        pass  # Non-critical — instance list still renders
 
     # Pre-format RSS strings for template
     for inst in filtered:
@@ -1478,12 +1542,18 @@ def webui_instances_new():
     # Engine capabilities map (for JS) — use proper JSON to avoid trailing comma bug
     engine_caps = json.dumps({e.get("name", ""): e.get("capabilities", {}) for e in engines})
 
+    # Raw data for wizard card grids (passed as JSON to JS)
+    nodes_raw = json.dumps(nodes_data.get("items", []))
+    engines_raw = json.dumps(engines)
+
     nav, engines_nav = render_nav("instances", get_engine_types())
     content = render_template('instances_new.html',
                               engine_options=engine_options,
                               node_options=node_options,
                               subprocess_node_options=subprocess_node_options,
-                              engine_caps=engine_caps)
+                              engine_caps=engine_caps,
+                              nodes_raw=nodes_raw,
+                              engines_raw=engines_raw)
     return render_template('base.html', title="Create Instance",
                           engines_nav=engines_nav, **nav, content=Markup(content))
 
@@ -1609,6 +1679,83 @@ def webui_engine_config(engine_type):
                           '<option value="on-watchdog">on-watchdog</option>' \
                           '<option value="on-failure:N">on-failure:N (max restarts)</option>'
 
+        # ── Metadata-driven input renderer ──────────────────────────────────
+        # Shared option sets — referenced by input_type, not hardcoded per-field
+        _DROPDOWN_OPTIONS = {
+            "bool":     ["true", "false"],
+            "restart":  ["no", "always", "on-success", "on-failure", "on-abnormal", "on-watchdog", "on-failure:N"],
+        }
+
+        # Boolean field heuristics — fields with these name patterns + true/false value → dropdown
+        _BOOL_PATTERNS = [
+            "_token$",       # auto_auth_token, mcp_auth_token
+            "_enable$",      # some_enable
+            "allow_",        # allow_reads, allow_writes
+            "_on_boot$",     # start_on_boot
+            "_build$",       # skip_build
+            "detach$",       # mcp_detach
+        ]
+
+        def _is_likely_bool(key, value):
+            """Heuristic: does this field look like a boolean toggle?"""
+            dv = str(value).lower()
+            if dv not in ("true", "false"):
+                return False
+            for pat in _BOOL_PATTERNS:
+                import re
+                if re.search(pat, key):
+                    return True
+            # Also flag common known booleans
+            low_key = key.lower()
+            if any(kw in low_key for kw in ["autostart", "autodetect", "enabled", "enabled_", "detach"]):
+                return True
+            return False
+
+        def _render_config_input(key, display_value, fmeta):
+            """Generate input HTML from field metadata, with auto-detection for booleans."""
+            meta = fmeta.get(key, {})
+            input_type = meta.get("input_type", "text")
+            raw_options = meta.get("options")  # explicit options from metadata
+
+            if input_type == "number":
+                return (f'<input type="number" class="config-value" data-key="{key}" '
+                        f'value="{display_value}" style="width:100%;padding:4px 8px;border:1px solid #ccc;border-radius:3px;">')
+
+            if input_type in ("select", "dropdown") or (input_type == "text" and key in dropdown_fields):
+                # Explicit select type — use metadata or shared sets
+                if raw_options:
+                    options = [str(o) for o in raw_options]
+                elif input_type == "select":
+                    options = _DROPDOWN_OPTIONS.get(input_type, ["true", "false"])
+                elif key in ("start_on_boot", "skip_build"):
+                    options = _DROPDOWN_OPTIONS["bool"]
+                elif "restart" in key.lower():
+                    options = _DROPDOWN_OPTIONS["restart"]
+                else:
+                    options = _DROPDOWN_OPTIONS["bool"]  # safe default
+
+                opts_html = ""
+                dv = str(display_value).lower()
+                for opt in options:
+                    ov = str(opt).lower()
+                    sel = " selected" if dv == ov else ""
+                    display_label = str(opt)
+                    opts_html += f'<option value="{opt}"{sel}>{display_label}</option>'
+                return (f'<select class="config-value" data-key="{key}" '
+                        f'style="width:100%;padding:4px 8px;border:1px solid #ccc;border-radius:3px;">{opts_html}</select>')
+
+            # Auto-detect: value is true/false AND field name matches boolean heuristic
+            if _is_likely_bool(key, display_value):
+                dv = str(display_value).lower()
+                opts_html = (f'<option value="true"{" selected" if dv == "true" else ""}>true</option>'
+                             f'<option value="false"{" selected" if dv == "false" else ""}>false</option>')
+                return (f'<select class="config-value" data-key="{key}" '
+                        f'style="width:100%;padding:4px 8px;border:1px solid #ccc;border-radius:3px;">{opts_html}</select>')
+
+            # Default: text input
+            return (f'<input type="text" class="config-value" data-key="{key}" '
+                    f'value="{display_value}" style="width:100%;padding:4px 8px;border:1px solid #ccc;border-radius:3px;">')
+
         rows = ""
         for key, config_entry in configs.items():
             if isinstance(config_entry, dict):
@@ -1621,37 +1768,8 @@ def webui_engine_config(engine_type):
             # Use metadata description as fallback when DB description is empty
             desc = db_desc if db_desc else field_meta.get(key, {}).get("description", "")
 
-          # Build input element (text or dropdown for restart_policy / start_on_boot / skip_build / booleans)
-            if key.startswith("start_on_boot"):
-                dv = str(display_value).lower()
-                options_html = '<option value="true"' + (' selected' if dv == "true" else '') + '>true</option>' \
-                               '<option value="false"' + (' selected' if dv == "false" else '') + '>false</option>'
-                input_html = f'<select class="config-value" data-key="{key}" style="width:100%;padding:4px 8px;border:1px solid #ccc;border-radius:3px;">{options_html}</select>'
-            elif key == "skip_build":
-                dv = str(display_value).lower()
-                options_html = '<option value="true"' + (' selected' if dv == "true" else '') + '>true</option>' \
-                               '<option value="false"' + (' selected' if dv == "false" else '') + '>false</option>'
-                input_html = f'<select class="config-value" data-key="{key}" style="width:100%;padding:4px 8px;border:1px solid #ccc;border-radius:3px;">{options_html}</select>'
-            elif key in dropdown_fields and key in ("restart_policy",):
-                options_html = ""
-                for opt_val in ["no", "always", "on-success", "on-failure", "on-abnormal", "on-watchdog", "on-failure:N"]:
-                    sel = "selected" if str(display_value) == opt_val else ""
-                    options_html += f'<option value="{opt_val}" {sel}>{opt_val}</option>'
-                input_html = f'<select class="config-value" data-key="{key}" style="width:100%;padding:4px 8px;border:1px solid #ccc;border-radius:3px;">{options_html}</select>'
-            elif key in dropdown_fields and str(display_value).lower() in ("true", "false"):
-                # Boolean dropdown fields (allow_reads, allow_writes, allow_proxy, mcp_detach, etc.)
-                dv = str(display_value).lower()
-                options_html = '<option value="true"' + (' selected' if dv == "true" else '') + '>true</option>' \
-                               '<option value="false"' + (' selected' if dv == "false" else '') + '>false</option>'
-                input_html = f'<select class="config-value" data-key="{key}" style="width:100%;padding:4px 8px;border:1px solid #ccc;border-radius:3px;">{options_html}</select>'
-            elif key in dropdown_fields:
-                options_html = ""
-                for opt_val in ["no", "always", "on-success", "on-failure", "on-abnormal", "on-watchdog", "on-failure:N"]:
-                    sel = "selected" if str(display_value) == opt_val else ""
-                    options_html += f'<option value="{opt_val}" {sel}>{opt_val}</option>'
-                input_html = f'<select class="config-value" data-key="{key}" style="width:100%;padding:4px 8px;border:1px solid #ccc;border-radius:3px;">{options_html}</select>'
-            else:
-                input_html = f'<input type="text" class="config-value" data-key="{key}" value="{display_value}" style="width:100%;padding:4px 8px;border:1px solid #ccc;border-radius:3px;">'
+            # Render input element from metadata (no hardcoded field branches)
+            input_html = _render_config_input(key, display_value, field_meta)
 
             rows += f"""<tr>
    <td style="white-space:nowrap;min-width:200px;">{key}</td>
@@ -2150,7 +2268,7 @@ def _render_system_engine_config(engine_type):
             mcp_id = _mcp_inst.get("id") if _mcp_inst else None
 
             # Fields migrated to .quickrobot.env - show as informational only
-            mcp_env_migrated = ("mcp_host", "mcp_port")
+            mcp_env_migrated = ("mcp_host", "mcp_port", "mcp_token")
             rows = ""
             api_settings = api_get("engines/quickrobot-api/status").get("data", {})
             api_bind_host = api_settings.get("bind_host") or QR_DEFAULT_LOCALHOST
@@ -2162,6 +2280,7 @@ def _render_system_engine_config(engine_type):
                 "mcp_python_interpreter": {"description": "Python interpreter binary for MCP server (empty=auto-detect)", "input_type": "text", "editable": True},
                 "mcp_host": {"description": "MCP listen address - configured in .quickrobot.env", "input_type": "text"},
                 "mcp_port": {"description": "MCP listen port - configured in .quickrobot.env", "input_type": "text"},
+                "mcp_token": {"description": "SSE endpoint auth token (QR-MCP-...) - from .quickrobot.env QUICKROBOT_MCP_TOKEN", "input_type": "text"},
             }
 
             # Info rows for env-migrated fields
@@ -2448,7 +2567,8 @@ def webui_logs():
     action_type = request.args.get("job_type") or None  # Unified field name
     status = request.args.get("status") or None
     instance_id = request.args.get("instance_id", type=int) or None
-    limit_val = int(request.args.get("limit", "100")) or 100
+    node_id = request.args.get("node_id", type=int) or None
+    limit_val = int(request.args.get("limit", "25")) or 25
 
     api_params = {"limit": limit_val}  # Show all log entries (job headers + tasks)
     if action_type:
@@ -2457,6 +2577,8 @@ def webui_logs():
         api_params["status"] = status
     if instance_id:
         api_params["instance_id"] = instance_id
+    if node_id:
+        api_params["node_id"] = node_id
 
     data = api_get("log_entries", api_params)
     if "error" in data:
@@ -2531,6 +2653,12 @@ def webui_logs():
             e.setdefault("detail_str", "N/A")
             log_entries.append(e)
 
+    # Load nodes for the node filter dropdown
+    nodes_data = api_get("nodes")
+    all_nodes = []
+    if "error" not in nodes_data:
+        all_nodes = sorted(nodes_data.get("items", []), key=lambda n: (n.get("name") or ""))
+
     nav, engines_nav = render_nav("logs", get_engine_types())
     content = render_template('ansible_logs.html',
         ansible_entries=log_entries,
@@ -2538,6 +2666,8 @@ def webui_logs():
         filter_action=action_type,
         filter_status=status,
         filter_limit=limit_val,
+        filter_node_id=node_id,
+        all_nodes=all_nodes,
     )
     return render_template('base.html', title="Ansible Logs", engines_nav=engines_nav, **nav, content=Markup(content))
 
@@ -2628,70 +2758,71 @@ def webui_playbook_content(pb_id):
         return render_template('base.html', title="Playbook — Error", engines_nav=engines_nav, **nav, content=Markup(content))
 
     pb = data.get("data", {})
-    playbook_id = pb.get("playbook_id", pb_id)
-    filename = pb.get("playbook_name", f"playbook_{pb_id}.yml")
-    db_checksum = pb.get("checksum_sha256", "N/A")
+    playbook_id_val = pb.get("playbook_id", pb_id)
+    file_path = pb.get("file_path", f"playbooks/{pb_id}.yml")
+    file_type = pb.get("file_type", "unknown")
+    version = pb.get("version", "—")
+    usage_count = pb.get("usage_counter_since_update", 0) or 0
+    error_count = pb.get("error_counter_since_update", 0) or 0
+    created_at = pb.get("created_at", "—") or "—"
     raw_content = pb.get("content", "")
     content_html = Markup(raw_content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
+    # Badge color for file type
+    type_badge = 'badge-system' if file_type == 'core' else 'badge-other'
+    type_label = '<span class="badge ' + type_badge + '">' + str(file_type) + '</span>'
+
+    # Age calculation — relative time from created_at
+    def format_age(ts):
+        if not ts or ts == "—":
+            return "—"
+        try:
+            from datetime import datetime, timezone
+            dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+            now = datetime.now(timezone.utc)
+            delta = now - dt
+            days = delta.days
+            if days < 1:
+                return str(max(1, delta.seconds // 3600)) + "h ago"
+            elif days < 30:
+                return str(days) + "d ago"
+            else:
+                return str(days // 30) + "mo ago"
+        except Exception:
+            return ts
+
+    age_display = format_age(created_at)
+
     nav, engines_nav = render_nav("playbooks", get_engine_types())
-    return render_template('base.html', title=f"Playbook: {filename}", engines_nav=engines_nav, **nav, content=Markup(f'''
-<div style="padding:16px;">
-  <a href="/webui/playbooks" style="color:#4fc3f7;text-decoration:none;">&larr; Back to playbooks</a>
-  <h2 style="margin-top:16px;">{filename}</h2>
-  <table style="margin-bottom:16px;font-size:13px;border-collapse:collapse;">
-    <tr><td style="padding:4px 12px 4px 0;color:#888;">ID</td><td>{playbook_id}</td></tr>
-    <tr><td style="padding:4px 12px 4px 0;color:#888;">DB Checksum</td><td style="font-family:monospace;font-size:12px;word-break:break-all;">{db_checksum[:64] if db_checksum and db_checksum != "N/A" else "N/A"}</td></tr>
-    <tr><td style="padding:4px 12px 4px 0;color:#888;">Checksum Now</td><td id="current-chk" style="font-family:monospace;font-size:12px;word-break:break-all;"><span style="color:#999;">computing...</span></td></tr>
-  </table>
-  <pre style="background:#1e1e1e;color:#d4d4d4;padding:16px;border-radius:4px;overflow-x:auto;font-size:13px;line-height:1.5;"><code id="yaml-content">{content_html}</code></pre>
-</div>
+    return render_template('base.html', title=f"Playbook: {file_path}", engines_nav=engines_nav, **nav, content=Markup(f'''
+<h1 style="margin:0;font-size:1.3em;">Playbook #{playbook_id_val} — {file_path}</h1>
+<table style="margin-bottom:16px;font-size:13px;border-collapse:collapse;">
+  <tr><td style="padding:4px 12px 4px 0;color:#888;">ID</td><td>{playbook_id_val}</td></tr>
+  <tr><td style="padding:4px 12px 4px 0;color:#888;">Type</td><td>{type_label}</td></tr>
+  <tr><td style="padding:4px 12px 4px 0;color:#888;">Version</td><td>{version}</td></tr>
+  <tr><td style="padding:4px 12px 4px 0;color:#888;">Usage</td><td>{usage_count} / {error_count}</td></tr>
+  <tr><td style="padding:4px 12px 4px 0;color:#888;">Age</td><td>{age_display}</td></tr>
+  <tr><td style="padding:4px 12px 4px 0;color:#888;">Syntax</td><td id="syntax-check" style="font-family:monospace;font-size:12px;"><span style="color:#999;">checking...</span></td></tr>
+</table>
+<pre style="background:#1e1e1e;color:#d4d4d4;padding:16px;border-radius:4px;overflow-x:auto;font-size:13px;line-height:1.5;"><code id="yaml-content">{content_html}</code></pre>
 <script>
 (function() {{
-  function simpleHash(str) {{
-    var hash = 0;
-    for (var i = 0; i < str.length; i++) {{
-      var ch = str.charCodeAt(i);
-      hash = ((hash << 5) - hash) + ch;
-      hash = hash & hash; // Convert to 32bit integer
-    }}
-    // Expand to a longer hex string by running multiple passes
-    var base = Math.abs(hash).toString(16).padStart(8, "0");
-    // Use multiple character positions for better distribution
-    var h1 = "", h2 = "";
-    for (var i = 0; i < str.length; i += 3) {{ h1 += str.charCodeAt(i % str.length).toString(16).padStart(2, "0"); }}
-    for (var i = str.length - 1; i >= 0; i -= 3) {{ h2 += str.charCodeAt(i % str.length).toString(16).padStart(2, "0"); }}
-    return (base + h1 + h2).substring(0, 64).toLowerCase();
-  }}
-
-  // Try crypto.subtle first, fall back to simple hash
-  var el = document.getElementById("current-chk");
+  // YAML syntax check via backend
+  var el = document.getElementById("syntax-check");
   if (!el) return;
-  var rawContent = document.getElementById("yaml-content").textContent;
- if (!rawContent) {{
-    el.innerHTML = '<span style="color:#f44336;">no content</span>';
-    return;
-  }}
 
-  if (typeof crypto !== 'undefined' && crypto.subtle && typeof crypto.subtle.digest === 'function') {{
-    var bytes = new TextEncoder().encode(rawContent);
-    crypto.subtle.digest("SHA-256", bytes).then(function(hashBuffer) {{
-      var hashArray = Array.from(new Uint8Array(hashBuffer));
-      var hash = hashArray.map(function(b) {{ return b.toString(16).padStart(2, "0"); }}).join("");
-      var dbCk = "{db_checksum[:64]}";
-      if (dbCk && dbCk !== "N/A" && dbCk.toLowerCase() === hash.toLowerCase()) {{
-        el.innerHTML = '<span style="color:#4caf50;" title="Matches DB checksum">' + hash + '</span> <span style="color:#4caf50;font-size:11px;">\\u2713</span>';
+  fetch(`/api/v1/playbooks/${pb_id}/validate`)
+    .then(function(r) {{ return r.json(); }})
+    .then(function(data) {{
+      if (data.status === 'ok') {{
+        el.innerHTML = '<span style="color:#4caf50;">\\u2713 valid YAML</span>';
       }} else {{
-        el.innerHTML = '<span style="color:#f44336;" title="Does not match DB checksum">' + hash + '</span> <span style="color:#f44336;font-size:11px;">\\u26A0</span>';
+        el.innerHTML = '<span style="color:#f44336;">\\u2717 ' + (data.error || 'invalid') + '</span>';
       }}
-    }}).catch(function(e) {{
-      el.innerHTML = '<span style="color:#f44336;">crypto error: ' + e.message + '</span>';
+    }})
+    .catch(function(e) {{
+      el.innerHTML = '<span style="color:#999;">check failed</span>';
     }});
-  }} else {{
-    // Fallback: use a deterministic hash (not crypto-grade but consistent)
-    var hash = simpleHash(rawContent);
-    el.innerHTML = '<span style="color:#999;font-size:10px;">(compat mode)</span> ' + hash;
-  }}
 }})();
 </script>
 '''))
@@ -2825,7 +2956,7 @@ def webui_instance_proxy(inst_id):
 
     inst = data.get("data", {})
     node_hostname = inst.get("node_hostname", "") or inst.get("node_name", QR_DEFAULT_LOCALHOST)
-    port = inst.get("port_assigned", 8080)
+    port = inst.get("port_assigned", QR_ENGINE_PORT_DEFAULTS.get(QR_ENGINE_LLAMA_SERVER_NAME, 8080))
     inst_name = inst.get("name", str(inst_id))
     nav, engines_nav = render_nav("instances", get_engine_types())
     return render_template('base.html', title=f"Proxy: {inst_name}", engines_nav=engines_nav, **nav,
@@ -2845,18 +2976,14 @@ def webui_instance_proxy(inst_id):
 # Deterministic state→actions mapping for server-side action button rendering.
 # Avoids the ~3.6s SSH call to /status endpoint just to derive available actions.
 _QR_STATE_ACTIONS = {
-    "unconfigured": [("deploy", "Deploy")],
-    "configuring": [("deploy", "Deploy")],
-    "deploying": [("deploy", "Deploy")],
-    "deployed": [("start", "Start"), ("undeploy", "Undeploy"), ("delete", "Delete")],
-    "starting": [],
-    "running": [("stop", "Stop"), ("restart", "Restart"), ("undeploy", "Undeploy"), ("delete", "Delete")],
-    "stopping": [],
-    "stopped": [("start", "Start"), ("deploy", "Deploy"), ("undeploy", "Undeploy"), ("delete", "Delete")],
-    "error": [("start", "Start"), ("reconfigure", "Reconfigure"), ("restart", "Restart"), ("deploy", "Deploy"), ("delete", "Delete")],
-    "loading": [],
-    "updating": [("deploy", "Deploy")],
-    "compiling": [("deploy", "Deploy")],
+    QR_STATE_UNCONFIGURED: [(QR_JOB_DEPLOY, "Deploy")],
+    QR_STATE_DEPLOYING: [(QR_JOB_DEPLOY, "Deploy")],
+    QR_STATE_DEPLOYED: [(QR_JOB_START, "Start"), (QR_JOB_UNDEPLOY, "Undeploy"), ("delete", "Delete")],
+    QR_STATE_RUNNING: [(QR_JOB_STOP, "Stop"), (QR_JOB_RESTART, "Restart"), (QR_JOB_UNDEPLOY, "Undeploy"), ("delete", "Delete")],
+    QR_STATE_STOPPED: [(QR_JOB_START, "Start"), (QR_JOB_DEPLOY, "Deploy"), (QR_JOB_UNDEPLOY, "Undeploy"), ("delete", "Delete")],
+    QR_STATE_ERROR: [(QR_JOB_START, "Start"), (QR_JOB_RECONFIGURE, "Reconfigure"), (QR_JOB_RESTART, "Restart"), (QR_JOB_DEPLOY, "Deploy"), ("delete", "Delete")],
+    QR_STATE_UPDATING: [(QR_JOB_DEPLOY, "Deploy")],
+    QR_STATE_COMPILING: [(QR_JOB_DEPLOY, "Deploy")],
 }
 
 
@@ -2902,7 +3029,7 @@ def webui_instance_detail_v2(inst_id):
     # llama_server/rpc: port_assigned is authoritative (from port allocator); LLAMA_ARG_PORT is fallback.
     # subprocess/universal: port comes from config_override → merged_config.env.port.
     merged_env = merged_config.get("env", {}) if isinstance(merged_config, dict) else {}
-    if engine_name in ("llama_server", "llama_rpc"):
+    if engine_name in (QR_ENGINE_LLAMA_SERVER_NAME, QR_ENGINE_LLAMA_RPC_NAME):
         actual_port = port_assigned_val or merged_env.get("LLAMA_ARG_PORT") or "N/A"
     else:
         actual_port = merged_env.get("port") or port_assigned_val or "N/A"
@@ -2976,14 +3103,14 @@ def webui_instance_detail_v2(inst_id):
     preset_id = inst.get("preset_id")
     preset_name = inst.get("preset_name") or "No preset"
     presets_list = []
-    if engine_name in ("llama_server", "llama_rpc"):
+    if engine_name in (QR_ENGINE_LLAMA_SERVER_NAME, QR_ENGINE_LLAMA_RPC_NAME):
         _presets_data = api_get(f"engine/{engine_name}/presets")
         if "error" not in _presets_data:
             presets_list = _presets_data.get("items", [])
 
     # Model info for current preset (llama.cpp only) — size, mmproj, draft model
     model_info = None
-    if engine_name in ("llama_server", "llama_rpc") and preset_id:
+    if engine_name in (QR_ENGINE_LLAMA_SERVER_NAME, QR_ENGINE_LLAMA_RPC_NAME) and preset_id:
         # First get the preset to find its model_id
         _preset_data = api_get(f"engine/{engine_name}/presets/{preset_id}")
         _model_id = None

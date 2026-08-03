@@ -9,13 +9,13 @@
 **CRITICAL PRE-FLIGHT COMMAND:** Your very first actions, in order, MUST be:
 1. Use the `Read` tool to read '/CORE/projects/quickrobot/QUICKROBOT.md' — no limit, read fully
 2. Use the `Read` tool to read '/CORE/projects/quickrobot/CHANGELOG.md' with limit=20
+3. Use the `Read` tool to read '/CORE/projects/quickrobot/prompts/skill.md' — API endpoint reference + MCP tools, no limit
 4. Use the `Read` tool to read '/CORE/projects/quickrobot/docs/TODO.md' — no limit
 5. Use the `Read` tool to read '/CORE/projects/quickrobot/docs/LOCALHOSTS.md' — local LAN hostnames/IPs (if file exists), no limit
 6. Run `date && cat /CORE/projects/quickrobot/.quickrobot.env` to get the current session timestamp and CURRENT local configuration used by quickrobot as SSOT
 7. Check `./manifest.log` with limit=20; fetch more on demand if needed for context
 8. Create full project backup: `tar -czf /CORE/BACKUPS/quickrobot_backup_TIMESTAMP.tar.gz --exclude='OLD_ignore' --exclude='__pycache__' --exclude='.opencode/node_modules' -C /CORE/projects quickrobot`
 9. Verify backup integrity: `SOURCE_FILES=$(find /CORE/projects/quickrobot -not -path '*/OLD_ignore/*' -not -path '*/__pycache__/*' -not -path '*/.opencode/node_modules/*' -type f | wc -l) && BACKUP_FILES=$(tar -tzf /CORE/BACKUPS/quickrobot_backup_TIMESTAMP.tar.gz | grep -v '/$' | wc -l)` — confirm BACKUP_FILES >= SOURCE_FILES (allow for .opencode/ dynamic files like sessions/cache not archived; critical: all .opencode/agents/*.md present).
-10. Log backup in `./manifest.log`: append `<backup_filename> | <timestamp> | designer | N/A | session start full project backup`
 Do not respond to the user or perform any other task until you have completed these steps. Failure to do this is a CRITICAL ERROR!
 
 ### MANDATORY OPERATIONAL RULES:
@@ -373,3 +373,61 @@ Agents MUST check `_warnings` in create_instance response and auto-correct by se
 |--------|-----------|-------|---------|
 | llama_server (21) | 100+ | 51 | Model-loaded inference, GPU support |
 | llama_rpc (22) | 10-14 | 6 | CPU gRPC serving, thread pool config |
+
+---
+
+### 19. sqlite3.Row .get() IS NOT AVAILABLE (2026-07-27)
+
+**CRITICAL LEARNING:** In Python 3.13, `sqlite3.Row` does NOT have `.get()` method. It only supports direct subscript access: `row["key"]`. The `.get("key", default)` pattern that works on dicts FAILS with `AttributeError: 'sqlite3.Row' object has no attribute 'get'`.
+
+**Pattern:**
+```python
+# WRONG — .fetchone() returns sqlite3.Row, .get() raises AttributeError
+row = conn.execute("SELECT x FROM t WHERE id=?", (1,)).fetchone()
+val = row.get("x", "default")  # AttributeError!
+
+# CORRECT — use subscript access
+val = row["x"] if row else None  # works for both Row and dict
+
+# ALSO CORRECT — convert Row to dict first
+row = conn.execute(...).fetchone()
+if row:
+    d = dict(row)
+    val = d.get("x", "default")  # works on plain dict
+```
+
+**Where this bites:** Any code path that reads from DB via `conn.execute().fetchone()` and then uses `.get()` on the result WITHOUT an intervening `dict()` conversion. The fix is always one of:
+A) Use `row["key"]` (subscript access, works for both Row and dict)
+B) Add `d = dict(row)` conversion before `.get()`
+C) Ensure the calling function already converts to dict (e.g., `get_instance()` does this)
+
+**Already-fixed locations:**
+- `lib/lib_runner.py:528` — changed `job_row.get("details_json")` → `job_row["details_json"]` (this was causing binary_download tasks to always fail because `_binary_template_id` was silently set to None, preventing binary_vars injection)
+
+**Verification pattern:** Before adding any new DB query that uses `.get()` on the result, verify: is the result a Row or a dict? If Row → use subscript access or convert first.
+
+### 20. UI Create Instance Wizard — 8 Bug Fixes (2026-07-27)
+
+**File:** `webui/instances_new.html` (+27 net lines)
+
+Fixed 8 bugs in the Create Instance wizard (1526→~1597 lines):
+A) **BUG-1:** Added hidden `<select id="engine-select" style="display:none">` — JS referenced it at 20+ places but HTML element was missing
+B) **BUG-2:** Removed redundant "Select" button from engine cards; card click handler handles selection directly
+C) **BUG-3:** `loadNodes()` sorts: localhost (id=1) first, then alphabetical by name
+D) **BUG-4:** `loadEngines()` sorts by priority order: 21→22→23→31→11→12
+E) **BUG-5:** Subprocess (id=12) filtered when `selectedNodeId !== 1`; engine list refreshes on node selection
+F) **BUG-6:** All cards (node, engine, preset, model) standardized to use `.wiz-card.selected` class with `classList.add/remove` instead of inline `style.borderColor`
+G) **BUG-7:** Step indicators get `cursor:pointer` CSS + click handlers with validation guards; also fixed pre-existing `setStatus()` missing function (called at 11 places, now defined)
+H) **BUG-8:** Auto-select and advance when exactly 1 option available in node/engine card lists
+
+**Playwright verified:** All 8 fixes confirmed via browser automation testing. Validation guards correctly prevent navigation past incomplete steps with descriptive error messages.
+
+**Design note:** `loadPresetTemplateData()` uses async AJAX to load presets — presets appear after Step 3 entry but may not render before the first snapshot due to async timing. This is expected behavior, not a bug.
+
+### 21. Truncated Output → False Conclusion (2026-07-31)
+When examining directories or large outputs, DO NOT use `head -N` or bash `limit` to infer file presence. A truncated listing is visually indistinguishable from a short one. Use the `Read` tool (returns full directory contents) or explicit count checks (`find <dir> -maxdepth 1 -type f | wc -l`) before concluding files are missing.
+
+### 22. SystemExit in Flask View Handlers → HTTP_CODE:000 (2026-07-31)
+`SystemExit` inherits from `BaseException`, NOT `Exception`. When raised inside a Flask view handler, it bypasses `except Exception` blocks and propagates to the WSGI server (Waitress), which cannot write a complete HTTP response → client sees `HTTP_CODE:000` timeout instead of JSON error.
+
+**Fix pattern:** Instead of `raise SystemExit(1)`, populate an error field in the return dict and return normally. Callers check `r.get("error")` and pass to `error_response()`. For staged chain playbooks, use a custom `Exception` subclass (e.g., `PlaybookIntegrityError(Exception)`) which gets properly caught by callers.

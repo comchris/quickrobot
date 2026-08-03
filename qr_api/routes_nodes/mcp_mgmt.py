@@ -54,7 +54,7 @@ def api_mcp_settings():
             env_cfg = _lec(os.getcwd())
             mcp_host_val = env_cfg["QUICKROBOT_MCP_HOST"]
             mcp_autostart_val = str(env_cfg.get("QUICKROBOT_MCP_AUTOSTART", "true")).lower() in ("true", "1")
-            mcp_token_val = env_cfg.get("QUICKROBOT_API_KEY", "")
+            mcp_token_val = env_cfg.get("QUICKROBOT_MCP_TOKEN", "")
         except FileNotFoundError:
             mcp_host_val = _CONFIG["host"]
             mcp_autostart_val = True
@@ -99,7 +99,7 @@ def api_mcp_settings():
             env_cfg = _lec(os.getcwd())
             mcp_host_val = co.get("mcp_host") or env_cfg["QUICKROBOT_MCP_HOST"]
             mcp_autostart_val = str(env_cfg.get("QUICKROBOT_MCP_AUTOSTART", "true")).lower() in ("true", "1")
-            mcp_token_val = env_cfg.get("QUICKROBOT_API_KEY", "")
+            mcp_token_val = env_cfg.get("QUICKROBOT_MCP_TOKEN", "")
         except FileNotFoundError:
             mcp_host_val = co.get("mcp_host") or _CONFIG["host"]
             mcp_autostart_val = True
@@ -293,12 +293,3 @@ def api_mcp_status():
 
     status = engine.get_status(inst["id"], _CONFIG["db_path"])
     return success_single(status)
-
-
-def api_app_status():
-    """Return app-level status + instance summary for WebUI consumption.
-
-    Adds global_state (computed from active-host instances) and
-    global_state_rgb (server-computed color string).
-    """
-    pass

@@ -26,17 +26,22 @@ import subprocess
 import sys
 
 logger = logging.getLogger(__name__)
-from lib.qr_engine_ids import QR_DEFAULT_LOCALHOST, QR_ENGINE_PORT_DEFAULTS
+from lib.qr_engine_ids import (
+    QR_DEFAULT_LOCALHOST, QR_ENGINE_PORT_DEFAULTS,
+    QR_ENGINE_SUBPROCESS_NAME,
+    QR_JOB_DEPLOY, QR_JOB_RESTART, QR_JOB_UNDEPLOY,
+    QR_STATE_COMPILING, QR_STATE_UPDATING, QR_STATE_BUILD_ERROR,
+)
 from engine.base import BaseEngine
 
 
 CAPABILITIES = {
-    "name": "subprocess",
+    "name": QR_ENGINE_SUBPROCESS_NAME,
     "display_name": "local subprocess",
     "supports_models": False,
     "supports_presets": False,
     "max_instances": 99,
-    "supported_jobs": ["deploy", "undeploy", "restart"],
+    "supported_jobs": [QR_JOB_DEPLOY, QR_JOB_UNDEPLOY, QR_JOB_RESTART],
 }
 
 
@@ -44,7 +49,7 @@ class QrSubprocessEngine(BaseEngine):
     """Manages arbitrary local processes via subprocess.Popen with PID tracking."""
 
     def __init__(self):
-        self._name = "subprocess"
+        self._name = QR_ENGINE_SUBPROCESS_NAME
 
     @classmethod
     def get_state_machine(cls):
@@ -55,8 +60,8 @@ class QrSubprocessEngine(BaseEngine):
         """
         from lib.lib_engine_states import build_state_machine as _bsm
         return _bsm(
-            removals=["compiling", "updating", "build_error"],
-            extensions={"running": ["configuring"]},
+            removals=[QR_STATE_COMPILING, QR_STATE_UPDATING, QR_STATE_BUILD_ERROR],
+            extensions={QR_STATE_RUNNING: [QR_STATE_CONFIGURING]},
         )
 
     def get_status(self, instance_id, db_path=None):

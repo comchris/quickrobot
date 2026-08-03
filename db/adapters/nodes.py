@@ -67,8 +67,8 @@ def add_node(db_path, name, hostname, transport="ansible", ansible_user=None,
                 """INSERT INTO nodes
                    (name, hostname, transport, ansible_user, ssh_port,
                     ansible_key_path, ansible_inventory_host, model_base_path,
-                    ipv4_address, ipv6_address)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    ipv4_address, ipv6_address, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unknown')""",
                 (name, hostname, transport, effective_user, ssh_port,
                  ansible_key_path, ansible_inventory_host, model_base_path,
                  ipv4_address, ipv6_address),
@@ -194,7 +194,7 @@ def update_node(db_path, node_id, **fields):
                "status", "status_reason", "capabilities", "available_devices",
                "cpu_cores", "ram_mb", "os", "node_build_state",
                "gpu_name", "gpu_type", "gpu_memory_mb",
-               "ipv4_address", "ipv6_address"}
+               "ipv4_address", "ipv6_address", "model_base_path"}
     updates = {k: v for k, v in fields.items() if k in allowed}
     dropped = {k: v for k, v in fields.items() if k not in allowed}
     if not updates:

@@ -1,0 +1,21 @@
+# @playbook_id: TEMPLATE_SUBPROCESS_SERVICE
+# @version: 1
+# systemd service unit for subprocess engine instance
+# QR_UUID={{ instance_uuid }}
+[Unit]
+Description=quickrobot subprocess service {{ instance_name }}
+After=network.target
+
+[Service]
+Type=simple
+User={{ remote_node_user }}
+WorkingDirectory={{ install_dir | default('/opt/quickrobot/binary-templates/subprocess') }}
+EnvironmentFile={{ env_file }}
+ExecStart={{ binary_path }} $QR_CLI_ARGS_JOINED
+Restart={{ restart_policy }}
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

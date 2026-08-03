@@ -124,3 +124,39 @@ New infra-level HTTP proxy engine for in-prompt timestamp injection. Transparent
 
 **Build Infrastructure & Testing**
 `pyproject.toml` created with setuptools build system, editable install (`pip install -e .`), and CLI entry point. All 12 direct dependencies pinned to exact versions. Full pytest suite: 105 tests across 6 tiers (86 pass, 16 fail, 3 skip — failures are pre-existing route bugs surfaced by new test harness). CORS middleware added to API server with configurable origins via `QUICKROBOT_API_CORS_ORIGINS`.
+
+---
+
+### v0.11 (2026-07-25 — 2026-08-02)
+
+**SSOT Final Migration — Complete String Constant Coverage**
+Final sweep migrated ~200 hardcoded string literals across 20+ files to QR_STATE_*, QR_JOB_*, QR_STAGE_*, and QR_ENGINE_* constants. Resolved: `lib_runner.py` (40+ stage strings in DEFAULT_STAGE_CHAINS, 8 health_check literals in SQL INSERTs), instance routes (30+ state comparisons in deploy_lifecycle.py, 27 action map keys in status_queries.py), engine modules (6 __init__.py files with CAPABILITIES names and supported_jobs), and all lib/ state transition logic. Added 4 missing stage constants (binary_download, reboot, apt_update, apt_upgrade) and 4 node path constants to `qr_engine_ids.py`. Zero remaining hardcoded stage/state strings in core lifecycle code.
+
+**Binary Download Template System**
+Full binary download chain implemented across 3 engine types: llama.cpp (CPU/Vulkan), subprocess (Prometheus Node Exporter), and universal (iperf3). New `engine_binaries` table tracks version, platform, download URL, SHA256 checksum, and extraction metadata. Chain variant `QR_JOB_DEPLOY_BINARY` replaces git+cmake stages with single binary_download stage (5 stages vs 7 for full deploy). Metadata persistence: config_override stores template metadata on create, re-deploy refreshes from DB. Checksum verification: all deploy_binary playbooks verify file size + SHA256 before extraction. Undeploy chains preserve shared template cache. WebUI `/webui/engine_binaries` page with sortable columns, filter sidebar, and per-engine dropdown.
+
+**Node Error Diagnostics — Structured Failure Classification**
+Node creation failures now return actionable, machine-parseable errors instead of generic "Node validation failed". New `_extract_node_error()` helper in `lib_ansible_runner.py` walks ansible play/task results for structured error data. `_classify_node_error()` categorizes into 7 typed diagnostics: dns_resolution, connection_refused, connection_timeout, ssh_auth, python_missing, task_failure, not_found. Response format includes `detail.diagnostic.failure_type` + hostname + suggestion. Python 3 preflight check added to validate.yml — fails early with installation instructions if Python is missing on remote host.
+
+**MCP Dual-Token Auth + CORS Header Fix**
+Separated MCP SSE token from API proxy key for clearer auth boundaries: `QUICKROBOT_MCP_TOKEN` gates `/sse` endpoint (port 8040), `QUICKROBOT_API_KEY` gates all `/api/v1/*` routes. Token fallback to API_KEY for backward compatibility. New `QUICKROBOT_MCP_KEY_DISABLED` env var mirrors API_KEY_DISABLED pattern. Fixed MCP SSE 401 response missing `Access-Control-Allow-Origin` header — cross-origin browsers now read "unauthorized" instead of opaque "failed to fetch". Added `Authorization` header acceptance alongside `X-MCP-Token` for opencode compatibility.
+
+**Create Instance Wizard Overhaul**
+Replaced flat form with 6-step progressive wizard: (1) Node cards with hardware info and search filter, (2) Engine cards with category badges and descriptions, (3) Binary Template selection (separate from presets), (4) Preset selection with model/quantization info, (5) Name auto-proposal, (6) Dynamic Engine Config Editor — fetches engine configs from API, renders grouped into Build/Runtime/GGML/System subsections with inline override toggles. Auto-advance when single option available. Validation guards prevent step skipping. "Start after deploy" checkbox defaults to checked.
+
+**Undeploy Async + Rebuild Chain Fix**
+`POST /instances/<id>/undeploy` switched from sync blocking (30s HTTP timeout on slow nodes) to async mode — returns job_id immediately, scheduler executes SSH+systemd operations in background. `Rebuild job` chain corrected: no longer includes `source_llama` stage (git pull) — rebuild now compiles existing source only, not "pull then compile". `_get_stage_chain()` null-safe guard added for node-level operations with instance_id=None.
+
+**Seed File Integrity — Verification Watchdog**
+Root cause identified and fixed: `engine_binaries` table missing `metadata` column in base_v011.sql caused seed import to silently fail at INSERT time, skipping all subsequent tables (engine_prompts, benchmark_prompts). Added `metadata TEXT DEFAULT '{}'` column. Added `_verify_seed_counts()` function in startup pipeline that checks row counts for all seeded tables post-import — FATAL on critical table failures, WARN on others. 3 default benchmark prompts added (Count to 10, Count to 100, Short Reasoning).
+
+**.env.sample Redesign + Python Dotenv Migration**
+`.quickrobot.env.sample` redesigned: 255 → 190 lines (-26%), tighter layout with inline default documentation. Seed checksum/size set to actual values (not CHANGE_ME) — fresh install flow copies sample → .env without replacing these keys, so they must match disk file. Replaced two hand-rolled `.quickrobot.env` parsers (32 lines total) with single `load_dotenv()` call per file via `python-dotenv`. PID path deduplicated into `lib/lib_pid.py`. Root guard (`os.getuid() == 0`) extracted to `lib/lib_platform.py::check_nonroot()` with Windows compatibility.
+
+**Log System + UI Improvements**
+Instance list Jobs column link fixed: now filters by node_id (all host activity) instead of instance_id (single instance). Logs page auto-refresh "Off" dropdown value restored — JavaScript `||` operator was treating `0` as falsy, falling back to 30s refresh. Build number extraction regex widened from `[a-f0-9]{7}` (7 hex chars only) to `[a-zA-Z0-9][a-zA-Z0-9._-]*` (handles git tags like `v2740`). Global logger factory (`lib/lib_logging.py`) replaces 60+ print() calls across 9 files with structured dual-handler logging (stderr + file).
+
+**Global State & Build Fixes**
+Build lock timeout changed from hardcoded `300` to `QR_TIMEOUT_DEFAULT`. Node path literals (`/opt/quickrobot/...`) replaced with QR_NODE_* constants. Migration files consolidated: `010_base.sql` → `base_v011.sql`, seed file moved from `data/_seed/` → `db/migrations/`. Seed checksum/size in `.env.sample` confirmed as SOURCE OF TRUTH for fresh installs (not per-deployment secrets).
+
+---

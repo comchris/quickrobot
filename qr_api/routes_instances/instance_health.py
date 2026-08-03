@@ -17,7 +17,14 @@ from lib.qr_engine_ids import (
 )
 from lib.lib_constants import DEFAULT_ANSIBLE_USER
 from db.sqlite import pool as db_pool
-from lib.lib_engine_states import HEALTH_CHECK_STATES
+from lib.lib_engine_states import HEALTH_CHECK_STATES, QR_STATE_RUNNING, QR_STATE_STARTING, QR_STATE_ERROR, QR_STATE_DEPLOYED, QR_STATE_STOPPED, QR_STATE_UPDATING, QR_STATE_BUILD_ERROR, QR_STATE_DEPLOYING, QR_STATE_CONFIGURING, QR_STATE_STOPPING, QR_STATE_LOADING
+
+# Log query limits — named constants for consistency across log endpoints
+DEFAULT_LOG_LIMIT = 50
+MAX_LOG_LIMIT = 200
+
+# Flask dev default port — used as fallback in port scanning (not a quickrobot config)
+FLASK_DEV_PORT = 5000
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +36,7 @@ def api_instance_logs(inst_id):
     if inst is None:
         return error_response("RESOURCE_NOT_FOUND", f"Instance {inst_id} not found")
 
-    limit = min(int(request.args.get("limit", 50)), 200)
+    limit = min(int(request.args.get("limit", DEFAULT_LOG_LIMIT)), MAX_LOG_LIMIT)
     offset = int(request.args.get("offset", 0))
     logs = get_instance_logs_paginated(_CONFIG["db_path"], inst_id, limit=limit, offset=offset)
     return jsonify({"status": "ok", "total": logs["total"], "limit": limit,
@@ -168,55 +175,55 @@ def api_instance_status(inst_id, remote=False):
             # State transition logic from former api_query_status()
             if result.get("model_loading"):
                 result["model_loading"] = True
-            elif result.get("alive") and not result.get("model_loading") and cur_state == "starting":
+            elif result.get("alive") and not result.get("model_loading") and cur_state == QR_STATE_STARTING:
                 try:
-                    _ts(_CONFIG["db_path"], inst_id, "running")
-                    new_state = "running"
-                    result["new_state"] = "running"
+                    _ts(_CONFIG["db_path"], inst_id, QR_STATE_RUNNING)
+                    new_state = QR_STATE_RUNNING
+                    result["new_state"] = QR_STATE_RUNNING
                 except Exception as _e:
                     logger.debug("health check state transition failed: inst=%d cur_state=%s → running", inst_id, cur_state, _e)
-            elif result.get("alive") and not result.get("model_loading") and cur_state == "loading":
+            elif result.get("alive") and not result.get("model_loading") and cur_state == QR_STATE_LOADING:
                 try:
-                    _ts(_CONFIG["db_path"], inst_id, "running")
-                    new_state = "running"
-                    result["new_state"] = "running"
+                    _ts(_CONFIG["db_path"], inst_id, QR_STATE_RUNNING)
+                    new_state = QR_STATE_RUNNING
+                    result["new_state"] = QR_STATE_RUNNING
                 except Exception as _e:
                     logger.debug("health check state transition failed: inst=%d cur_state=%s → running", inst_id, cur_state, _e)
-            elif result.get("alive") and not result.get("model_loading") and cur_state in ("deployed", "stopped"):
+            elif result.get("alive") and not result.get("model_loading") and cur_state in (QR_STATE_DEPLOYED, QR_STATE_STOPPED):
                 try:
-                    _ts(_CONFIG["db_path"], inst_id, "running")
-                    new_state = "running"
-                    result["new_state"] = "running"
+                    _ts(_CONFIG["db_path"], inst_id, QR_STATE_RUNNING)
+                    new_state = QR_STATE_RUNNING
+                    result["new_state"] = QR_STATE_RUNNING
                 except Exception as _e:
                     logger.debug("health check state transition failed: inst=%d cur_state=%s → running", inst_id, cur_state, _e)
-            elif result.get("alive") and not result.get("model_loading") and cur_state in ("updating", "build_error"):
+            elif result.get("alive") and not result.get("model_loading") and cur_state in (QR_STATE_UPDATING, QR_STATE_BUILD_ERROR):
                 try:
-                    _ts(_CONFIG["db_path"], inst_id, "running")
-                    new_state = "running"
-                    result["new_state"] = "running"
+                    _ts(_CONFIG["db_path"], inst_id, QR_STATE_RUNNING)
+                    new_state = QR_STATE_RUNNING
+                    result["new_state"] = QR_STATE_RUNNING
                 except Exception as _e:
                     logger.debug("health check state transition failed: inst=%d cur_state=%s → running", inst_id, cur_state, _e)
-            elif result.get("alive") and not result.get("model_loading") and cur_state in ("deploying", "configuring"):
+            elif result.get("alive") and not result.get("model_loading") and cur_state in (QR_STATE_DEPLOYING, QR_STATE_CONFIGURING):
                 try:
-                    _ts(_CONFIG["db_path"], inst_id, "running")
-                    new_state = "running"
-                    result["new_state"] = "running"
+                    _ts(_CONFIG["db_path"], inst_id, QR_STATE_RUNNING)
+                    new_state = QR_STATE_RUNNING
+                    result["new_state"] = QR_STATE_RUNNING
                 except Exception as _e:
                     logger.debug("health check state transition failed: inst=%d cur_state=%s → running", inst_id, cur_state, _e)
-            elif result.get("alive") and not result.get("model_loading") and cur_state in ("error", "build_error"):
+            elif result.get("alive") and not result.get("model_loading") and cur_state in (QR_STATE_ERROR, QR_STATE_BUILD_ERROR):
                 try:
-                    _ts(_CONFIG["db_path"], inst_id, "running")
-                    new_state = "running"
-                    result["new_state"] = "running"
+                    _ts(_CONFIG["db_path"], inst_id, QR_STATE_RUNNING)
+                    new_state = QR_STATE_RUNNING
+                    result["new_state"] = QR_STATE_RUNNING
                 except Exception as _e:
                     logger.debug("health check state transition failed: inst=%d cur_state=%s → running", inst_id, cur_state, _e)
-            elif not result.get("alive") and cur_state in ("running", "updating", "build_error", "stopping"):
+            elif not result.get("alive") and cur_state in (QR_STATE_RUNNING, QR_STATE_UPDATING, QR_STATE_BUILD_ERROR, QR_STATE_STOPPING):
                 if not _active_jobs and not _recently_completed:
                     _error_reason = (result.get("error", "") or f"Health check failed: {cur_state} → error")[:500]
                     try:
-                        _ts(_CONFIG["db_path"], inst_id, "error")
-                        new_state = "error"
-                        result["new_state"] = "error"
+                        _ts(_CONFIG["db_path"], inst_id, QR_STATE_ERROR)
+                        new_state = QR_STATE_ERROR
+                        result["new_state"] = QR_STATE_ERROR
                         try:
                             from db.sqlite import pool as _pool2
                             with _pool2(_CONFIG["db_path"]) as _crash_conn:
@@ -369,7 +376,7 @@ def api_system_instance_status(inst_id):
                 pass  # Port is open, confirmed
             else:
                 # Try common fallback ports: SSOT default (historical), HTTP proxy/llama_server port, Flask dev default
-                for fallback_port in [QR_ENGINE_PORT_DEFAULTS["quickrobot-api"], QR_ENGINE_PORT_DEFAULTS["llama_server"], 5000]:
+                for fallback_port in [QR_ENGINE_PORT_DEFAULTS["quickrobot-api"], QR_ENGINE_PORT_DEFAULTS["llama_server"], FLASK_DEV_PORT]:
                     if fallback_port != info["port"]:
                         s2 = _sock2.socket(_sock2.AF_INET, _sock2.SOCK_STREAM)
                         r2 = s2.connect_ex((QR_DEFAULT_LOCALHOST, fallback_port))
@@ -395,7 +402,7 @@ def api_system_instance_status(inst_id):
             "alive": False,
         }
         if not web_port:
-            raise KeyError("web_ui_port not in config_override or engine_configs for quickrobot-webui")
+            return error_response("VALIDATION_ERROR", "web_ui_port not in config_override or engine_configs for quickrobot-webui")
         port = int(web_port) if web_port else 0
         import urllib.request as _ur
         try:

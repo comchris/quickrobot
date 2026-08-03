@@ -41,6 +41,11 @@ from lib.qr_engine_ids import (
     QR_ENGINE_WEBUI_NAME, QR_ENGINE_MCP_NAME, QR_ENGINE_SCHEDULER_NAME,
     QR_ENGINE_PORT_DEFAULTS,
     QR_MCP_DEFAULT_AUTOSTART,
+    QR_STATE_BUILD_ERROR, QR_STATE_DEPLOYED, QR_STATE_ERROR,
+    QR_STATE_RUNNING, QR_STATE_STARTING, QR_STATE_STOPPED,
+    QR_STATE_UNCONFIGURED,
+    QR_NODE_BUILD_DIR,
+    QR_CMAKE_CACHE_FILE,
     _QR_SYSTEM_NAMES,  # System engine name tuples for iteration
 )
 
@@ -150,12 +155,32 @@ def phase0_mode_flags(args):
         logger.info("[qr] Exit mode: start, spawn system engines, then exit (no Flask loop)")
 
     # Prod-mode enforcement: QUICKROBOT_API_KEY required in non-dev modes
+    # Unless explicitly disabled via QUICKROBOT_API_KEY_DISABLED=true
     if _CONFIG["pb_mode"] != "dev":
-        api_key = os.environ.get("QUICKROBOT_API_KEY", "").strip()
-        if not api_key:
-            logger.error("[qr] FATAL: QUICKROBOT_API_KEY is required in production mode.")
-            logger.error("[qr] Generate with: python3 -c \"import secrets; print(secrets.token_urlsafe(32))\"")
-            sys.exit(1)
+        disabled = os.environ.get("QUICKROBOT_API_KEY_DISABLED", "false").lower() in ("true", "1", "yes")
+        if not disabled:
+            api_key = os.environ.get("QUICKROBOT_API_KEY", "").strip()
+            if not api_key:
+                logger.error("[qr] FATAL: QUICKROBOT_API_KEY is required in production mode.")
+                logger.error("[qr] Generate with: python3 -c \"import secrets; print(secrets.token_urlsafe(32))\"")
+                sys.exit(1)
+            if api_key == "CHANGE_ME":
+                logger.error("[qr] FATAL: QUICKROBOT_API_KEY is still 'CHANGE_ME' (placeholder). Set a real key or enable QUICKROBOT_API_KEY_DISABLED=true.")
+                logger.error("[qr] Generate with: python3 -c \"import secrets; print(secrets.token_urlsafe(32))\"")
+                sys.exit(1)
+
+        # MCP SSE token enforcement — same placeholder check pattern
+        mcp_disabled = os.environ.get("QUICKROBOT_MCP_KEY_DISABLED", "false").lower() in ("true", "1", "yes")
+        if not mcp_disabled:
+            mcp_token = os.environ.get("QUICKROBOT_MCP_TOKEN", "").strip()
+            if not mcp_token:
+                logger.error("[qr] FATAL: QUICKROBOT_MCP_TOKEN is required in production mode.")
+                logger.error("[qr] Generate with: python3 -c \"import secrets; print(secrets.token_urlsafe(32))\"")
+                sys.exit(1)
+            if mcp_token == "CHANGE_ME":
+                logger.error("[qr] FATAL: QUICKROBOT_MCP_TOKEN is still 'CHANGE_ME' (placeholder). Set a real token or enable QUICKROBOT_MCP_KEY_DISABLED=true.")
+                logger.error("[qr] Generate with: python3 -c \"import secrets; print(secrets.token_urlsafe(32))\"")
+                sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +243,11 @@ def phase1_config(args):
     db_dir = os.path.dirname(_CONFIG["db_path"])
     if db_dir and not os.path.isdir(db_dir):
         os.makedirs(db_dir, exist_ok=True)
+
+    # Create logs directory if it does not exist
+    logs_dir = os.path.join(_project_root, "logs")
+    if not os.path.isdir(logs_dir):
+        os.makedirs(logs_dir, exist_ok=True)
 
     return _CONFIG["db_path"]
 
@@ -359,13 +389,48 @@ def phase4_pid_port():
     """Manage PID file and verify port availability."""
     from qr_api import _check_pid_file, _write_pid_file, _kill_existing
 
-    if _CONFIG.get("replace"):
-        _kill_existing(port=_CONFIG["api_port"])
+    # Check for execv restart marker — if present, the restart thread has
+    # already removed the PID file. Skip the stale check to avoid false positive.
+    _just_restarted = os.environ.get("QR_RESTART_MARKER") == "1"
+    print(f"[qr] phase4: env={os.environ.get('QR_RESTART_MARKER','?')} just_restarted={_just_restarted}", flush=True)
+
+    # Debug: check if PID file exists (use same path as _kill_existing)
+    import lib.lib_pid as _lib_pid
+    _pid_path = _lib_pid.get_pid_path(_CONFIG.get("db_path", "").replace("/quickrobot.db", ""))
+    _pid_exists = os.path.exists(_pid_path)
+    _pid_content = "?"
+    if _pid_exists:
+        try:
+            with open(_pid_path) as f:
+                _pid_content = f.read().strip()
+        except:
+            pass
+    print(f"[qr] phase4: pid_file_exists={_pid_exists} content={_pid_content}", flush=True)
+
+    if _CONFIG.get("replace") or _just_restarted:
+        print(f"[qr] phase4: skipping PID check (replace={_CONFIG.get('replace')} restarted={_just_restarted})", flush=True)
+        # Only kill existing process for replace mode (not restart).
+        # During execv restart, the old process is being intentionally replaced —
+        # the PID file may still exist but the old process will die with execv.
+        if not _just_restarted:
+            _kill_existing(port=_CONFIG["api_port"])
     else:
         pid, msg = _check_pid_file()
         if pid:
             print(msg)
             sys.exit(1)
+
+    # Clean up the restart marker/env var (new process won't need it)
+    _marker_path = os.path.join(os.getcwd(), "data", "_restart_marker")
+    if _just_restarted:
+        try:
+            os.remove(_marker_path)
+        except OSError:
+            pass
+        try:
+            del os.environ["QR_RESTART_MARKER"]
+        except KeyError:
+            pass
 
     _write_pid_file()
 
@@ -517,7 +582,7 @@ def _auto_provision_system_instances():
                 except ImportError:
                     psutil_available = False
 
-            if inst.get("state") not in ("running", "starting"):
+            if inst.get("state") not in (QR_STATE_RUNNING, QR_STATE_STARTING):
                 if not pid_alive:
                     # PID missing or dead — leave state alone.
                     # The deferred thread will start the subprocess via engine.execute()
@@ -540,7 +605,7 @@ def _auto_provision_system_instances():
                 if not auto_start_val:
                     # Don't force engine to running state — let user start manually
                     continue
-                _ui(db_path, inst["id"], state="running")
+                _ui(db_path, inst["id"], state=QR_STATE_RUNNING)
                 changed = True
                 print(f"Restored system-managed instance {inst['name']} state to 'running'")
         if changed:
@@ -710,7 +775,7 @@ def recover_stale_instances():
 
         if not nd or nd.get("status") != "active":
             try:
-                transition_state(db_path, inst_id, "error")
+                transition_state(db_path, inst_id, QR_STATE_ERROR)
             except Exception as _e:
                 logger.debug("transition error failed for instance %d: %s", inst_id, _e)
                 pass
@@ -719,11 +784,11 @@ def recover_stale_instances():
         # Node is active — was this mid-build? Check if cmake cache exists.
         # For safety, mark as build_error (user can retry deploy).
         node_short = (nd.get("hostname") or nd.get("name", "")).split(".")[0]
-        cmake_cache = "/opt/quickrobot/llama.cpp/build/CMakeCache.txt"
+        cmake_cache = _os.path.join(QR_NODE_BUILD_DIR, QR_CMAKE_CACHE_FILE)
         cache_exists = _os.path.exists(cmake_cache)
 
         try:
-            transition_state(db_path, inst_id, "build_error")
+            transition_state(db_path, inst_id, QR_STATE_BUILD_ERROR)
             be_count += 1
         except Exception as _e:
             logger.debug("transition build_error failed for instance %d: %s", inst_id, _e)
@@ -778,14 +843,14 @@ def recover_subprocess_instances(db_path):
         if alive:
             # Process alive — restore running state if needed
             # Subprocess engine: error→starting→running (no direct error→running)
-            if state != "running":
+            if state != QR_STATE_RUNNING:
                 try:
-                    _ts(db_path, inst_id, "starting")
+                    _ts(db_path, inst_id, QR_STATE_STARTING)
                 except Exception as _e:
                     logger.debug("subprocess transition starting failed for %d: %s", inst_id, _e)
                     pass
                 try:
-                    _ts(db_path, inst_id, "running")
+                    _ts(db_path, inst_id, QR_STATE_RUNNING)
                     print(f"[qr] Recovered subprocess {inst_id} (PID {pid} alive, restored to 'running')")
                 except Exception as _e:
                     logger.debug("subprocess transition running failed for %d: %s", inst_id, _e)
@@ -803,8 +868,8 @@ def recover_subprocess_instances(db_path):
             if sob_bool:
                 # Auto-restart — transition to valid state then start
                 try:
-                    # Try "stopped" first (works for deployed/running states)
-                    _ts(db_path, inst_id, "stopped")
+                    # Try QR_STATE_STOPPED first (works for deployed/running states)
+                    _ts(db_path, inst_id, QR_STATE_STOPPED)
                 except Exception as _e:
                     logger.debug("subprocess transition stopped (autostart) failed for %d: %s", inst_id, _e)
                     pass  # State machine may not allow this from current state — execute() handles it
@@ -819,7 +884,7 @@ def recover_subprocess_instances(db_path):
             else:
                 # Just mark as stopped
                 try:
-                    _ts(db_path, inst_id, "stopped")
+                    _ts(db_path, inst_id, QR_STATE_STOPPED)
                     print(f"[qr] Subprocess {inst_id} (PID {pid}) dead, start_on_boot=false → 'stopped'")
                 except Exception as _e:
                     logger.debug("subprocess transition stopped (dead) failed for %d: %s", inst_id, _e)
@@ -929,8 +994,8 @@ def _start_system_engine(db_path, engine_name):
         try:
             from db.adapters.instances import transition_state
             current = _gi(db_path, inst["id"])
-            if current and current.get("state") == "unconfigured":
-                transition_state(db_path, inst["id"], "deployed")
+            if current and current.get("state") == QR_STATE_UNCONFIGURED:
+                transition_state(db_path, inst["id"], QR_STATE_DEPLOYED)
         except Exception as _e:
             logger.debug("transition deployed (existing process) failed for instance %d: %s", inst["id"], _e)
             pass

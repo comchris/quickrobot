@@ -1,0 +1,92 @@
+# @name: Binary Download & Install (universal)
+# @playbook_id: deploy_binary_universal
+# @version: 1
+# @timeout: 300
+# Downloads pre-built binary for universal engine, extracts and installs to target path
+- hosts: "{{ inventory_host | default('localhost') }}"
+  become: yes
+  gather_facts: no
+
+  vars:
+    _target_base: "{{ binary_target_path | default('/opt/quickrobot/binary-templates/') }}"
+    _engine_type: "{{ binary_engine_type | default('universal') }}"
+    _version: "{{ binary_version | default('unknown') }}"
+    _platform: "{{ binary_platform | default('unknown') }}"
+    _binary_name: "{{ binary_binary_name | default('') }}"
+    _extract_type: "{{ binary_extract_type | default('tar.gz') }}"
+    _checksum: "{{ binary_checksum | default('') }}"
+    _download_url: "{{ binary_download_url | default('') }}"
+    _target_dir: "{{ _target_base | replace('{engine_type}', _engine_type) | replace('{version}', _version) | replace('{platform}', _platform) }}"
+
+  tasks:
+    - name: Create target directory
+      ansible.builtin.file:
+        path: "{{ _target_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Check if binary already exists with correct checksum
+      ansible.builtin.stat:
+        path: "{{ _target_dir }}{{ _binary_name }}"
+        get_checksum: yes
+        checksum_algorithm: sha256
+      register: _existing_binary
+
+    - name: Skip download if binary verified
+      ansible.builtin.debug:
+        msg: "Binary already verified at {{ _target_dir }}{{ _binary_name }} (checksum {{ _existing_binary.stat.checksum }})"
+      when: (_existing_binary.stat.checksum is defined) and (_checksum | length > 0) and (_existing_binary.stat.checksum == _checksum)
+
+    - name: Fail if checksum not provided for new download
+      ansible.builtin.fail:
+        msg: "binary_checksum not set for template (engine={{ _engine_type }}, version={{ _version }}). Cannot download without integrity verification."
+      when: (_existing_binary.stat.checksum is not defined or _existing_binary.stat.checksum != _checksum) and (_checksum | length == 0)
+
+    - name: Download archive
+      ansible.builtin.get_url:
+        url: "{{ _download_url }}"
+        dest: "{{ _target_dir }}archive.{{ _extract_type }}"
+        timeout: 300
+        validate_certs: yes
+      when: (_existing_binary.stat.checksum is not defined) or (_checksum | length == 0) or (_existing_binary.stat.checksum != _checksum)
+
+    - name: Verify checksum (direct binary)
+      ansible.builtin.command:
+        cmd: "echo '{{ _checksum }}  {{ _target_dir }}{{ _binary_name }}.tmp' | sha256sum -c"
+      register: _cksum_direct
+      changed_when: false
+      failed_when: _cksum_direct.rc != 0
+      when: (_extract_type == 'none') and (_checksum | length > 0) and (_existing_binary.stat.checksum is not defined or _existing_binary.stat.checksum != _checksum)
+
+    - name: Extract tar.gz archive
+      ansible.builtin.unarchive:
+        src: "{{ _target_dir }}archive.{{ _extract_type }}"
+        dest: "{{ _target_dir }}"
+        remote_src: yes
+        extra_opts: ["--strip-components=1"]
+      when: (_extract_type == 'tar.gz') and (_existing_binary.stat.checksum is not defined or _existing_binary.stat.checksum != _checksum)
+
+    - name: Verify extracted archive checksum (tar.gz)
+      ansible.builtin.command:
+        cmd: "echo '{{ _checksum }}  {{ _target_dir }}{{ _binary_name }}' | sha256sum -c"
+      register: _cksum_tar
+      changed_when: false
+      failed_when: _cksum_tar.rc != 0
+      when: (_extract_type == 'tar.gz') and (_checksum | length > 0) and (_existing_binary.stat.checksum is not defined or _existing_binary.stat.checksum != _checksum)
+
+    - name: Set executable permission
+      ansible.builtin.file:
+        path: "{{ _target_dir }}{{ _binary_name }}"
+        mode: '0755'
+
+    - name: Clean up archive files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ _target_dir }}archive.*"
+      when: _extract_type != 'none'
+
+    - name: Report installation
+      ansible.builtin.debug:
+        msg: "Universal binary {{ _binary_name }} v{{ _version }} installed to {{ _target_dir }}"

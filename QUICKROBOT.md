@@ -18,7 +18,7 @@ Current release: **v0.10**.
 ├── data/                  # SQLite database + engine state files
 ├── db/                    # Database adapter + migration runner
 │   ├── adapters/          # Per-entity DB operations
-│   └── migrations/        # SQL migration files (010_base.sql)
+│   └── migrations/        # SQL migration files (base_v011.sql)
 ├── docs/                  # Design specs, phase documentation
 ├── engine/                # Engine implementations
 │   ├── base.py            # BaseEngine class
@@ -49,11 +49,11 @@ Current release: **v0.10**.
 
 ## Seed File — Chain-of-Trust Verification
 
-The seed file (`data/_seed/seed_v010.sql`) contains `INSERT OR REPLACE` statements for: engine_types, engine_presets, engine_models, playbook_registry, engine_prompts, benchmark_prompts. Engine configs (66 rows) moved to base migration `010_base.sql`.
+The seed file (`db/migrations/seed_v011.sql`) contains `INSERT OR REPLACE` statements for: engine_types, engine_presets, engine_models, playbook_registry, engine_prompts, benchmark_prompts. Engine configs (66 rows) moved to base migration `base_v011.sql`.
 
 ### Verification Flow (fresh DB creation)
 1. **Pre-flight:** Load `.quickrobot.env`, validate seed checksum+size BEFORE filesystem change → **HARD EXIT** if mismatch
-2. **Apply base schema:** `010_base.sql` creates all 25 tables (idempotent)
+2. **Apply base schema:** `base_v011.sql` creates all 25 tables (idempotent)
 3. **Seed import:** `import_seed_file()` executes seed SQL — ONE TIME ONLY on fresh DB creation
 4. **Engine discovery** → auto-registers engine types from `engine/` subdirectories
 5. **Auto-provision system instances** (API, WebUI, MCP, Scheduler)
@@ -140,7 +140,7 @@ All defined as `_QR_JOB_TYPES` in `qr_engine_ids.py`. Unknown types raise `Value
 | Job Type | Stages |
 |----------|--------|
 | deploy | Full staged chain (all 7 stages) |
-| rebuild | Source + compile + config only (skip deps, skip preflight) |
+| rebuild | Compile + config only (skip deps, skip source git pull) |
 | reconfigure | Config-only env update (single `config_env` stage) |
 | start | Single task — `service_start.yml` |
 | restart | Two tasks — `service_stop.yml` → `service_start.yml` |
@@ -232,6 +232,51 @@ The MCP server uses FastMCP with **traditional SSE transport** (`sse_app()`), NO
 Working config: `mcp.settings.json_response = False`, `fastmcp_app = mcp.sse_app()`.
 CORS middleware: `allow_origins=["*"]`, `allow_methods=["GET", "POST", "OPTIONS"]`.
 
+### MCP SSE Auth + CORS — Debugging Guide (MCP-20260730)
+
+The MCP SSE endpoint (`/sse`) is protected by a token auth wrapper (`_wrap_sse_for_auth()`). When token validation fails, the 401 response **includes `Access-Control-Allow-Origin: *`** so cross-origin browsers can read the error. Without this header, the browser silently shows "failed to fetch" instead of "unauthorized".
+
+**Token acceptance:** The wrapper accepts tokens via THREE methods (all equivalent):
+A) `?token=<value>` query parameter (EventSource/browser default — works with SSE clients)
+B) `X-MCP-Token: <value>` header (programmatic clients)
+C) `Authorization: <value>` header (opencode's default config format)
+
+**Common failure patterns:**
+
+| Symptom | Root Cause | Fix |
+|---------|-----------|-----|
+| Browser shows "failed to fetch" on `/sse` | Token mismatch OR CORS origin not in `QUICKROBOT_MCP_CORS_ORIGINS` | Check 1: `curl -v http://host:8040/sse?token=...` → expect 200. Check 2: `grep MCP_CORS_ORIGINS .env` |
+| 401 in browser (can read the error) | Token value mismatch between `.env` and client config | Align `QUICKROBOT_MCP_TOKEN` with what the client sends |
+| No CORS headers on 401 response | Old code before `access-control-allow-origin` added to auth wrapper (v0.10→v0.11) | Verify `qr_mcp_server.py:1086` has `b"access-control-allow-origin"` in the 401 headers list |
+| SSE connects but tools return errors | CORS allows the connection but API proxy token is wrong | MCP server's `_api_call()` uses `QUICKROBOT_API_KEY` (not `MCP_TOKEN`) for backend API calls |
+
+**Diagnostic flow:**
+```bash
+# Step 1: Verify token auth works (bypasses CORS entirely)
+curl -s http://host:8040/sse?token=YOUR_TOKEN --max-time 3
+# Expected: HTTP 200 + SSE stream begins
+
+# Step 2: Check if the calling origin is in allowed list
+grep MCP_CORS_ORIGINS .quickrobot.env
+# Should include the origin of the client (e.g., http://mintiger.lan:8080)
+
+# Step 3: Check CORS headers on response
+curl -s -D - -H "Origin: http://mintiger.lan:8080" http://host:8040/sse --max-time 3 | head -6
+# Should include: access-control-allow-origin: *
+
+# Step 4: Check MCP log for startup token info
+tail -5 logs/mcp.log | grep -i 'token\|sse'
+```
+
+### API execv Restart — Race Condition (API-RESTART-RACE, v0.11)
+The WebUI "Restart API" button can cause the API to die and never come back up. Known issues:
+
+A) **Marker removal race** — `quickrobot.py` removed `_restart_marker` before `phase4_pid_port()` could read it. Fixed by using env var `QR_RESTART_MARKER=1` instead.
+B) **PID file not removed fast enough** — Restart thread (`_shutdown_execv`) runs in a background thread. `execv` replaces the process instantly, potentially killing the thread mid-operation. PID file may still exist when new process starts.
+C) **`_kill_existing()` kills wrong process** — If PID file exists, `_kill_existing()` sends SIGTERM to whatever PID it reads. On restart this can be the old (already dead) PID OR accidentally the new process.
+
+**Current status:** Marker/env mechanism fixed and confirmed working. PID file removal timing still under investigation. Restart thread removes PID file at `lib_instances.py:1142-1144` BEFORE the 2-second sleep and execv, but `execv` may interrupt the thread before file sync completes.
+
 ---
 
 ## Configuration & Merge Chains
@@ -279,6 +324,27 @@ Left panel: llama-server list with state, split_mode, RPC count. Right panel: se
 
 ## Operational Rules
 
+### ENV.SAMPLE — .env.sample Sync Discipline (CRITICAL)
+**The `.quickrobot.env.sample` file is the public-facing template. It MUST stay in sync with `.quickrobot.env` after every config change.**
+
+Before committing any change to `.quickrobot.env`:
+1. Update `.quickrobot.env.sample` with matching new keys/values
+2. Verify no production secrets leaked into `.sample`:
+   - `QUICKROBOT_WEBUI_PASSWORD` should be `CHANGE_ME` (not the real password)
+   - `QUICKROBOT_MCP_TOKEN` should be `CHANGE_ME` (not a real token)
+   - `QUICKROBOT_API_KEY` should be `CHANGE_ME` (not a real key)
+   - LAN IPs in `.sample` should use loopback (`127.0.0.1`) or generic placeholders
+3. Before deploying or running regression tests, verify sample is current:
+   ```bash
+   diff .quickrobot.env .quickrobot.env.sample | head -40
+   # Expect ONLY intentional differences (production secrets, LAN IPs, seed checksums)
+   ```
+ 4. Seed file checksum/size in `.sample` are REAL values (source of truth for fresh installs). The fresh install flow copies `.sample` → `.env` without replacing these keys. `pre_validate_seed_checksum()` compares them against the actual seed file — mismatch = FATAL. On seed file changes: update both `.sample` AND `.env`.
+
+**Why this matters:** `.env.sample` is the first thing new devs, CI systems, and automated agents see. A leaked password or real token in `.sample` = exposed credential on push. A stale config key = broken fresh deploy from sample.
+
+---
+
 ### DB Creation Guard
 When DB file does not exist at startup: quickrobot creates a fresh database with base schema + seed data. All instances, nodes, ansible actions, build history are lost. `--init` flag is now deprecated (no-op).
 
@@ -324,14 +390,23 @@ Numeric value >= 10 → DEBUG, < 10 → WARNING. Falls back to legacy `QUICKROBO
 All 6 server entry points refuse to run as root via `os.getuid() == 0` guard. Non-interactive HTTP servers should not run as root.
 
 ### Security Model (v0.07+)
-quickrobot provides **layered authentication** designed for trusted local networks:
-- API key gatekeeper on all `/api/v1/*` routes (`QUICKROBOT_API_KEY`)
-- WebUI password login (`QUICKROBOT_WEBUI_PASSWORD`), rate-limited with failed-attempt logging
-- MCP auth via same `QUICKROBOT_API_KEY` token
-- MCP DNS rebinding protection configurable via `QUICKROBOT_MCP_DISABLE_DNS_REBINDING`
-- SSL/TLS optional — plain HTTP on all 3 ports by default
-- CORS enabled with wildcard origins (`*`) by default, configurable via `QUICKROBOT_API_CORS_ORIGINS`
-- RPC servers bind to `0.0.0.0` by default — use per-instance override for local-only
+ quickrobot provides **layered authentication** designed for trusted local networks:
+ - API key gatekeeper on all `/api/v1/*` routes (`QUICKROBOT_API_KEY`)
+ - WebUI password login (`QUICKROBOT_WEBUI_PASSWORD`), rate-limited with failed-attempt logging
+ - MCP SSE endpoint auth via `QUICKROBOT_MCP_TOKEN` (falls back to `QUICKROBOT_API_KEY` if unset)
+ - MCP proxy calls to API use `QUICKROBOT_API_KEY` (unchanged)
+ - MCP DNS rebinding protection configurable via `QUICKROBOT_MCP_DISABLE_DNS_REBINDING`
+ - SSL/TLS optional — plain HTTP on all 3 ports by default
+ - CORS enabled with wildcard origins (`*`) by default, configurable via `QUICKROBOT_API_CORS_ORIGINS`
+ - RPC servers bind to `0.0.0.0` by default — use per-instance override for local-only
+
+### API Key Toggle — QUICKROBOT_API_KEY_DISABLED (v0.11)
+ `QUICKROBOT_API_KEY_DISABLED=true` disables API key authentication:
+ - Startup: skips FATAL "API_KEY required" check in prod mode
+ - Auth: `_AUTH_TOKENS` stays empty → all routes accept any request
+ - Also disables MCP SSE token enforcement when `QUICKROBOT_MCP_TOKEN` is set
+ - Valid values: `true`, `1`, `yes` (truthy); `false`, `0`, `no`, empty (falsy) — case-insensitive
+ - Default: unset → normal enforcement (key required in prod, matched on every request)
 
 ### Preset Benchmarking — Swap Presets, Not Instances
 **Do NOT create a new instance for each preset benchmark.** Reuse existing test server instances and switch presets via `change_preset(instance_id, preset_id)` or `PUT /instances/<id>` with `{preset_id: N, skip_build: true}`. All other context (port, node hardware, build number, RPC bindings) stays identical for clean apples-to-apples comparison.
@@ -391,6 +466,14 @@ All writable agents log file modifications to `./manifest.log`. Format: `<filepa
 **Global state verification:** Never declare "all clear" based on partial checks. Read `GET /api/v1/app/status` and check `global_state` field before reporting health.
 
 **Pre-flight exit behavior:** `sys.exit(1)` in `_start_system_engine()` exits the ENTIRE API on first conflict. Stale processes must be killed BEFORE restart.
+
+**execv restart race condition:** When API does `execv` to replace itself, the background thread (which removes PID file and writes restart marker) can be interrupted mid-operation. The new process may see stale PID file or missing marker → false-positive "already running" → exits. Fix: use env var `QR_RESTART_MARKER=1` for restart signaling (set before execv, survives across execv).
+
+**MCP CORS origins need BOTH hostname AND IP:** Browsers send `Origin:` header as whatever URL they used — if the user navigates via IP (`http://192.168.31.10:8080`), the origin is `http://192.168.31.10:8080`, NOT `http://mintiger.lan:8080`. Add both entries to `QUICKROBOT_MCP_CORS_ORIGINS` for each remote node.
+
+**MCP SSE auth wrapper returns 401 without CORS headers:** The `_wrap_sse_for_auth()` function sends raw Starlette HTTP messages with only `content-type` header on 401. Cross-origin browsers can't read the response → opaque "failed to fetch" error. Added `Access-Control-Allow-Origin: *` to the 401 response (v0.11).
+
+**MCP SSE accepts THREE token formats:** `?token=` query param, `X-MCP-Token` header, and `Authorization` header. All equivalent since v0.11 (Option B fix added `Authorization` acceptance). Opencode's `"Authorization"` header in config works now.
 
 ---
 

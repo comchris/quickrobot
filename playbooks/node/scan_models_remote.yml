@@ -1,11 +1,12 @@
 # @name: Scan Models Remote
 # @playbook_id: scan_models_remote
-# @version: 3
+# @version: 4
 # @timeout: 600
 # scan_models_remote.yml — Scan remote nodes for GGUF model files
 # Outputs JSONL lines per host: {"host": ..., "models_raw": [...]}
 # Required vars: model_root_path (must be provided, no default)
 # v3: Fixed mmproj detection — case-insensitive filter, wider glob patterns
+# v4: Fixed mmproj detection — aggressive quant suffix stripping + directory scan fallback
 
 - hosts: all
   gather_facts: no
@@ -33,28 +34,51 @@
           dir=$(dirname "$f")
           base=$(basename "$f" .gguf)
           mmproj_path=""
+
+          # Strategy 1: Exact match on base name (rare but simplest)
           if [ -f "${dir}/${base}.mmproj" ]; then
             mmproj_path="${dir}/${base}.mmproj"
           elif [ -f "${dir}/${base}_mmproj.gguf" ]; then
             mmproj_path="${dir}/${base}_mmproj.gguf"
           else
-            clean_base=$(echo "$base" | sed -E 's/-(bf?16|f32|q[0-9]+_[a-z]+|-Q[0-9][_0-9A-Za-z]*)$//i')
-            if [ -n "$clean_base" ]; then
-              for pattern in "${dir}/${clean_base}-mmproj*.gguf" "${dir}/${clean_base}_mmproj*.gguf" "${dir}/mmproj-${clean_base}*.gguf"; do
-                if [ -f "$pattern" ]; then
-                  mmproj_path="$pattern"
+            # Strategy 2: Strip quant suffix and try patterns with clean name
+            # This handles: Q4_K_M, Q8_0, F16, BF16, MTP, UD, etc. at the end
+            clean_base=$(echo "$base" | sed -E 's/(-[Qq][0-9]+[_0-9A-Z]*|-bf?16|-f32|-bf?16|-F32|-BF16)$//i' | sed -E 's/(-MTP|-UD|-mtp|-ud)$//i')
+
+            # Strategy 2a: Try patterns with the clean base name
+            for pattern in \
+              "${dir}/${clean_base}-mmproj*.gguf" \
+              "${dir}/${clean_base}_mmproj*.gguf" \
+              "${dir}/mmproj-${clean_base}*.gguf" \
+              "${dir}/${clean_base}-*.mmproj" \
+              "${dir}/${clean_base}_*.mmproj" \
+              "${dir}/mmproj-${clean_base}*" \
+              "${dir}/${clean_base}*mmproj*"; do
+              if [ -f "$pattern" ]; then
+                mmproj_path="$pattern"
+                break
+              fi
+            done
+
+            # Strategy 3: Directory scan fallback — find any mmproj in the same dir
+            # Handles files like "mmproj-F32.gguf", "mmproj-step3.7-flash-f16.gguf"
+            if [ -z "$mmproj_path" ]; then
+              for mf in "${dir}"/mmproj*.gguf "${dir}"/*-mmproj*.gguf "${dir}"/*_mmproj*.gguf; do
+                if [ -f "$mf" ] && echo "$mf" | grep -qv "$(basename "$f")"; then
+                  mmproj_path="$mf"
                   break
                 fi
               done
-              # Additional fallback: match any mmproj with common naming variants
-              if [ -z "$mmproj_path" ]; then
-                for pattern in "${dir}/${clean_base}-*.mmproj" "${dir}/${clean_base}_*.mmproj" "${dir}/mmproj-${clean_base}*" "${dir}/${clean_base}*mmproj*"; do
-                  if [ -f "$pattern" ]; then
-                    mmproj_path="$pattern"
-                    break
-                  fi
-                done
-              fi
+            fi
+
+            # Strategy 4: Broader dir scan — any file with "mmproj" in name, excluding current model
+            if [ -z "$mmproj_path" ]; then
+              for mf in "${dir}"/*; do
+                if [ -f "$mf" ] && echo "$(basename "$mf")" | grep -qi mmproj && [ "$(basename "$mf")" != "$(basename "$f")" ]; then
+                  mmproj_path="$mf"
+                  break
+                fi
+              done
             fi
           fi
           mt=$(stat -c '%Y' "$f" 2>/dev/null || echo "0")

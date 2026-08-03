@@ -44,6 +44,7 @@ if _project_root not in sys.path:
 
 # ── SSOT timeouts ───────────────────────────────────────────────────
 from lib.qr_engine_ids import (
+    QR_ENGINE_SCHEDULER,
     QR_TIMEOUT_COMPILE,
     QR_TIMEOUT_SOURCE,
     QR_TIMEOUT_DEFAULT,
@@ -97,7 +98,7 @@ def load_scheduler_config(db_path):
     config = {}
 
     # Load scheduler_poll_interval_sec
-    row = _gec(db_path, 4, "scheduler_poll_interval_sec")
+    row = _gec(db_path, QR_ENGINE_SCHEDULER, "scheduler_poll_interval_sec")
     raw = row.get("value", "5") if row else "5"
     try:
         v = int(raw)
@@ -126,7 +127,7 @@ def load_scheduler_config(db_path):
     else:
         v = None  # No env var — proceed to DB lookup
     if v is None:
-        row = _gec(db_path, 4, "scheduler_max_retries")
+        row = _gec(db_path, QR_ENGINE_SCHEDULER, "scheduler_max_retries")
         raw = row.get("value", "2") if row else "2"
         try:
             v = int(raw)
@@ -141,7 +142,7 @@ def load_scheduler_config(db_path):
     config["max_retries"] = v
 
     # Load scheduler_log_level
-    row = _gec(db_path, 4, "scheduler_log_level")
+    row = _gec(db_path, QR_ENGINE_SCHEDULER, "scheduler_log_level")
     raw = row.get("value", "info") if row else "info"
     valid_levels = ("debug", "info", "warning", "error", "critical")
     if str(raw).lower() not in valid_levels:
@@ -153,7 +154,7 @@ def load_scheduler_config(db_path):
     config["log_level"] = str(raw).lower()
 
     # Load health_check_logging (boolean flag for verbose HC logging)
-    row = _gec(db_path, 4, "health_check_logging")
+    row = _gec(db_path, QR_ENGINE_SCHEDULER, "health_check_logging")
     raw_hc = row.get("value", "true") if row else "true"
     config["hc_logging"] = str(raw_hc).lower() not in ("false", "0", "no")
 
@@ -382,10 +383,9 @@ def main():
     """Entry point for scheduler subprocess."""
     global sched
 
-    # Root guard
-    if os.getuid() == 0:
-        print("this robot won't run as root", file=sys.stderr)
-        sys.exit(1)
+    # Root guard — Windows-compatible (no-op on Windows)
+    import lib.lib_platform as _lp
+    _lp.check_nonroot()
 
     # Pre-flight: detect duplicate scheduler process
     if _detect_duplicate_scheduler():

@@ -87,8 +87,11 @@
 {% endif %}
 
 <style>
-   /* Host column (col 3) */
-   table th[data-col="3"] { min-width: 120px; }
+   /* ID column (col 0) — no minimum, dynamic shrink */
+   table th[data-col="0"] { min-width: 0; width: auto; }
+   td:first-of-type, td[data-col="0"] { min-width: 0; width: auto; white-space: nowrap; padding: 4px 6px; }
+   /* Host column (col 3) — no minimum, dynamic shrink */
+   table th[data-col="3"] { min-width: 0; }
    td.host-cell { word-break: break-word; overflow-wrap: anywhere; }
    /* Engine column (col 2) */
    table th[data-col="2"] { min-width: 120px; }
@@ -100,9 +103,9 @@
    td.preset-actions-cell .preset-sel { max-width: 100%; width: 100%; }
      /* Action buttons in merged column: flex row with gap, no wrap */
     td.preset-actions-cell .actions-render { display: flex; gap: 4px; align-items: center; flex-wrap: nowrap; }
-     /* Jobs column (col 7) — compact, stacked layout */
-     table th[data-col="7"] { min-width: 90px; max-width: 150px; }
-      td.job-cell { min-width: 90px; max-width: 150px; line-height: 1.3; overflow: hidden; }
+     /* Jobs column (col 7) — compact, no minimum width */
+      table th[data-col="7"] { min-width: 0; }
+       td.job-cell { min-width: 0; max-width: 150px; line-height: 1.3; overflow: hidden; }
     /* Info column (col 8) */
     table th[data-col="8"] { min-width: 90px; }
      td.last-info-cell {}
@@ -180,13 +183,15 @@
   <!-- Name: link to instance detail -->
   <td><a class="row-link" href="/webui/instances/{{ inst.id }}">{{ inst.name }}</a></td>
 
-   <!-- Engine + build number (RPC binding shown in REMOTE column only) -->
-    <td>
-      {{ inst.engine_display_name or inst.engine_type_name }}
-      {% if inst.build_number and inst.engine_type_name in ('llama_server','llama_rpc') %}
-      <br><small style="color:#888;">{{ inst.build_number }}</small>
-      {% endif %}
-    </td>
+    <!-- Engine + build number (RPC binding shown in REMOTE column only) -->
+     <td>
+       {{ inst.engine_display_name or inst.engine_type_name }}
+       {% if inst._bt_name %}
+       <br><small style="color:#888;">{{ inst._bt_name }}</small>
+       {% elif inst.build_number and inst.engine_type_name in ('llama_server','llama_rpc') %}
+       <br><small style="color:#888;">{{ inst.build_number }}</small>
+       {% endif %}
+     </td>
  <!-- Host: clickable link to filter instances by this host, also links to node detail -->
    <td class="host-cell">
      {% if inst.node_id %}
@@ -314,18 +319,18 @@
          {% endif %}
          </div>
       </td>
-      <!-- Jobs: count + link to filtered logs (stacked) -->
+      <!-- Jobs: count + link to filtered logs by node (stacked) -->
         <td class="job-cell" data-sort="{{ inst.last_state_change or '' }}">
           <div style="display:flex;flex-direction:column;gap:2px;align-items:flex-start;">
-          {# Active jobs count as link to Logs page filtered by instance_id #}
+          {# Active jobs count as link to Logs page filtered by node_id #}
           {% if inst.active_jobs and inst.active_jobs.count > 0 %}
-          <a class="job-badge job-{{ inst.active_jobs.job_type }}" href="/webui/logs?instance_id={{ inst.id }}&job_type={{ inst.active_jobs.job_type }}"
+          <a class="job-badge job-{{ inst.active_jobs.job_type }}" href="/webui/logs?node_id={{ inst.node_id }}&job_type={{ inst.active_jobs.job_type }}"
              title="Job: {{ inst.active_jobs.job_type }}{% if inst.active_jobs.stage %} stage={{ inst.active_jobs.stage }}{% endif %}">
-              {% if inst.active_jobs.count == 1 %}1 job{% else %}{{ inst.active_jobs.count }} jobs{% endif %}
-          </a>
-          {% endif %}
-          </div>
-       </td>
+               {% if inst.active_jobs.count == 1 %}1 job{% else %}{{ inst.active_jobs.count }} jobs{% endif %}
+           </a>
+           {% endif %}
+           </div>
+        </td>
    <!-- Info: relative time + refresh button (stacked vertically) -->
    <td class="last-info-cell" data-ts="{{ inst.last_state_change or '' }}" data-ts-utc="{{ inst.last_state_change or '' }}" data-id="{{ inst.id }}">
      {% if inst.last_state_change %}{{ inst.last_state_change[:19] }}<br>{% endif %}

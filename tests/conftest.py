@@ -7,6 +7,11 @@ Shared fixtures for pytest:
   - db_path:       Path to test database (temp copy or fresh)
   - app:           Flask app instance with test config
   - client:        Flask test client (WSGI layer)
+
+Test suite split (185 tests total):
+  Part A (core API + config, 99 tests):  pytest tests/ -m part_a   (~1s)
+  Part B (integration + UI + infra, 86 tests): pytest tests/ -m part_b  (~12s)
+  Auto-applied by conftest.py::pytest_collection_modifyitems() based on filename.
 """
 
 import os
@@ -16,22 +21,42 @@ import tempfile
 import pytest
 from pathlib import Path
 
+
+# Prevent /tmp tmpfs overflow: redirect all test temp files to real disk.
+# On systems where /tmp is tmpfs (RAM-backed), tempfile.TemporaryDirectory()
+# fills RAM quickly — 64 tests × ~16MB DB ≈ 1GB+. Redirect to persistent dir.
+@pytest.hookimpl(tryfirst=True)
+def pytest_configure(config):
+    _test_tmp = Path("/CORE/tmp/qr_test")
+    _test_tmp.mkdir(parents=True, exist_ok=True)
+    os.environ["TMPDIR"] = str(_test_tmp)
+
+
 # ---------------------------------------------------------------------------
 # Project root
 # ---------------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE = PROJECT_ROOT / ".quickrobot.env"
-SEED_DIR = PROJECT_ROOT / "data" / "_seed"
+
+# Source .quickrobot.env so PYTHONPYCACHEPREFIX=/tmp/pycache is set before
+# any module imports that might create __pycache__ dirs.
+from dotenv import load_dotenv
+load_dotenv(str(ENV_FILE))
+SEED_DIR = PROJECT_ROOT / "db" / "migrations"
 PLAYBOOKS_DIR = PROJECT_ROOT / "playbooks"
 DB_DIR = PROJECT_ROOT / "data"
 DB_PATH = DB_DIR / "quickrobot.db"
 
 # ---------------------------------------------------------------------------
-# .env parser — key=value with comments, blank lines stripped
+# env_config — reads from os.environ (populated by load_dotenv above)
 # ---------------------------------------------------------------------------
 
 def _parse_env(path: Path) -> dict:
-    """Parse .quickrobot.env into a key->value dict."""
+    """Fallback parser for .quickrobot.env into a key->value dict.
+    
+    Used when os.environ keys are insufficient (e.g., testing env parsing).
+    Prefer reading from os.environ directly where dotenv is active.
+    """
     result = {}
     for line in path.read_text().splitlines():
         line = line.strip()
@@ -499,3 +524,55 @@ def is_fresh_db(path: str) -> bool:
     conn.close()
     # If only system instances (4) and localhost node (1) exist, it's fresh
     return count_instances <= 4 and count_nodes <= 1
+
+
+# ---------------------------------------------------------------------------
+# Test group markers — split suite into 2 parts to avoid shell timeout
+# Run: pytest -m part_a  (core API + config, ~9 files)
+# Run: pytest -m part_b  (integration + UI + infra, ~8 files)
+# ---------------------------------------------------------------------------
+
+# Part A: Core API routes, config, auth, models, jobs, presets, nodes, instances
+# Fastest group (~1s), no external dependencies beyond DB
+PART_A_FILES = [
+    "test_config.py",
+    "test_api_auth.py",
+    "test_api_health.py",
+    "test_api_benchmarks.py",
+    "test_api_jobs.py",
+    "test_api_models.py",
+    "test_api_presets.py",
+    "test_api_nodes.py",
+    "test_api_instances.py",
+]
+
+# Part B: Playbooks, prompts, SSE, WebUI, MCP, startup, merge_chain, wizard
+# Slower group (~12s total), some tests skip when external services unavailable
+PART_B_FILES = [
+    "test_playbooks.py",
+    "test_prompts.py",
+    "test_sse.py",
+    "test_webui.py",
+    "test_mcp.py",
+    "test_startup.py",
+    "test_merge_chain.py",
+    "test_wizard_steps.py",
+]
+
+# All files (order matters for reproducibility)
+ALL_FILES = PART_A_FILES + PART_B_FILES
+
+
+# ---------------------------------------------------------------------------
+# Auto-apply part_a / part_b markers based on filename
+# Usage: pytest -m part_a  OR  pytest -m part_b
+# ---------------------------------------------------------------------------
+
+def pytest_collection_modifyitems(config, items):
+    """Auto-assign @pytest.mark.part_a or @pytest.mark.part_b based on filename."""
+    for item in items:
+        filename = item.fspath.basename
+        if filename in PART_A_FILES:
+            item.add_marker(pytest.mark.part_a)
+        elif filename in PART_B_FILES:
+            item.add_marker(pytest.mark.part_b)

@@ -66,6 +66,8 @@ from lib.lib_constants import (
 from lib.qr_engine_ids import (
     QR_ENGINE_API_NAME, QR_ENGINE_LLAMA_SERVER_NAME, QR_ENGINE_LLAMA_RPC_NAME,
     QR_ENGINE_WEBUI_NAME, QR_ENGINE_MCP_NAME, QR_ENGINE_SCHEDULER_NAME,
+    QR_STATE_ERROR, QR_STATE_RUNNING, QR_STATE_STOPPED, QR_STATE_UPDATING,
+    QR_STATE_BUILD_ERROR, QR_STATE_DEPLOYING, QR_STATE_STOPPING, QR_STATE_COMPILING,
 )
 from lib.lib_qr_actions import log_qr_override
 from qr_api.lib_responses import error_response as _error_response, success_single as _success_single
@@ -168,7 +170,7 @@ def override_system_instance_states(instances, config):
                         inst["process_age_seconds"] = int(now_ts - p.create_time())
                     else:
                         # PID dead — attempt auto-recovery from error state
-                        if inst.get("state") == "error":
+                        if inst.get("state") == QR_STATE_ERROR:
                             try:
                                 from engine.quickrobot_scheduler import SchedulerEngine
                                 se = SchedulerEngine()
@@ -398,8 +400,11 @@ def _execute_playbook(resolver_ref, resolver_type="playbook_id", limit=None, ext
             checksum_status = "missing"
             logger.error("[qr] CHECKSUM MISSING: %s (not found on disk)", file_path)
             if mode == "prod":
-                logger.error("[qr] FATAL: playbook missing in prod mode. Killing API process.")
-                raise SystemExit(1)
+                logger.error("[qr] FATAL: playbook missing in prod mode.", file_path)
+                return {"success": False, "failed": True,
+                        "playbook_id": playbook_id, "file_path": file_path,
+                        "rel_path": rel_path, "checksum_status": "missing",
+                        "result": None, "error": f"Playbook missing on disk: {file_path}"}
         else:
             # Check checksum
             actual_hash = _chksum(full_path)
@@ -427,8 +432,11 @@ def _execute_playbook(resolver_ref, resolver_type="playbook_id", limit=None, ext
                     issues.append(f"playbook_id header (expected={expected_pb_id} actual={actual_header['playbook_id']})")
                 logger.warning("PLAYBOOK VERIFY FAIL: %s — %s", file_path, "; ".join(issues))
                 if mode != "dev":
-                    logger.error("[qr] FATAL: playbook verification failed in %s mode. Killing API process.", mode)
-                    raise SystemExit(1)
+                    logger.error("[qr] FATAL: playbook verification failed in %s mode.", mode)
+                    return {"success": False, "failed": True,
+                            "playbook_id": playbook_id, "file_path": file_path,
+                            "rel_path": rel_path, "checksum_status": "mismatch",
+                            "result": None, "error": f"Playbook verification failed: {file_path} — {'; '.join(issues)}"}
     else:
         # No DB record — check file existence only
         if os.path.exists(playbook_path):
@@ -582,7 +590,7 @@ def _start_async_build(db_path, instance_id):
     current_state = inst.get("state", "")
 
     # SM-3: Dedup check — reject only if a build thread is actually running
-    if current_state in ("deploying", "compiling"):
+    if current_state in (QR_STATE_DEPLOYING, QR_STATE_COMPILING):
         return {"success": False, "message": f"Instance already {current_state}"}
 
     # Resolve node hostname
@@ -609,7 +617,7 @@ def _start_async_build(db_path, instance_id):
             logger.debug("node build state query failed: node_id=%d", node_id, _e)
             nd_state_val = "idle"
 
-        if nd_state_val == "running":
+        if nd_state_val == QR_STATE_RUNNING:
             try:
                 with _pool(db_path) as conn2:
                     other = conn2.execute(
@@ -632,7 +640,7 @@ def _start_async_build(db_path, instance_id):
             logger.debug("node build state update failed: node_id=%d", node_id, _e)
 
     # Transition state (SM-2 fix: use updating for running instances)
-    if current_state == "running":
+    if current_state == QR_STATE_RUNNING:
         try:
             _ts2(db_path, instance_id, "updating")
         except Exception as _e:
@@ -741,7 +749,7 @@ def _start_async_build(db_path, instance_id):
                     hosts = task.get("hosts", {})
                     for host_data in hosts.values():
                         msg = host_data.get("msg", "") or ""
-                        bm = _re.search(r'BUILD_COMMIT=([a-f0-9]{7})', msg)
+                        bm = _re.search(r'BUILD_COMMIT=([a-zA-Z0-9][a-zA-Z0-9._-]*)', msg)
                         if bm:
                             new_build = bm.group(1)
                             break
@@ -756,7 +764,7 @@ def _start_async_build(db_path, instance_id):
                     logger.debug("build number update failed: inst=%d", instance_id, _e)
 
             # Post-deploy state transitions (SM-2 fix)
-            if current_state == "running":
+            if current_state == QR_STATE_RUNNING:
                 try:
                     _ts2(db_path, instance_id, "deployed")
                 except Exception as _e:
@@ -884,7 +892,7 @@ def _wait_for_stop_status(db_path, inst_id, max_wait=30):
             result = query_status(db_path, inst_id)
             if result.get("status") == "ok":
                 data = result.get("data", {})
-                if data.get("state") == "stopped" or not data.get("alive", True):
+                if data.get("state") == QR_STATE_STOPPED or not data.get("alive", True):
                     try:
                         _ts2(db_path, inst_id, "stopped")
                         _log_action(db_path, inst_id, "stop", "success")
@@ -1135,16 +1143,13 @@ def _restart_system_managed(inst_id, engine_type_name, log_action_fn):
                 except Exception as _e:
                     logger.warning("API restart (bg): subprocess shutdown failed: %s", _e)
 
-                # Brief pause — allow DB PID updates to settle before execv replaces this process
-                _time.sleep(0.5)
-
-                # Delete our own PID file so _check_pid_file() on the new process
-                # doesn't see itself as a duplicate and abort startup.
+                # Remove PID file FIRST — must be gone before execv replaces this process.
+                # The new process's _check_pid_file() will see this and know to skip the stale check.
                 try:
                     _pid_path = os.path.join(os.getcwd(), "data", "quickrobot.pid")
                     if os.path.exists(_pid_path):
                         os.remove(_pid_path)
-                        logger.debug("API restart (bg): removed PID file %s", _pid_path)
+                        logger.info("API restart (bg): removed PID file %s", _pid_path)
                 except Exception as _pem:
                     logger.debug("API restart (bg): failed to remove PID file: %s", _pem)
 
@@ -1152,14 +1157,16 @@ def _restart_system_managed(inst_id, engine_type_name, log_action_fn):
                 import sys as _sys
                 _argv = [_sys.executable, _sys.argv[0]] + [a for a in _sys.argv[1:] if a != "--no-webui"]
 
-                logger.info("API restart (bg): about to execv: %s", " ".join(_argv[:3]))
-                # Write marker file for debugging (optional, survives execv)
+                # Write marker before execv — proves we intentionally replaced ourselves
                 try:
                     marker = os.path.join(os.getcwd(), "data", "_restart_marker")
                     with open(marker, "w") as _mf:
                         _mf.write(f"execv_pid={os.getpid()}\nargs={' '.join(_argv)}\ntime={_time.strftime('%Y-%m-%dT%H:%M:%S')}\n")
+                    logger.info("API restart (bg): wrote restart marker %s", marker)
                 except Exception as _em:
-                    pass
+                    logger.debug("API restart (bg): marker write failed: %s", _em)
+
+                logger.info("API restart (bg): about to execv: %s", " ".join(_argv[:3]))
                 _sys.stdout.flush()
                 _sys.stderr.flush()
                 # os.execv replaces THIS process — code below never runs
@@ -1949,7 +1956,7 @@ def deploy_instance(db_path, instance_id, playbook=None, async_mode=False, skip_
         return {"success": False, "message": "Deploy playbook reported failure"}
 
     # Post-deploy state transitions
-    if current_state == "running":
+    if current_state == QR_STATE_RUNNING:
         _ts2(db_path, instance_id, "deployed")
     else:
         _ts2(db_path, instance_id, "deploying")

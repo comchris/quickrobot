@@ -26,21 +26,37 @@ Usage:
         }
 """
 
+from lib.qr_engine_ids import (
+    QR_STATE_BUILD_ERROR,
+    QR_STATE_COMPILING,
+    QR_STATE_CONFIGURING,
+    QR_STATE_DEPLOYED,
+    QR_STATE_DEPLOYING,
+    QR_STATE_ERROR,
+    QR_STATE_LOADING,
+    QR_STATE_RUNNING,
+    QR_STATE_STARTING,
+    QR_STATE_STOPPED,
+    QR_STATE_STOPPING,
+    QR_STATE_UNCONFIGURED,
+    QR_STATE_UPDATING,
+)
+
 # All valid instance state names — used by routes for guards, transitions, and counts.
 # Single source of truth for instance state string literals.
 VALID_INSTANCE_STATES = frozenset([
-    "unconfigured", "configuring", "deploying", "starting", "loading",
-    "running", "stopping", "stopped", "error", "build_error",
-    "deployed", "updating", "compiling", "timeout",
+    QR_STATE_UNCONFIGURED, QR_STATE_CONFIGURING, QR_STATE_DEPLOYING, QR_STATE_STARTING, QR_STATE_LOADING,
+    QR_STATE_RUNNING, QR_STATE_STOPPING, QR_STATE_STOPPED, QR_STATE_ERROR, QR_STATE_BUILD_ERROR,
+    QR_STATE_DEPLOYED, QR_STATE_UPDATING, QR_STATE_COMPILING, "timeout",
 ])
 
 # States allowed for undeploy operations (excludes unconfigured)
-VALID_UNDEPLOY_STATES = VALID_INSTANCE_STATES - frozenset(["unconfigured"])
+VALID_UNDEPLOY_STATES = VALID_INSTANCE_STATES - frozenset([QR_STATE_UNCONFIGURED])
 
 # States requiring active health checking (excludes terminal/stable states:
 # unconfigured=never started, deployed=idle, stopping=in-transition)
 HEALTH_CHECK_STATES = VALID_INSTANCE_STATES - frozenset([
-    "unconfigured", "deployed", "stopping",
+    QR_STATE_UNCONFIGURED, QR_STATE_DEPLOYED, QR_STATE_STOPPING,
 ])
 
 # Operation-specific state subsets — used by route handlers as guard conditions.
@@ -48,28 +64,29 @@ HEALTH_CHECK_STATES = VALID_INSTANCE_STATES - frozenset([
 # that represents allowed states for a specific operation or condition.
 
 # Start: states where idempotent start returns immediately without remote probe
-IDEMPOTENT_START_STATES = frozenset(["running", "starting"])
+IDEMPOTENT_START_STATES = frozenset([QR_STATE_RUNNING, QR_STATE_STARTING])
 
 # Auto-deploy trigger states — start() auto-deploys if instance is in these states
-AUTO_DEPLOY_STATES = frozenset(["unconfigured", "deploying"])
+AUTO_DEPLOY_STATES = frozenset([QR_STATE_UNCONFIGURED, QR_STATE_DEPLOYING])
 
 # Restart: states that trigger restart-from-nonrunning logging
-RESTART_FROM_NONRUNNING = frozenset(["deployed", "stopped"])
+RESTART_FROM_NONRUNNING = frozenset([QR_STATE_DEPLOYED, QR_STATE_STOPPED])
 
 # Subprocess engine: states requiring proper stop->start cycle (not skip)
-SUBPROCESS_CYCLE_STATES = frozenset(["running", "stopping"])
+SUBPROCESS_CYCLE_STATES = frozenset([QR_STATE_RUNNING, QR_STATE_STOPPING])
 
 # Undeploy: transitional states that need force-stopping before undeploy
-UNDEPLOY_TRANSITIONAL_STATES = frozenset(["starting", "stopping", "deploying"])
+UNDEPLOY_TRANSITIONAL_STATES = frozenset([QR_STATE_STARTING, QR_STATE_STOPPING, QR_STATE_DEPLOYING])
 
 # Stop operation: states from which stop is allowed (excludes unconfigured,
-# stopped, configuring, compiling, updating, timeout — not valid to stop)
+# stopped, compiling, updating, timeout — not valid to stop)
 STOP_ALLOWED_STATES = frozenset([
-    "running", "starting", "stopping", "deployed", "error", "build_error", "loading",
+    QR_STATE_RUNNING, QR_STATE_STARTING, QR_STATE_STOPPING, QR_STATE_DEPLOYED, QR_STATE_ERROR, QR_STATE_BUILD_ERROR,
+    QR_STATE_LOADING, QR_STATE_DEPLOYING, QR_STATE_CONFIGURING,
 ])
 
 # Reconfigure: states from which config change is allowed (stable/idle states only)
-RECONFIGURE_ALLOWED_STATES = frozenset(["running", "stopped", "error", "deployed"])
+RECONFIGURE_ALLOWED_STATES = frozenset([QR_STATE_RUNNING, QR_STATE_STOPPED, QR_STATE_ERROR, QR_STATE_DEPLOYED])
 
 
 def build_state_machine(extensions=None, removals=None):

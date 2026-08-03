@@ -20,14 +20,18 @@ discovery by the engine loader.
 
 import logging
 
-from lib.qr_engine_ids import QR_DEFAULT_LOCALHOST, QR_ENGINE_PORT_DEFAULTS, QR_ENGINE_LLAMA_RPC_NAME
+from lib.qr_engine_ids import (
+    QR_DEFAULT_LOCALHOST, QR_ENGINE_PORT_DEFAULTS, QR_ENGINE_LLAMA_RPC_NAME,
+    QR_JOB_DEPLOY, QR_JOB_REBUILD, QR_JOB_RESTART, QR_JOB_UNDEPLOY,
+    QR_STAGE_STOP, QR_STAGE_UNDEPLOY, QR_STAGE_VERIFY,
+)
 from engine.base import BaseEngine
 
 logger = logging.getLogger(__name__)
 
 
 CAPABILITIES = {
-    "name": "llama_rpc",
+    "name": QR_ENGINE_LLAMA_RPC_NAME,
     "display_name": "llama.cpp RPC",
     "supports_models": False,
     "supports_presets": False,
@@ -51,15 +55,15 @@ CAPABILITIES = {
         "skip_build": ("false", "Skip cmake build (use when binary already exists or to pin a version)"),
         "start_on_boot": ("false", "Enable systemd unit on boot (true/false)"),
     },
-    "supported_jobs": ["deploy", "restart", "undeploy", "rebuild"],
+    "supported_jobs": [QR_JOB_DEPLOY, QR_JOB_RESTART, QR_JOB_UNDEPLOY, QR_JOB_REBUILD],
     # env_builder: function name in lib.lib_cluster_env_builder that produces
     # merged_env + cli_args for config/start stages. Only llama_server and
     # llama_rpc have these; other engines use their own extra_vars paths.
     "env_builder": "build_rpc_server_env",
     "undeploy_chain": [
-        {"stage": "stop", "playbook": "service_stop"},
-        {"stage": "undeploy", "playbook": "undeploy_rpc"},
-        {"stage": "verify", "playbook": "check_undeploy"},
+        {"stage": QR_STAGE_STOP, "playbook": "service_stop"},
+        {"stage": QR_STAGE_UNDEPLOY, "playbook": "undeploy_rpc"},
+        {"stage": QR_STAGE_VERIFY, "playbook": "check_undeploy"},
     ],
 }
 
@@ -83,7 +87,7 @@ class RpcEngine(BaseEngine):
     }
 
     def __init__(self):
-        self._name = "llama_rpc"
+        self._name = QR_ENGINE_LLAMA_RPC_NAME
         self._base_port = CAPABILITIES["base_port"]
         self._max_instances = CAPABILITIES["max_instances"]
 

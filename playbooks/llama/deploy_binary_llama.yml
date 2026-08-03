@@ -1,0 +1,49 @@
+# @name: Binary Download & Install (llama.cpp)
+# @playbook_id: deploy_binary_llama
+# @timeout: 300
+# @version: 9
+- hosts: all
+  become: yes
+  gather_facts: no
+  vars:
+    _target_dir: "{{ binary_target_path | default('/opt/quickrobot/binary-templates/') | replace('{engine_type}', binary_engine_type) | replace('{version}', binary_version) | replace('{platform}', binary_platform) }}"
+  tasks:
+    - name: Create target dir
+      ansible.builtin.file:
+        path: "{{ _target_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Download archive
+      ansible.builtin.get_url:
+        url: "{{ binary_download_url }}"
+        dest: "{{ _target_dir }}/dl.tar.gz"
+        timeout: 300
+        validate_certs: yes
+
+    - name: Verify checksum
+      ansible.builtin.command:
+        cmd: "echo '{{ binary_checksum }}  {{ _target_dir }}/dl.tar.gz' | sha256sum -c"
+      register: _cksum
+      changed_when: false
+      failed_when: _cksum.rc != 0
+
+    - name: Extract archive (strip top-level dir)
+      ansible.builtin.command:
+        cmd: "tar xzf {{ _target_dir }}/dl.tar.gz -C {{ _target_dir }}/ --strip-components=1"
+      args:
+        creates: "{{ _target_dir }}/{{ binary_binary_name }}"
+
+    - name: Set executable
+      ansible.builtin.file:
+        path: "{{ _target_dir }}/{{ binary_binary_name }}"
+        mode: '0755'
+
+    - name: Remove tmp
+      ansible.builtin.file:
+        path: "{{ _target_dir }}/dl.tar.gz"
+        state: absent
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: "Installed {{ binary_binary_name }} to {{ _target_dir }}"

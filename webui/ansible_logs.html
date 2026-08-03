@@ -37,6 +37,14 @@
       {% endfor %}
     </select>
 
+    <label style="font-size:0.85em;color:#666;">Node:</label>
+    <select name="node_id" id="filter-node" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
+      <option value="">Any</option>
+      {% for node in all_nodes %}
+      <option value="{{ node.id }}" {% if node.id == filter_node_id %}selected="selected"{% endif %}>{{ node.name }} ({{ node.hostname }})</option>
+      {% endfor %}
+    </select>
+
     <label style="font-size:0.85em;color:#666;">Status:</label>
     <select name="status" id="filter-status" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
       <option value="">Any</option>
@@ -49,7 +57,7 @@
 
     <label style="font-size:0.85em;color:#666;">Limit:</label>
     <select name="limit" id="filter-limit" style="padding:3px 8px;border:1px solid #ccc;border-radius:3px;font-size:0.85em;">
-      <option value="25" {% if filter_limit == 25 %}selected="selected"{% endif %}>25</option>
+      <option value="25" selected="selected">25</option>
       <option value="50" {% if filter_limit == 50 %}selected="selected"{% endif %}>50</option>
       <option value="100" {% if filter_limit == 100 %}selected="selected"{% endif %}>100</option>
       <option value="250" {% if filter_limit == 250 %}selected="selected"{% endif %}>250</option>
@@ -484,6 +492,8 @@ function renderAllLogs() {
     var qs = [];
     if (params.get('job_type')) qs.push('job_type=' + encodeURIComponent(params.get('job_type')));
     if (params.get('status')) qs.push('status=' + encodeURIComponent(params.get('status')));
+    if (params.get('instance_id')) qs.push('instance_id=' + encodeURIComponent(params.get('instance_id')));
+    if (params.get('node_id')) qs.push('node_id=' + encodeURIComponent(params.get('node_id')));
     if (params.get('limit')) qs.push('limit=' + encodeURIComponent(params.get('limit')));
     var query = qs.length ? '?' + qs.join('&') : '';
 
@@ -682,9 +692,11 @@ function startAutoRefresh(secs) {
     // Sync select with URL params
     var params = new URLSearchParams(window.location.search);
     var actionSel = document.getElementById('filter-action');
+    var nodeSel = document.getElementById('filter-node');
     var statusSel = document.getElementById('filter-status');
     var limitSel = document.getElementById('filter-limit');
     if (actionSel && params.get('job_type')) actionSel.value = params.get('job_type');
+    if (nodeSel && params.get('node_id')) nodeSel.value = params.get('node_id');
     if (statusSel && params.get('status')) statusSel.value = params.get('status');
     if (limitSel && params.get('limit')) limitSel.value = params.get('limit');
 
@@ -693,7 +705,9 @@ function startAutoRefresh(secs) {
 
     // Auto-refresh: restore from qrSettings, default 30s
     var refreshSelect = document.getElementById('log-refresh-interval');
-    var storedRefresh = parseInt(qrSettings.get('log_entries', 'refresh_sec', '30') || '30', 10);
+    var storedRefresh = qrSettings.get('log_entries', 'refresh_sec');
+    if (storedRefresh === undefined) storedRefresh = '30';
+    storedRefresh = parseInt(storedRefresh, 10);
     if (refreshSelect) {
         // Validate stored value against available options
         var valid = false;

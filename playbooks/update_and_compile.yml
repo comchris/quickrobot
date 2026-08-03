@@ -54,8 +54,13 @@
           failed_when: false
           when: not (skip_git_pull | default(false) | bool)
 
-        - name: Get short commit hash
-          shell: git rev-parse --short=7 HEAD
+        - name: Get version tag (try tag first, fall back to short hash)
+          shell: |
+            if git describe --tags --abbrev=7 2>/dev/null; then
+              git describe --tags --abbrev=7
+            else
+              git rev-parse --short=7 HEAD
+            fi
           args:
             chdir: "{{ node_src_dir }}"
           register: commit_hash

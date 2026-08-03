@@ -244,6 +244,29 @@ Subprocesses receive only necessary vars (not full env inheritance):
 - **WebUI only:** `QUICKROBOT_WEBUI_HOST`, `QUICKROBOT_WEBUI_PORT`
 - **MCP only:** `PYTHONPATH`, `QUICKROBOT_MCP_HOST`, `QUICKROBOT_MCP_PORT`, `QUICKROBOT_MCP_READ/WRITE/PROXY`, `QUICKROBOT_MCP_ALLOWED_HOSTS`, `QUICKROBOT_MCP_DISABLE_DNS_REBINDING`
 
+### API Key Authentication — Dual-Token Model (MCP-DUAL-TOKEN, v0.11)
+Two separate tokens for clearer auth boundaries:
+
+| Token | Prefix | Purpose | Env Var |
+|-------|--------|---------|---------|
+| API key | `QR-API-` | All `/api/v1/*` routes (WebUI proxy, MCP→API proxy, external agents) | `QUICKROBOT_API_KEY` |
+| MCP token | `QR-MCP-` | MCP SSE endpoint (`/sse` on port 8040) | `QUICKROBOT_MCP_TOKEN` |
+
+**Auth middleware** (`qr_api/__init__.py::_auth_middleware()`):
+- Prod mode: `_AUTH_TOKENS` loaded from API_KEY at startup. Empty → no enforcement (all pass). Non-empty → must match exactly.
+- Dev mode: always allow (no auth enforced)
+- SSE endpoints (API): accept `?api_key=` query param (EventSource can't send headers)
+- MCP SSE (port 8040): accepts `?token=` query param or `X-MCP-Token` header (checked by qr_mcp_server.py)
+- Health check `/api/v1/app/status`: always allow (monitoring probes)
+
+**QUICKROBOT_API_KEY_DISABLED (v0.11):** Set to `true` to disable auth entirely:
+- Startup: bypasses FATAL "key required in production" check
+- Auth: `_AUTH_TOKENS` stays empty → all routes accept any request
+- Also disables MCP SSE token enforcement
+- Valid: `true`, `1`, `yes` (truthy); `false`, `0`, `no`, empty (falsy) — case-insensitive
+
+**MCP token fallback:** If `QUICKROBOT_MCP_TOKEN` is not set, MCP SSE falls back to `QUICKROBOT_API_KEY` (backward compatible).
+
 ### API Response Format
 - **Single resource:** `{ "status": "ok", "data": { ... } }`
 - **List resources:** `{ "status": "ok", "total": N, "items": [...] }`
@@ -296,6 +319,13 @@ B) **Never auto-select preset by node name match** (e.g., "bender" node matched 
 C) **RPC instances:** Use RPC presets (IDs 10-14 only). Preset 11 (RPC-CPU-Default) is minimal resource, no GPU. Preset 12 (RPC-Vulkan0-Default) if Vulkan compute available. NEVER use llama_server presets (IDs 100+) on RPC instances — they include model loading CLI args and GPU settings that don't apply to gRPC serving.
 D) **Preset swap after compile:** Do NOT undeploy + recreate to change presets (wastes compile time, gets new port). Use `skip_build: true` PUT instead.
 E) **Instance reuse over creation:** Quickrobot's power is preset switching, not instance proliferation. For benchmarking, model testing, or preset comparison on the same node — reuse the existing instance, switch preset via `PUT /instances/<id>` with `skip_build: true`, then `reconfig_restart`. Create new instances ONLY when you need a different server process (different cluster config, RPC bindings, or different node topology).
+
+**⚠️ Preset vs Binary Template — Orthogonal Concepts:**
+- **Preset** = WHAT to run (model path, CLI args like `--ctx-size`, env vars like `LLAMA_ARG_BATCH`). Defined in `engine_presets.config_template` JSON.
+- **Binary Template** = HOW to get the binary (download pre-built tar.gz vs git clone + cmake). Stored in `engine_binaries` table (IDs 1=CPU, 2=RPC, 4=Vulkan).
+- Preset 100 has NO `binary_id` in its config_template — it's purely CLI/ENV config. The deployment method is independent.
+- To deploy via binary download: use `POST /instances/<id>/deploy` with `{binary_template_id: 1}` (or preset must have `binary_id` set in config_template).
+- In the WebUI wizard: Step 3 = binary template selection, Step 4 = preset selection (separated for clarity). Default is git build unless user explicitly selects a template.
 
 **Preset ↔ engine feedback:** `POST /instances` returns `_warnings` array when preset's `engine_type_id` doesn't match the instance engine type. Example response: `{"_warnings":["Preset engine_type_id=21 (llama_server) does not match instance engine_type_id=22 (llama_rpc)"]}`. Agents MUST check `_warnings` and auto-correct by selecting appropriate preset for the engine type.
 
@@ -667,6 +697,10 @@ quickrobot_api(method="GET", path=f"/tasks/{task_id}", body=None)
 
 The MCP server exposes tools wrapping the REST API for LLM agents. Two tiers available:
 
+**Token context:** When connecting to the MCP SSE endpoint (port 8040), use `QUICKROBOT_MCP_TOKEN`. The MCP server internally uses `QUICKROBOT_API_KEY` for proxy calls to the API (port 8039). These are separate tokens in the dual-token model.
+
+**Note on sync vs async:** Sync tools wait up to the stated timeout for the actual result from the remote host — useful when the operation completes quickly and you want immediate feedback. Async tools return within milliseconds after handing the job to the API/scheduler, regardless of how long the background operation takes.
+
 ### Summary Tools (small LLMs — low token usage)
 | Tool | Purpose | Fields |
 |------|---------|--------|
@@ -674,22 +708,26 @@ The MCP server exposes tools wrapping the REST API for LLM agents. Two tiers ava
 | `list_nodes_summary()` | Node availability | id, name, hostname, status, is_active, ping_state |
 | `list_presets_summary(engine_type)` | Preset selection | id, name, category, model_name, gpu_device |
 | `list_models_summary(engine_type)` | Model selection | id, name, model_path, quantization, size_bytes |
+| `list_binary_templates(engine_type)` | Binary template discovery | id, name, version, platform, binary_name, download_url, sha256 |
 
 **Note:** `host_inactive` is `true` when the instance's host node has `is_active=0`. Agents should check this before attempting operations.
 
 ### Full Detail Tools (original — complete API response)
-`list_instances()`, `get_instance_status(id)`, `list_nodes()`, `list_presets(type)`, `get_preset(id,type)`, `list_models(type)`, `get_model(id,type)`
+`get_instance_status(id)`, `get_preset(id,type)`, `get_model(id,type)`, `get_node(node_id)`
+
+**Removed:** `list_instances()`, `list_nodes()`, `list_presets(type)`, `list_models(type)` — summary tools cover 95%+ of operational needs. Use `quickrobot_api()` proxy for full detail when needed.
 
 ### Write Tools
 | Tool | Signature | Behavior |
 |------|-----------|----------|
-| `create_instance(name, engine_type_id, node_id, preset_id, config_override, skip_build)` | async (3s) | Creates DB record + triggers auto-deploy. Returns immediately with job info. |
-| `deploy_instance(id, start_after_deploy, skip_build)` | async (3s) | Triggers RUNNER-1 staged chain. Returns immediately. |
+| `create_instance(name, engine_type_id, node_id, preset_id, binary_template_id, config_override, skip_build)` | async (3s) | Creates DB record + triggers auto-deploy. Returns immediately with job info. Pass `binary_template_id` to use pre-built download instead of git build. |
+| `deploy_instance(id, binary_template_id, start_after_deploy, skip_build)` | async (3s) | Triggers RUNNER-1 staged chain. Binary template: 5 stages (preflight→binary_download→config_svc→config_env→start). Git build: 7 stages. skip_build=True: 3 fast stages. |
 | `start_instance(id)` | sync (30s) | Starts systemd service. Waits for actual result (success/fail). |
 | `stop_instance(id)` | sync (30s) | Stops systemd service. Waits for actual result. |
 | `restart_instance(id)` | sync (30s) | Stop+start cycle. Waits for actual result. |
+| `undeploy_instance(id)` | async (30s) | Stop service + remove systemd unit from remote node. Instance stays in DB as unconfigured. |
 | `change_preset(id, preset_id, skip_build=True)` | async (3s) | Triggers BC-1 reconfigure chain (config_env + service_start). Config-only when skip_build=True. |
-| `delete_instance(id, force=False)` | async (3s) | Removes instance from DB. Force skips state check. |
+| `delete_instance(id, force=False)` | async (30s) | DELETE /instances/<id>. With force=False: attempts remote undeploy first. With force=True: deletes directly from DB. |
 | `create_node(name, hostname, ...)` | async (3s) | Creates node record + triggers SSH validation in background. |
 | `delete_node(id, stop_running=False)` | async (3s) | Deletes node. With stop_running=True, undeploys running instances first (fire-and-forget). |
 | `discover_node(id)` | sync (30s) | SSH hardware discovery. Reports connection failures. |
@@ -699,7 +737,15 @@ The MCP server exposes tools wrapping the REST API for LLM agents. Two tiers ava
 | `scan_models(engine_type, node_id)` | async (3s) | Scans nodes for GGUF files. Triggers playbook in background. Poll via list_models(). |
 | `run_benchmark(id, prompt_id)` | sync (15s) | Triggers benchmark job. Waits up to 15s for API reachability confirmation. |
 
-**Note on sync vs async:** Sync tools wait up to the stated timeout for the actual result from the remote host — useful when the operation completes quickly and you want immediate feedback. Async tools return within milliseconds after handing the job to the API/scheduler, regardless of how long the background operation takes.
+#### Binary Template
+
+Binary templates are orthogonal to presets. Use `list_binary_templates()` to discover available pre-built binary downloads for an engine type. Pass `binary_template_id` in `create_instance()` or `deploy_instance()` to use a pre-built download instead of git clone + cmake build.
+
+- **Preset** defines WHAT to run (model, CLI args, env vars)
+- **Binary template** defines HOW to deliver it (pre-built tarball vs source build)
+- A single preset can be deployed via git build OR binary download — the methods are independent
+- Available templates per engine type: `list_binary_templates('llama_server')` or `list_binary_templates('llama_rpc')`
+- Empty engine_type returns all templates across all engines
 
 ### Proxy Tool (requires ALLOW_PROXY)
 `quickrobot_api(method, path, body)` — direct pass-through to any API endpoint. Uses 30s default timeout.

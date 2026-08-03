@@ -98,14 +98,21 @@ def api_create_preset(engine_type):
                                 f"Preset '{name}' already exists for this engine type (id={existing['id']})",
                                 status_code=409)
 
+    # Extract model_id and gpu_device from config_template.model if not at top-level.
+    # Top-level body keys take precedence (backward compatible).
+    ct = body.get("config_template", {}) or {}
+    ct_model = ct.get("model", {}) or {} if isinstance(ct, dict) else {}
+    model_id = body.get("model_id") or (ct_model.get("model_id") if isinstance(ct_model, dict) else None)
+    gpu_device = body.get("gpu_device") or (ct_model.get("gpu_device") if isinstance(ct_model, dict) else None)
+
     try:
         preset = _ap(_CONFIG["db_path"], et_id, name=name,
                         category=body.get("category", "default"),
-                        config_template=body.get("config_template", {}),
+                        config_template=ct,
                         model_path=body.get("model_path"),
                         tags=body.get("tags", []),
-                        model_id=body.get("model_id"),
-                        gpu_device=body.get("gpu_device"))
+                        model_id=model_id,
+                        gpu_device=gpu_device)
     except Exception as exc:
         return error_response("VALIDATION_ERROR", str(exc))
 
@@ -173,6 +180,16 @@ def api_update_preset(engine_type, preset_id):
     body, is_err = require_json()
     if is_err:
         return error_response("VALIDATION_ERROR", body["_error"])
+
+    # Extract model_id and gpu_device from config_template.model if present in body.
+    # Supports both top-level keys and nested config_template.model for consistency.
+    ct = body.get("config_template")
+    if isinstance(ct, dict):
+        ct_model = ct.get("model", {}) or {}
+        if "model_id" not in body and "model_id" in ct_model:
+            body["model_id"] = ct_model["model_id"]
+        if "gpu_device" not in body and "gpu_device" in ct_model:
+            body["gpu_device"] = ct_model["gpu_device"]
 
     from db.adapters.presets import update_preset as _up
     try:

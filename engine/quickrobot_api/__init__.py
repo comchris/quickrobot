@@ -54,9 +54,8 @@ class QrApiEngine(BaseEngine):
         return sm
 
     def __init__(self, config=None):
-        if os.getuid() == 0:
-            print("this robot won't run as root")
-            sys.exit(1)
+        import lib.lib_platform as _lp
+        _lp.check_nonroot()
         self.config = config or {}
         self._start_time = time.time()
         self._name = CAPABILITIES["name"]

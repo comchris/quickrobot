@@ -36,7 +36,7 @@ from lib.lib_config_level import (
     LayeredMergeChain,
     _deep_merge_dicts,
 )
-from lib.qr_engine_ids import QR_ENGINE_LLAMA_SERVER, QR_ENGINE_LLAMA_RPC, QR_DEFAULT_LOCALHOST, QR_ENGINE_LLAMA_SERVER_NAME
+from lib.qr_engine_ids import QR_ENGINE_LLAMA_SERVER, QR_ENGINE_LLAMA_RPC, QR_DEFAULT_LOCALHOST, QR_ENGINE_LLAMA_SERVER_NAME, QR_STATE_RUNNING
 
 
 DEFAULT_SPLIT_MODE = "layer"
@@ -366,6 +366,35 @@ def build_llama_server_env(db_path, instance_id):
             (engine_type_id,),
         ).fetchone()
         binary_path = _bc_row["value"] if _bc_row else ""
+
+    # BINARY-DL: Resolve binary path from preset's binary_id template
+    if preset_id is not None:
+        from db.sqlite import pool as _pool2
+        with _pool2(db_path) as _conn2:
+            preset_row = _conn2.execute(
+                "SELECT config_template FROM engine_presets WHERE id = ?",
+                (preset_id,),
+            ).fetchone()
+            if preset_row and preset_row["config_template"]:
+                try:
+                    ct = json.loads(preset_row["config_template"])
+                    binary_id = ct.get("binary_id")
+                    if binary_id:
+                        bin_row = _conn2.execute(
+                            "SELECT * FROM engine_binaries WHERE id=? AND is_active=1",
+                            (binary_id,),
+                        ).fetchone()
+                        if bin_row and bin_row["template_type"] == "binary":
+                            b = dict(bin_row)
+                            engine_name = et_row["name"] if et_row else ""
+                            resolved_target = b["target_path"].format(
+                                engine_type=engine_name,
+                                version=b["version"],
+                                platform=b["platform"]
+                            )
+                            binary_path = f"{resolved_target}{b['binary_name']}"
+                except (json.JSONDecodeError, TypeError, KeyError, ValueError):
+                    pass  # Keep default binary_path
 
     # ===== Build LayeredMergeChain L1-L5 =====
     chain = LayeredMergeChain()
@@ -828,6 +857,28 @@ def build_rpc_server_env(db_path, instance_id):
 
             preset_gpu = preset_row["gpu_device"] if preset_row and preset_row["gpu_device"] else None
 
+            # BINARY-DL: Resolve binary path from preset's binary_id template
+            # Override layer1_env binary_path so it flows through chain.merge
+            if preset_row and preset_row["config_template"]:
+                try:
+                    ct = json.loads(preset_row["config_template"])
+                    b_id = ct.get("binary_id")
+                    if b_id:
+                        bin_row = conn.execute(
+                            "SELECT * FROM engine_binaries WHERE id=? AND is_active=1",
+                            (b_id,),
+                        ).fetchone()
+                        if bin_row and bin_row["template_type"] == "binary":
+                            b = dict(bin_row)
+                            resolved_target = b["target_path"].format(
+                                engine_type="llama_rpc",
+                                version=b["version"],
+                                platform=b["platform"]
+                            )
+                            layer1_env["binary_path"] = f"{resolved_target}{b['binary_name']}"
+                except (json.JSONDecodeError, TypeError, KeyError, ValueError):
+                    pass
+
             # L2: Model params
             model_env = {}
             model_model = {}
@@ -1201,7 +1252,7 @@ def rpc_binding_warnings(db_path, llama_instance_id):
             if rpc_row is None:
                 continue  # dangling reference — skip silently
             rpc_name = rpc_row["name"]
-            if rpc_row["state"] != "running":
+            if rpc_row["state"] != QR_STATE_RUNNING:
                 warnings.append(
                     f"RPC {rpc_name} not running (state={rpc_row['state']})"
                 )

@@ -31,12 +31,20 @@ from lib.qr_engine_ids import (
     QR_JOB_START,
     QR_JOB_STOP,
     QR_JOB_UNDEPLOY,
+    QR_STATE_COMPILING,
+    QR_STATE_UPDATING,
+    QR_STATE_BUILD_ERROR,
+    QR_STATE_RUNNING,
+    QR_STATE_CONFIGURING,
+    QR_STAGE_STOP,
+    QR_STAGE_UNDEPLOY,
+    QR_STAGE_VERIFY,
 )
 from engine.base import BaseEngine
 
 
 CAPABILITIES = {
-    "name": "timestamp_proxy",
+    "name": QR_ENGINE_TIMESTAMP_PROXY_NAME,
     "display_name": "timestamp proxy",
     "category": "infra",
     "engine_type_id": QR_ENGINE_TIMESTAMP_PROXY,
@@ -47,9 +55,9 @@ CAPABILITIES = {
     "supported_jobs": [QR_JOB_START, QR_JOB_STOP, QR_JOB_RESTART, QR_JOB_UNDEPLOY],
     "env_builder": "build_timestamp_proxy_env",
     "undeploy_chain": [
-        {"stage": "stop", "playbook": "service_stop"},
-        {"stage": "undeploy", "playbook": "undeploy_timestamp_proxy"},
-        {"stage": "verify", "playbook": "check_undeploy"},
+        {"stage": QR_STAGE_STOP, "playbook": "service_stop"},
+        {"stage": QR_STAGE_UNDEPLOY, "playbook": "undeploy_timestamp_proxy"},
+        {"stage": QR_STAGE_VERIFY, "playbook": "check_undeploy"},
     ],
 }
 
@@ -63,7 +71,7 @@ class TimestampProxyEngine(BaseEngine):
     """
 
     STATE_EXTENSIONS = {}
-    STATE_REMOVALS = ["compiling", "updating", "build_error"]
+    STATE_REMOVALS = [QR_STATE_COMPILING, QR_STATE_UPDATING, QR_STATE_BUILD_ERROR]
 
     def __init__(self, db_path=None, instance_id=None):
         self.db_path = db_path
@@ -79,8 +87,8 @@ class TimestampProxyEngine(BaseEngine):
         """
         from lib.lib_engine_states import build_state_machine as _bsm
         return _bsm(
-            removals=["compiling", "updating", "build_error"],
-            extensions={"running": ["configuring"]},
+            removals=[QR_STATE_COMPILING, QR_STATE_UPDATING, QR_STATE_BUILD_ERROR],
+            extensions={QR_STATE_RUNNING: [QR_STATE_CONFIGURING]},
         )
 
     def get_status(self, instance_id, db_path=None):

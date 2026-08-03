@@ -27,6 +27,27 @@ Note: llama_server and llama_rpc share the same action map (both build-based).
 iperf3 and subprocess have different maps (no rebuild, no compiling/updating).
 """
 
+from lib.qr_engine_ids import (
+    QR_ENGINE_IPERF3_NAME,
+    QR_ENGINE_LLAMA_RPC_NAME,
+    QR_ENGINE_LLAMA_SERVER_NAME,
+    QR_ENGINE_SUBPROCESS_NAME,
+    QR_ENGINE_TIMESTAMP_PROXY_NAME,
+    QR_STATE_BUILD_ERROR,
+    QR_STATE_COMPILING,
+    QR_STATE_CONFIGURING,
+    QR_STATE_DEPLOYED,
+    QR_STATE_DEPLOYING,
+    QR_STATE_ERROR,
+    QR_STATE_LOADING,
+    QR_STATE_RUNNING,
+    QR_STATE_STARTING,
+    QR_STATE_STOPPED,
+    QR_STATE_STOPPING,
+    QR_STATE_UNCONFIGURED,
+    QR_STATE_UPDATING,
+)
+
 _A = {"name": lambda n: n, "label": lambda l: l}
 
 
@@ -64,20 +85,20 @@ _QLSRDU_del = _QLSRDU + [_a("delete", "Delete")]
 
 _ACTION_MAPS = {
     # llama_server / llama_rpc — build-based engines
-    "llama_server": {
-        "unconfigured": _QL,
-        "configuring": _QLS,
-        "deployed": _QLSRDU_del,
-        "starting": _QLS,
-        "loading": _QLS,
-        "running": _QLSR,
-        "stopping": [_a("start", "Start")],
-        "stopped": _QLSRDU,
-        "error": _QLSRDU_del,
-        "deploying": _QLS,
-        "updating": [],
-        "compiling": [],
-        "build_error": [
+    QR_ENGINE_LLAMA_SERVER_NAME: {
+        QR_STATE_UNCONFIGURED: _QL,
+        QR_STATE_CONFIGURING: _QLS,
+        QR_STATE_DEPLOYED: _QLSRDU_del,
+        QR_STATE_STARTING: _QLS,
+        QR_STATE_LOADING: _QLS,
+        QR_STATE_RUNNING: _QLSR,
+        QR_STATE_STOPPING: [_a("start", "Start")],
+        QR_STATE_STOPPED: _QLSRDU,
+        QR_STATE_ERROR: _QLSRDU_del,
+        QR_STATE_DEPLOYING: _QLS,
+        QR_STATE_UPDATING: [],
+        QR_STATE_COMPILING: [],
+        QR_STATE_BUILD_ERROR: [
             _a("deploy", "Deploy"),
             _a("start", "Start"),
             _a("undeploy", "Undeploy"),
@@ -87,29 +108,29 @@ _ACTION_MAPS = {
 
     },
     # iperf3 — no rebuild, no undeploy
-    "iperf3": {
-        "unconfigured": [
+    QR_ENGINE_IPERF3_NAME: {
+        QR_STATE_UNCONFIGURED: [
             _a("deploy", "Deploy"),
             _a("delete", "Delete"),
         ],
-        "configuring": _QLS,
-        "deployed": [
+        QR_STATE_CONFIGURING: _QLS,
+        QR_STATE_DEPLOYED: [
             _a("reconfig_restart", "Reconfig/Restart"),
             _a("start", "Start"),
             _a("stop", "Stop"),
             _a("rebuild", "Rebuild"),
             _a("delete", "Delete"),
         ],
-        "starting": _QLS,
-        "running": _QLSR,
-        "stopping": [_a("start", "Start")],
-        "stopped": [
+        QR_STATE_STARTING: _QLS,
+        QR_STATE_RUNNING: _QLSR,
+        QR_STATE_STOPPING: [_a("start", "Start")],
+        QR_STATE_STOPPED: [
             _a("reconfig_restart", "Reconfig/Restart"),
             _a("start", "Start"),
             _a("rebuild", "Rebuild"),
             _a("deploy", "Deploy"),
         ],
-        "error": [
+        QR_STATE_ERROR: [
             _a("reconfig_restart", "Reconfig/Restart"),
             _a("start", "Start"),
             _a("stop", "Stop"),
@@ -117,7 +138,7 @@ _ACTION_MAPS = {
             _a("deploy", "Deploy"),
             _a("delete", "Delete"),
         ],
-        "build_error": [
+        QR_STATE_BUILD_ERROR: [
             _a("deploy", "Deploy"),
             _a("start", "Start"),
             _a("stop", "Stop"),
@@ -126,34 +147,34 @@ _ACTION_MAPS = {
         "timeout": [_a("deploy", "Deploy")],
     },
     # subprocess — no rebuild, limited states
-    "subprocess": {
-        "unconfigured": [
+    QR_ENGINE_SUBPROCESS_NAME: {
+        QR_STATE_UNCONFIGURED: [
             _a("deploy", "Deploy"),
             _a("delete", "Delete"),
         ],
-        "configuring": _QLS,
-        "deployed": [
+        QR_STATE_CONFIGURING: _QLS,
+        QR_STATE_DEPLOYED: [
             _a("reconfig_restart", "Reconfig/Restart"),
             _a("start", "Start"),
             _a("stop", "Stop"),
             _a("delete", "Delete"),
         ],
-        "starting": _QLS,
-        "running": _QLSR,
-        "stopping": [_a("start", "Start")],
-        "stopped": [
+        QR_STATE_STARTING: _QLS,
+        QR_STATE_RUNNING: _QLSR,
+        QR_STATE_STOPPING: [_a("start", "Start")],
+        QR_STATE_STOPPED: [
             _a("reconfig_restart", "Reconfig/Restart"),
             _a("start", "Start"),
             _a("deploy", "Deploy"),
         ],
-        "error": [
+        QR_STATE_ERROR: [
             _a("reconfig_restart", "Reconfig/Restart"),
             _a("start", "Start"),
             _a("stop", "Stop"),
             _a("deploy", "Deploy"),
             _a("delete", "Delete"),
         ],
-        "build_error": [
+        QR_STATE_BUILD_ERROR: [
             _a("deploy", "Deploy"),
             _a("start", "Start"),
             _a("stop", "Stop"),
@@ -162,21 +183,21 @@ _ACTION_MAPS = {
         "timeout": [_a("deploy", "Deploy")],
     },
     # timestamp_proxy — infra engine, start/stop/restart only (no build)
-    "timestamp_proxy": {
-        "unconfigured": [
+    QR_ENGINE_TIMESTAMP_PROXY_NAME: {
+        QR_STATE_UNCONFIGURED: [
             _a("deploy", "Deploy"),
             _a("delete", "Delete"),
         ],
-        "deploying": _QLS,
-        "configuring": _QLS,
-        "running": _QLSR,
-        "stopping": [_a("start", "Start")],
-        "stopped": [
+        QR_STATE_DEPLOYING: _QLS,
+        QR_STATE_CONFIGURING: _QLS,
+        QR_STATE_RUNNING: _QLSR,
+        QR_STATE_STOPPING: [_a("start", "Start")],
+        QR_STATE_STOPPED: [
             _a("start", "Start"),
             _a("restart", "Restart"),
             _a("delete", "Delete"),
         ],
-        "error": [
+        QR_STATE_ERROR: [
             _a("start", "Start"),
             _a("stop", "Stop"),
             _a("restart", "Restart"),
@@ -196,14 +217,14 @@ def get_action_map(engine_name):
     Returns:
         dict mapping state strings to list of action dicts.
     """
-    if engine_name in ("llama_server", "llama_rpc"):
-        return _ACTION_MAPS["llama_server"]
-    if engine_name == "iperf3":
-        return _ACTION_MAPS["iperf3"]
-    if engine_name == "subprocess":
-        return _ACTION_MAPS["subprocess"]
-    if engine_name == "timestamp_proxy":
-        return _ACTION_MAPS["timestamp_proxy"]
+    if engine_name in (QR_ENGINE_LLAMA_SERVER_NAME, QR_ENGINE_LLAMA_RPC_NAME):
+        return _ACTION_MAPS[QR_ENGINE_LLAMA_SERVER_NAME]
+    if engine_name == QR_ENGINE_IPERF3_NAME:
+        return _ACTION_MAPS[QR_ENGINE_IPERF3_NAME]
+    if engine_name == QR_ENGINE_SUBPROCESS_NAME:
+        return _ACTION_MAPS[QR_ENGINE_SUBPROCESS_NAME]
+    if engine_name == QR_ENGINE_TIMESTAMP_PROXY_NAME:
+        return _ACTION_MAPS[QR_ENGINE_TIMESTAMP_PROXY_NAME]
     # Fallback: empty map for unknown engines
     return {}
 

@@ -37,8 +37,13 @@
       changed_when: "'Already up to date' not in git_pull_result.stdout"
       failed_when: false
 
-    - name: Get short commit hash
-      shell: git rev-parse --short=7 HEAD
+    - name: Get version tag (try tag first, fall back to short hash)
+      shell: |
+        if git describe --tags --abbrev=7 2>/dev/null; then
+          git describe --tags --abbrev=7
+        else
+          git rev-parse --short=7 HEAD
+        fi
       args:
         chdir: "{{ _node_src_dir }}"
       become_user: "{{ remote_node_user | default(omit) }}"

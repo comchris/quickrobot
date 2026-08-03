@@ -8,21 +8,23 @@ from qr_api import _CONFIG
 from qr_api.routes_instances.status_queries import _health_probe_instance
 from qr_api.lib_instances import (
     _restart_system_managed, _stop_system_managed, _start_system_managed, _execute_playbook,
-    _resolve_engine_playbook_id, _get_keep_shared_build,
+    _resolve_engine_playbook_id, _get_keep_shared_build, deploy_instance,
     _check_node_active, _get_deploy_lock,
 )
+from lib.lib_qr_actions import log_qr_override
 from lib.qr_engine_ids import (
     QR_ENGINE_LLAMA_SERVER_NAME, QR_ENGINE_LLAMA_RPC_NAME,
-    QR_ENGINE_IPERF3_NAME, QR_ENGINE_UNIVERSAL_NAME,
+    QR_ENGINE_IPERF3_NAME, QR_ENGINE_UNIVERSAL_NAME, QR_ENGINE_SUBPROCESS_NAME,
     QR_ENGINE_LLAMA_SERVER, QR_ENGINE_LLAMA_RPC,
-    QR_ENGINE_SUBPROCESS_NAME,
-    QR_JOB_DEPLOY, QR_JOB_DEPLOY_FAST, QR_JOB_RECONFIGURE,
-    QR_JOB_RESTART, QR_JOB_START, QR_JOB_STOP, QR_JOB_UNDEPLOY,
+    QR_JOB_DEPLOY, QR_JOB_DEPLOY_FAST, QR_JOB_DEPLOY_BINARY, QR_JOB_RECONFIGURE,
+    QR_JOB_RESTART, QR_JOB_START, QR_JOB_STOP, QR_JOB_UNDEPLOY, QR_JOB_HEALTH_CHECK,
 )
 from lib.lib_engine_states import (
     VALID_INSTANCE_STATES, VALID_UNDEPLOY_STATES, IDEMPOTENT_START_STATES,
     AUTO_DEPLOY_STATES, RESTART_FROM_NONRUNNING, SUBPROCESS_CYCLE_STATES,
     UNDEPLOY_TRANSITIONAL_STATES, STOP_ALLOWED_STATES, RECONFIGURE_ALLOWED_STATES,
+    QR_STATE_STARTING, QR_STATE_RUNNING, QR_STATE_STOPPING,
+    QR_STATE_STOPPED, QR_STATE_ERROR, QR_STATE_UNCONFIGURED, QR_STATE_DEPLOYED,
 )
 
 logger = _logging.getLogger(__name__)
@@ -80,11 +82,11 @@ def api_start_instance(inst_id):
         if status.get("running"):
             # Already running — ensure state is running
             try:
-                transition_state(_CONFIG["db_path"], inst_id, "starting")
+                transition_state(_CONFIG["db_path"], inst_id, QR_STATE_STARTING)
             except Exception as _e:
                 logger.debug("api_start_instance inst=%d: starting state transition (idempotent): %s", inst_id, _e)
             try:
-                transition_state(_CONFIG["db_path"], inst_id, "running")
+                transition_state(_CONFIG["db_path"], inst_id, QR_STATE_RUNNING)
             except Exception as _e:
                 logger.debug("api_start_instance inst=%d: running state transition (idempotent): %s", inst_id, _e)
             return success_single({"action": "start", "instance_id": inst_id,
@@ -92,7 +94,7 @@ def api_start_instance(inst_id):
         result = engine.execute(inst_id, QR_JOB_START, _CONFIG["db_path"])
         if result.get("error"):
             try:
-                transition_state(_CONFIG["db_path"], inst_id, "error")
+                transition_state(_CONFIG["db_path"], inst_id, QR_STATE_ERROR)
             except Exception as _e:
                 logger.debug("api_start_instance inst=%d: error state transition on execute failure: %s", inst_id, _e)
             return error_response("DEPLOYMENT_FAILED", result["error"])
@@ -104,11 +106,11 @@ def api_start_instance(inst_id):
                 p = _psutil.Process(result["pid"])
                 if p.status() != "zombie":
                     try:
-                        transition_state(_CONFIG["db_path"], inst_id, "starting")
+                        transition_state(_CONFIG["db_path"], inst_id, QR_STATE_STARTING)
                     except Exception as _e:
                         logger.debug("api_start_instance inst=%d: starting state transition (pid check): %s", inst_id, _e)
                     try:
-                        transition_state(_CONFIG["db_path"], inst_id, "running")
+                        transition_state(_CONFIG["db_path"], inst_id, QR_STATE_RUNNING)
                     except Exception as _e:
                         logger.debug("api_start_instance inst=%d: running state transition (pid check): %s", inst_id, _e)
                 else:
@@ -117,7 +119,7 @@ def api_start_instance(inst_id):
                     _ui(_CONFIG["db_path"], inst_id, pid_last_known=None)
             except (_psutil.NoSuchProcess, _psutil.AccessDenied):
                 pass
-        log_action(_CONFIG["db_path"], inst_id, "start", "success", detail={"subprocess": result})
+        log_action(_CONFIG["db_path"], inst_id, QR_JOB_START, "success", detail={"subprocess": result})
         return success_single({"action": "start", "instance_id": inst_id,
                                 "state": "running", "pid": result.get("pid")})
 
@@ -139,8 +141,8 @@ def api_start_instance(inst_id):
         if health["error"]:
             # Probe failed — transition to error state per DESIGN-2
             try:
-                 transition_state(_CONFIG["db_path"], inst_id, "error",
-                                  state_reason=f"Health probe failed: {health['error']}")
+                 transition_state(_CONFIG["db_path"], inst_id, QR_STATE_ERROR,
+                                   state_reason=f"Health probe failed: {health['error']}")
             except Exception as _e:
                 logger.debug("api_start_instance inst=%d: error state transition (health probe fail): %s", inst_id, _e)
                 pass
@@ -149,12 +151,12 @@ def api_start_instance(inst_id):
         if health["service_state"] in ("running", "active"):
             # Service confirmed running on remote — idempotent success
             try:
-                transition_state(_CONFIG["db_path"], inst_id, "running")
+                transition_state(_CONFIG["db_path"], inst_id, QR_STATE_RUNNING)
             except Exception as _e:
                 logger.debug("api_start_instance inst=%d: running state transition (idempotent): %s", inst_id, _e)
                 pass
             resp = {"action": "start", "instance_id": inst_id,
-                    "state": "running", "idempotent": True,
+                    "state": QR_STATE_RUNNING, "idempotent": True,
                     "note": "Already running on remote node"}
             if rp_warnings:
                 resp["warnings"] = rp_warnings
@@ -171,8 +173,6 @@ def api_start_instance(inst_id):
         return error_response("INVALID_STATE",
                                  f"Cannot start instance in '{inst['state']}' state (allowed: {allowed})")
 
-    log_id = log_action(_CONFIG["db_path"], inst_id, "start", "received")
-
     # llama_server with RPC bindings → RUNNER-1 job with health checks
     if engine_type_name == QR_ENGINE_LLAMA_SERVER_NAME and inst.get("rpc_bind_ids"):
         try:
@@ -186,19 +186,17 @@ def api_start_instance(inst_id):
                 "tasks_created": len(tasks),
             })
         except Exception as exc:
-            from db.adapters.instances import update_log_status
-            update_log_status(_CONFIG["db_path"], log_id, "failed", detail={"error": str(exc)})
+            from db.adapters.instances import update_log_status, log_action as _la
+            _tmp_id = _la(_CONFIG["db_path"], inst_id, QR_JOB_START, "failed")
+            update_log_status(_CONFIG["db_path"], _tmp_id, "failed", detail={"error": str(exc)})
             return error_response("DEPLOYMENT_FAILED", f"Start job creation failed: {exc}")
 
     # Auto-deploy if unconfigured or deploying (stuck)
     if inst["state"] in AUTO_DEPLOY_STATES:
         deploy_result = deploy_instance(_CONFIG["db_path"], inst_id)
         if not deploy_result.get("success"):
-            from db.adapters.instances import update_log_status
-            update_log_status(_CONFIG["db_path"], log_id, "failed",
-                              detail={"auto_deploy": deploy_result})
             return error_response("DEPLOYMENT_FAILED",
-                                 f"Auto-deploy failed: {deploy_result.get('message', 'unknown')}")
+                                  f"Auto-deploy failed: {deploy_result.get('message', 'unknown')}")
 
     # Universal engine: require start_command or binary_path
     if engine_type_name == QR_ENGINE_UNIVERSAL_NAME:
@@ -216,29 +214,27 @@ def api_start_instance(inst_id):
         has_start_cmd = bool(co_merged.get("start_command", ""))
         has_binary = bool(co_merged.get("binary_path", ""))
         if not has_start_cmd and not has_binary:
-            from db.adapters.instances import update_log_status
-            update_log_status(_CONFIG["db_path"], log_id, "failed",
-                              detail={"error": "START_CONFIG_MISSING"})
             return error_response("START_CONFIG_MISSING",
-                                 "No start_command or binary_path defined for this universal instance")
+                                  "No start_command or binary_path defined for this universal instance")
 
     # RUNNER-1: Start via staged chain (service_start playbook)
     from lib.lib_runner import PlaybookRunner as _PR
     runner = _PR(_CONFIG["db_path"])
     result = runner.chain(inst_id, job_type=QR_JOB_START, actor="api", async_mode=True)
     if not result.get("job_id"):
-        from db.adapters.instances import update_log_status
-        update_log_status(_CONFIG["db_path"], log_id, "failed",
+        from db.adapters.instances import update_log_status, log_action as _la
+        _tmp_id = _la(_CONFIG["db_path"], inst_id, QR_JOB_START, "failed")
+        update_log_status(_CONFIG["db_path"], _tmp_id, "failed",
                           detail={"chain": result})
         return error_response("DEPLOYMENT_FAILED",
-                                 f"Start job creation failed: {result.get('message', 'unknown')}")
+                              f"Start job creation failed: {result.get('message', 'unknown')}")
 
     from db.adapters.instances import update_log_status
-    update_log_status(_CONFIG["db_path"], log_id, "success", detail={"job_id": result["job_id"]})
+    update_log_status(_CONFIG["db_path"], result["job_id"], "success", detail={"job_id": result["job_id"]})
 
     resp = {"action": "start", "instance_id": inst_id,
                 "job_id": result["job_id"],
-                "state": "starting"}
+                "state": QR_STATE_STARTING}
     if rp_warnings:
         resp["warnings"] = rp_warnings
     return success_single(resp)
@@ -267,7 +263,7 @@ def api_stop_instance(inst_id):
         if engine is None:
             return error_response("DEPLOYMENT_FAILED", "subprocess engine not loaded")
         try:
-            transition_state(_CONFIG["db_path"], inst_id, "stopping")
+            transition_state(_CONFIG["db_path"], inst_id, QR_STATE_STOPPING)
         except Exception as _e:
             logger.debug("api_stop_instance inst=%d: subprocess stopping state transition: %s", inst_id, _e)
             pass
@@ -275,41 +271,40 @@ def api_stop_instance(inst_id):
         # Always transition to stopped regardless of execute() result
         # (process may already be dead with stale PID)
         try:
-            transition_state(_CONFIG["db_path"], inst_id, "stopped")
+            transition_state(_CONFIG["db_path"], inst_id, QR_STATE_STOPPED)
         except Exception as _e:
             logger.debug("api_stop_instance inst=%d: subprocess stopped state transition: %s", inst_id, _e)
         if result.get("error"):
             return success_single({"action": "stop", "instance_id": inst_id, "state": "stopped", "note": result["error"]})
-        log_action(_CONFIG["db_path"], inst_id, "stop", "success", detail={"subprocess": result})
+        log_action(_CONFIG["db_path"], inst_id, QR_JOB_STOP, "success", detail={"subprocess": result})
         return success_single({"action": "stop", "instance_id": inst_id, "state": "stopped"})
 
     if inst["state"] not in STOP_ALLOWED_STATES:
         return error_response("INVALID_STATE",
                                 f"Cannot stop instance in '{inst['state']}' state")
 
-    log_id = log_action(_CONFIG["db_path"], inst_id, "stop", "received")
-
     # RUNNER-1: Stop via staged chain (service_stop playbook)
     # State transitions are handled by _run_stage via STAGE_STATE_MAP.
     # If chain() fails (e.g., job_type CHECK violation), instance stays in original state.
     from lib.lib_runner import PlaybookRunner as _PR
     runner = _PR(_CONFIG["db_path"])
-    result = runner.chain(inst_id, job_type="stop", actor="api")
+    result = runner.chain(inst_id, job_type=QR_JOB_STOP, actor="api")
     if result.get("success"):
         # _finalize_job sets state via raw SQL for stop jobs.
         # Ensure final state is "stopped" (not "deployed").
         try:
-            transition_state(_CONFIG["db_path"], inst_id, "stopped")
+            transition_state(_CONFIG["db_path"], inst_id, QR_STATE_STOPPED)
         except Exception as _e:
             logger.debug("api_stop_instance inst=%d: final stopped state transition (may be redundant): %s", inst_id, _e)
         from db.adapters.instances import update_log_status
-        update_log_status(_CONFIG["db_path"], log_id, "success",
+        update_log_status(_CONFIG["db_path"], result["job_id"], "success",
                           detail={"chain": result})
     else:
         # Chain failed — instance stays in whatever state _run_stage left it.
         # Log failure for visibility; user can retry or investigate.
-        from db.adapters.instances import update_log_status
-        update_log_status(_CONFIG["db_path"], log_id, "failed",
+        from db.adapters.instances import update_log_status, log_action as _la
+        _tmp_id = _la(_CONFIG["db_path"], inst_id, QR_JOB_STOP, "failed")
+        update_log_status(_CONFIG["db_path"], _tmp_id, "failed",
                           detail={"chain": result})
 
     return success_single({"action": "stop", "instance_id": inst_id, "state": "stopped"})
@@ -340,7 +335,8 @@ def api_restart_instance(inst_id):
     if isinstance(nd, tuple):
         return nd
 
-    log_id = log_action(_CONFIG["db_path"], inst_id, "restart", "received")
+    # Subprocess engine: uses its own log tracking (no chain())
+    is_subprocess_restart = (engine_type_name == QR_ENGINE_SUBPROCESS_NAME)
 
     # Log override if restarting from non-running state (deployed/stopped)
     if inst.get("state") in RESTART_FROM_NONRUNNING:
@@ -350,7 +346,9 @@ def api_restart_instance(inst_id):
                             details={"from_state": inst["state"]})
 
     # Subprocess engine: skip ansible playbooks entirely — runs locally via Popen, not systemd
-    if engine_type_name == QR_ENGINE_SUBPROCESS_NAME:
+    if is_subprocess_restart:
+        from db.adapters.instances import log_action as _ra
+        log_id = _ra(_CONFIG["db_path"], inst_id, QR_JOB_RESTART, "received")
         from engine import get_engine as _ge
         engine = _ge(QR_ENGINE_SUBPROCESS_NAME)
         if engine is None:
@@ -358,7 +356,7 @@ def api_restart_instance(inst_id):
         # For running/stopping states, do a proper stop→start cycle
         if inst["state"] in SUBPROCESS_CYCLE_STATES:
             try:
-                transition_state(_CONFIG["db_path"], inst_id, "stopping")
+                transition_state(_CONFIG["db_path"], inst_id, QR_STATE_STOPPING)
             except Exception as exc:
                 from db.adapters.instances import update_log_status
                 update_log_status(_CONFIG["db_path"], log_id, "failed", detail={"phase": "stopping", "error": str(exc)})
@@ -366,12 +364,12 @@ def api_restart_instance(inst_id):
             # Stop the process
             stop_result = engine.execute(inst_id, QR_JOB_STOP, _CONFIG["db_path"])
             try:
-                transition_state(_CONFIG["db_path"], inst_id, "stopped")
+                transition_state(_CONFIG["db_path"], inst_id, QR_STATE_STOPPED)
             except Exception as _e:
                 logger.debug("api_restart_instance inst=%d: stopped state transition after subprocess stop: %s", inst_id, _e)
         # Then start (handles stopped/deployed/error states directly)
         try:
-            transition_state(_CONFIG["db_path"], inst_id, "starting")
+            transition_state(_CONFIG["db_path"], inst_id, QR_STATE_STARTING)
         except Exception as exc:
             from db.adapters.instances import update_log_status
             update_log_status(_CONFIG["db_path"], log_id, "failed", detail={"phase": "starting", "error": str(exc)})
@@ -379,7 +377,7 @@ def api_restart_instance(inst_id):
         start_result = engine.execute(inst_id, QR_JOB_START, _CONFIG["db_path"])
         if start_result.get("error"):
             try:
-                transition_state(_CONFIG["db_path"], inst_id, "error")
+                transition_state(_CONFIG["db_path"], inst_id, QR_STATE_ERROR)
             except Exception as _e:
                 logger.debug("api_restart_instance inst=%d: error state transition on start failure: %s", inst_id, _e)
             from db.adapters.instances import update_log_status
@@ -392,12 +390,12 @@ def api_restart_instance(inst_id):
                 p = _psutil.Process(start_result["pid"])
                 if p.status() != "zombie":
                     try:
-                        transition_state(_CONFIG["db_path"], inst_id, "starting")
+                        transition_state(_CONFIG["db_path"], inst_id, QR_STATE_STARTING)
                     except Exception as _e:
                         logger.debug("api_restart_instance inst=%d: starting state transition (pid check): %s", inst_id, _e)
                         pass
                     try:
-                        transition_state(_CONFIG["db_path"], inst_id, "running")
+                        transition_state(_CONFIG["db_path"], inst_id, QR_STATE_RUNNING)
                     except Exception as _e:
                         logger.debug("api_restart_instance inst=%d: running state transition (pid check): %s", inst_id, _e)
                         pass
@@ -417,17 +415,18 @@ def api_restart_instance(inst_id):
     result = runner.chain(inst_id, job_type=QR_JOB_RESTART, actor="api")
     if result.get("success"):
         try:
-            transition_state(_CONFIG["db_path"], inst_id, "running")
+            transition_state(_CONFIG["db_path"], inst_id, QR_STATE_RUNNING)
         except Exception as _e:
             logger.debug("api_restart_instance inst=%d: running state transition post-chain: %s", inst_id, _e)
         from db.adapters.instances import update_log_status
-        update_log_status(_CONFIG["db_path"], log_id, "success", detail={"chain": result})
+        update_log_status(_CONFIG["db_path"], result["job_id"], "success", detail={"chain": result})
     else:
-        from db.adapters.instances import update_log_status
-        update_log_status(_CONFIG["db_path"], log_id, "failed",
+        from db.adapters.instances import update_log_status, log_action as _la
+        _tmp_id = _la(_CONFIG["db_path"], inst_id, QR_JOB_RESTART, "failed")
+        update_log_status(_CONFIG["db_path"], _tmp_id, "failed",
                           detail={"chain": result})
         try:
-            transition_state(_CONFIG["db_path"], inst_id, "error")
+            transition_state(_CONFIG["db_path"], inst_id, QR_STATE_ERROR)
         except Exception as _e:
             logger.debug("api_restart_instance inst=%d: error state transition (chain failure): %s", inst_id, _e)
             pass
@@ -495,16 +494,86 @@ def api_deploy_instance(inst_id):
             elif isinstance(_sb, (int, float)):
                 _deploy_skip = bool(_sb)
 
-        # Route to correct job type based on skip_build flag
-        _job_type = QR_JOB_DEPLOY_FAST if _deploy_skip else QR_JOB_DEPLOY
+        # BINARY-DL: Extract binary_template_id from request body (orthogonal to preset).
+        # Chain selection priority (§3.2A of binary-download-template.md):
+        #   1. Explicit binary_template_id → QR_JOB_DEPLOY_BINARY
+        #   2. Preset config_template.binary_id (backward compat) → QR_JOB_DEPLOY_BINARY
+        #   3. None → QR_JOB_DEPLOY (git_build default)
+        _binary_template_id = None
+        if _body:
+            _btid = _body.get("binary_template_id")
+            if _btid is not None:
+                try:
+                    _binary_template_id = int(_btid)
+                except (ValueError, TypeError):
+                    pass
 
-        # DEBUG: trace deploy call (convert to logger.debug() when done debugging)
-        logger.debug("api_deploy_instance(%d) _job_type=%s", inst_id, _job_type)
+        # Template persistence (Issue C+D): on re-deploy with binary_template_id,
+        # always store the ID (for rebuild chain detection), merge metadata if present.
+        if _binary_template_id is not None:
+            try:
+                from db.sqlite import pool as _pool_db
+                with _pool_db(_CONFIG["db_path"]) as _cdb:
+                    _bin_row = _cdb.execute(
+                        "SELECT metadata FROM engine_binaries WHERE id=? AND is_active=1",
+                        (_binary_template_id,),
+                    ).fetchone()
+                # Persist binary_template_id always (for rebuild detection)
+                _co_merged = inst.get("config_override") or {}
+                if isinstance(_co_merged, str):
+                    try:
+                        _co_merged = json.loads(_co_merged)
+                    except (json.JSONDecodeError, TypeError):
+                        _co_merged = {}
+                _co_merged["binary_template_id"] = _binary_template_id
+                if _bin_row and _bin_row.get("metadata"):
+                    try:
+                        _new_meta = json.loads(_bin_row["metadata"])
+                        # Merge fresh template metadata into existing config_override
+                        if isinstance(_new_meta, dict):
+                            for _k, _v in _new_meta.items():
+                                _co_merged[_k] = _v
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                # Persist updated config_override to DB
+                from db.adapters.instances import update_instance as _upd_inst
+                _upd_inst(_CONFIG["db_path"], inst_id, config_override=_co_merged)
+            except Exception as _e:
+                logger.debug("api_deploy_instance(%d): template refresh failed: %s", inst_id, _e)
+
+        # Check for binary_id in preset config_template (backward compat fallback)
+        _has_binary_preset = False
+        if inst and inst.get("preset_id") and _binary_template_id is None:
+            try:
+                from db.sqlite import pool as _pool2
+                with _pool2(_CONFIG["db_path"]) as _c2:
+                    _pr2 = _c2.execute(
+                        "SELECT config_template FROM engine_presets WHERE id=?",
+                        (inst["preset_id"],),
+                    ).fetchone()
+                    if _pr2 and _pr2["config_template"]:
+                        _ct2 = json.loads(_pr2["config_template"])
+                        _has_binary_preset = bool(_ct2.get("binary_id"))
+            except Exception:
+                pass
+
+        # Route to correct job type based on skip_build / binary_template_id / preset
+        _job_type = QR_JOB_DEPLOY_FAST if _deploy_skip else QR_JOB_DEPLOY
+        if _binary_template_id is not None:
+            _job_type = QR_JOB_DEPLOY_BINARY
+        elif not _deploy_skip and _has_binary_preset and _job_type == QR_JOB_DEPLOY:
+            # Auto-route to binary download when preset has binary_id (backward compat)
+            _job_type = QR_JOB_DEPLOY_BINARY
+
+        # DEBUG: trace deploy call
+        logger.debug("api_deploy_instance(%d) _job_type=%s _binary_template_id=%s",
+                     inst_id, _job_type, _binary_template_id)
         # Execute staged chain via PlaybookRunner (async — returns immediately)
         from lib.lib_runner import PlaybookRunner
         runner = PlaybookRunner(_CONFIG["db_path"])
         result = runner.chain(inst_id, job_type=_job_type,
-                              actor="api", skip_build=_deploy_skip, async_mode=True)
+                              actor="api", skip_build=_deploy_skip, async_mode=True,
+                              binary_template_id=_binary_template_id)
 
         # Map chain() result to api_deploy_instance response format
         response = {"action": "deploy", "instance_id": inst_id,
@@ -652,8 +721,6 @@ def api_undeploy_instance(inst_id):
     if isinstance(nd, tuple):
         return nd
 
-    log_action(_CONFIG["db_path"], inst_id, "undeploy", "received")
-
     # Run remote undeploy chain if instance is deployed and has a node
     engine_type_name = inst.get("engine_type_name", QR_ENGINE_LLAMA_RPC_NAME)
     node_id = inst.get("node_id")
@@ -686,7 +753,7 @@ def api_undeploy_instance(inst_id):
 
                 pb_id = _resolve_engine_playbook_id(QR_JOB_UNDEPLOY, QR_ENGINE_UNIVERSAL_NAME)
                 if not pb_id:
-                    log_action(_CONFIG["db_path"], inst_id, "undeploy", "partial",
+                    log_action(_CONFIG["db_path"], inst_id, QR_JOB_UNDEPLOY, "partial",
                                 detail={"message": "Undeploy playbook not found in registry for universal engine"})
                     remote_undeploy_ok = True  # considered ok — best effort
                 elif hostname:
@@ -700,37 +767,41 @@ def api_undeploy_instance(inst_id):
                         undeploy_result = r.get("result") or {}
                     remote_undeploy_ok = not undeploy_result.get("failed", False)
                     if not remote_undeploy_ok:
-                        log_action(_CONFIG["db_path"], inst_id, "undeploy", "partial",
+                        log_action(_CONFIG["db_path"], inst_id, QR_JOB_UNDEPLOY, "partial",
                                     detail={"error": str(undeploy_result.get("error", "unknown"))})
                 else:
-                    log_action(_CONFIG["db_path"], inst_id, "undeploy", "partial",
+                    log_action(_CONFIG["db_path"], inst_id, QR_JOB_UNDEPLOY, "partial",
                                 detail={"message": "No hostname for node"})
                     remote_undeploy_ok = True
             except Exception as exc:
-                log_action(_CONFIG["db_path"], inst_id, "undeploy", "partial",
+                log_action(_CONFIG["db_path"], inst_id, QR_JOB_UNDEPLOY, "partial",
                             detail={"error": str(exc)})
         # Standard engines (llama_server, llama_rpc, iperf3): use RUNNER-1 chain
         else:
             from lib.lib_runner import PlaybookRunner
             runner = PlaybookRunner(_CONFIG["db_path"])
-            chain_result = runner.chain(inst_id, job_type="undeploy", actor="api")
-            remote_undeploy_ok = chain_result.get("success", False)
+            # async_mode=True — SSH-heavy undeploy can exceed 30s HTTP timeout.
+            # Creates job+tasks, transitions state, returns immediately.
+            # Scheduler picks up tasks; client polls via GET /instances/<id> or /jobs.
+            chain_result = runner.chain(inst_id, job_type="undeploy", actor="api",
+                                        async_mode=True)
+            remote_undeploy_ok = None  # undetermined — await chain completion
 
     try:
         # Transition path depends on current state
-        if inst["state"] == "running":
-            transition_state(_CONFIG["db_path"], inst_id, "stopping")
-            transition_state(_CONFIG["db_path"], inst_id, "stopped")
+        if inst["state"] == QR_STATE_RUNNING:
+            transition_state(_CONFIG["db_path"], inst_id, QR_STATE_STOPPING)
+            transition_state(_CONFIG["db_path"], inst_id, QR_STATE_STOPPED)
         elif inst["state"] in UNDEPLOY_TRANSITIONAL_STATES:
-            transition_state(_CONFIG["db_path"], inst_id, "stopping")
-            transition_state(_CONFIG["db_path"], inst_id, "stopped")
+            transition_state(_CONFIG["db_path"], inst_id, QR_STATE_STOPPING)
+            transition_state(_CONFIG["db_path"], inst_id, QR_STATE_STOPPED)
         # error and stopped states: direct to unconfigured
-        updated = transition_state(_CONFIG["db_path"], inst_id, "unconfigured")
+        updated = transition_state(_CONFIG["db_path"], inst_id, QR_STATE_UNCONFIGURED)
     except Exception as exc:
-        log_action(_CONFIG["db_path"], inst_id, "undeploy", "failed", detail={"error": str(exc)})
+        log_action(_CONFIG["db_path"], inst_id, QR_JOB_UNDEPLOY, "failed", detail={"error": str(exc)})
         return error_response("DEPLOYMENT_FAILED", str(exc))
 
-    log_action(_CONFIG["db_path"], inst_id, "undeploy", "success" if remote_undeploy_ok else "partial",
+    log_action(_CONFIG["db_path"], inst_id, QR_JOB_UNDEPLOY, "success" if remote_undeploy_ok else "partial",
                 detail={"remote_undeploy": remote_undeploy_ok})
 
     # Check if shared build should be cleaned up (last llama_server/llama_rpc on node)
@@ -766,7 +837,15 @@ def api_undeploy_instance(inst_id):
                 log_action(_CONFIG["db_path"], inst_id, "shared_cleanup",
                         "failed", detail={"error": str(exc)})
 
-    return success_single(inst)
+    # Build async response with job_id for progress tracking
+    response = {"action": "undeploy", "instance_id": inst_id,
+                "success": remote_undeploy_ok if remote_undeploy_ok is not None else True,
+                "message": "Undeploy queued — scheduler will execute chain"}
+    if isinstance(chain_result, dict) and chain_result.get("job_id"):
+        response["job_id"] = chain_result["job_id"]
+        if chain_result.get("tasks_created"):
+            response["tasks_created"] = chain_result["tasks_created"]
+    return success_single(response)
 
 
 def api_execute_instance(inst_id):
@@ -962,24 +1041,24 @@ def api_run_client(inst_id):
     elif is_server:
         # Server: just start and mark running
         try:
-            transition_state(_CONFIG["db_path"], inst_id, "starting")
+            transition_state(_CONFIG["db_path"], inst_id, QR_STATE_STARTING)
         except Exception as _e:
             logger.debug("api_run_client inst=%d: starting state transition (server): %s", inst_id, _e)
         try:
             result = _run_manage_action(inst_id, engine_type_name, node_id, "start")
             if result.get("success"):
                 try:
-                    transition_state(_CONFIG["db_path"], inst_id, "running")
+                    transition_state(_CONFIG["db_path"], inst_id, QR_STATE_RUNNING)
                 except Exception as _e:
                     logger.debug("api_run_client inst=%d: running state transition (server): %s", inst_id, _e)
-                log_action(_CONFIG["db_path"], inst_id, "start", "success")
+                log_action(_CONFIG["db_path"], inst_id, QR_JOB_START, "success")
                 return success_single({"action": "run_client", "instance_id": inst_id,
-                                       "state": "running", "message": "Server started"})
+                                       "state": QR_STATE_RUNNING, "message": "Server started"})
             else:
-                log_action(_CONFIG["db_path"], inst_id, "start", "failed",
+                log_action(_CONFIG["db_path"], inst_id, QR_JOB_START, "failed",
                             detail={"remote": result})
                 try:
-                    transition_state(_CONFIG["db_path"], inst_id, "error")
+                    transition_state(_CONFIG["db_path"], inst_id, QR_STATE_ERROR)
                 except Exception as _e:
                     logger.debug("api_run_client inst=%d: error state transition after server start failure: %s", inst_id, _e)
                 return error_response("DEPLOYMENT_FAILED",

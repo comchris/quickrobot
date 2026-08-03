@@ -21,26 +21,22 @@ _project_root = os.path.dirname(os.path.abspath(__file__))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
+# Pre-flight dependency check — must run BEFORE any pip-package imports.
+# This catches missing packages (e.g. python-dotenv) with a friendly message
+# instead of a cryptic ModuleNotFoundError at the first import site.
+from lib.lib_deps import check_dependencies as _check_deps
+_check_deps()
+
+from dotenv import load_dotenv
+import lib.lib_pid as lib_pid
+import lib.lib_platform as _lib_platform
+
 # Source .quickrobot.env into os.environ so this process (and all its children)
 # inherit env vars like PYTHONPYCACHEPREFIX, CONSOLE_DEBUG_LEVEL, etc.
 # This prevents local __pycache__ dirs when run directly from the shell.
 _env_file = os.path.join(_project_root, ".quickrobot.env")
 if os.path.isfile(_env_file):
-    with open(_env_file, "r") as _f:
-        for _line in _f:
-            _line = _line.strip()
-            if not _line or _line.startswith("#"):
-                continue
-            if "=" not in _line:
-                continue
-            _k, _, _v = _line.partition("=")
-            _k = _k.strip()
-            _v = _v.strip()
-            if len(_v) >= 2 and (( _v[0] == '"' and _v[-1] == '"') or (_v[0] == "'" and _v[-1] == "'")):
-                _v = _v[1:-1]
-            os.environ[_k] = _v
-    del _f, _line, _k, _v  # clean up loop vars (only defined if file existed)
-del _env_file  # always defined above
+    load_dotenv(_env_file)
 
 # Module-level logger for bare-except blocks at module scope (lines 237-243)
 import logging as _logging
@@ -62,7 +58,7 @@ def _pid_file_path():
         db_dir = os.path.dirname(env_cfg.get("QUICKROBOT_DB_PATH", "data/quickrobot.db"))
     except (FileNotFoundError, KeyError):
         db_dir = "data"
-    return os.path.join(db_dir, "quickrobot.pid")
+    return lib_pid.get_pid_path(db_dir)
 
 
 def _remove_pid_file():
@@ -94,70 +90,75 @@ def main():
                                                   datefmt="%H:%M:%S"))
         _qr_logger.addHandler(_handler)
 
+    _qr_logger.debug("main() starting")
+    # Root guard — refuse to run as root (non-interactive HTTP server, Windows: no-op)
+    _lib_platform.check_nonroot()
+
+    _qr_logger.debug("pre-flight stale check starting")
+    # Skip stale process check after execv restart — the old process just died
+    # and TIME_WAIT may hold the port briefly. The restart marker proves we
+    # intentionally replaced this process; no stale process to worry about.
+    _just_restarted = False
     try:
         _marker = os.path.join(os.getcwd(), "data", "_restart_marker")
         if os.path.exists(_marker):
             with open(_marker, "r") as _fm:
                 _qr_logger.debug("RESTART marker detected: %s", _fm.read().strip())
-            os.remove(_marker)
+            # Set env var so phase4_pid_port() can detect restart.
+            # Don't remove the file yet — phase4 needs to see it too.
+            os.environ["QR_RESTART_MARKER"] = "1"
+            _just_restarted = True
     except Exception as _dm:
         _qr_logger.debug("marker check failed: %s", _dm)
-    
-    _qr_logger.debug("main() starting")
-    # Root guard — refuse to run as root (non-interactive HTTP server)
-    if os.getuid() == 0:
-        _qr_logger.debug("root guard triggered")
-        print("this robot won't run as root", file=sys.stderr)
-        sys.exit(1)
 
-    _qr_logger.debug("pre-flight stale check starting")
-    # Pre-flight: detect stale quickrobot.py processes from prior sessions.
-    # A leftover --mode dev-update (or any other long-running mode) would still
-    # hold the API port and serve requests — a fresh start would conflict.
-    # Skip this check for exit mode (no port binding).
-    _exit_mode = "--mode" in sys.argv and "exit" in sys.argv
-    if not _exit_mode:
-        try:
-            _api_port = int(os.environ.get("QUICKROBOT_API_PORT", "8039"))
-        except (ValueError, TypeError):
-            _api_port = 8039
+    _stale_found = []
+    if not _just_restarted:
+        # Pre-flight: detect stale quickrobot.py processes from prior sessions.
+        # A leftover --mode dev-update (or any other long-running mode) would still
+        # hold the API port and serve requests — a fresh start would conflict.
+        # Skip this check for exit mode (no port binding).
+        _exit_mode = "--mode" in sys.argv and "exit" in sys.argv
+        if not _exit_mode:
+            try:
+                _api_port = int(os.environ.get("QUICKROBOT_API_PORT", "8039"))
+            except (ValueError, TypeError):
+                _api_port = 8039
 
-        _stale_found = []
-        try:
-            _ps_out = _subp.run(["ps", "aux"], capture_output=True, text=True, timeout=5).stdout
-            _my_pid = os.getpid()
-            for _line in _ps_out.splitlines():
-                _parts = _line.split()
-                if len(_parts) < 2:
-                    continue
-                try:
-                    _lp = int(_parts[1])
-                except ValueError:
-                    continue
-                if _lp == _my_pid:
-                    continue
-                if "quickrobot.py" not in _line:
-                    continue
-                # Verify the stale process actually holds the API port
-                try:
-                    _ss_out = _subp.run(
-                        ["ss", "-tlnp"], capture_output=True, text=True, timeout=5
-                    ).stdout
-                    for _sline in _ss_out.splitlines():
-                        if f":{_api_port}" in _sline and "LISTEN" in _sline:
-                            _pid_match = re.search(r"pid=(\d+)", _sline)
-                            if _pid_match and int(_pid_match.group(1)) == _lp:
-                                _cmd = " ".join(_parts[10:]) if len(_parts) > 10 else _line
-                                _stale_found.append(
-                                    f"  pid={_lp} cmd={_cmd!r}"
-                                )
-                except FileNotFoundError:
-                    # ss unavailable — trust the ps match
-                    _stale_found.append(
-                        f"  pid={_lp} cmd={(_parts[10:] if len(_parts) > 10 else [])!r}"
-                    )
-        except FileNotFoundError:
-            pass  # ps/ss not available, skip pre-flight
+            try:
+                _ps_out = _subp.run(["ps", "aux"], capture_output=True, text=True, timeout=5).stdout
+                _my_pid = os.getpid()
+                for _line in _ps_out.splitlines():
+                    _parts = _line.split()
+                    if len(_parts) < 2:
+                        continue
+                    try:
+                        _lp = int(_parts[1])
+                    except ValueError:
+                        continue
+                    if _lp == _my_pid:
+                        continue
+                    if "quickrobot.py" not in _line:
+                        continue
+                    # Verify the stale process actually holds the API port
+                    try:
+                        _ss_out = _subp.run(
+                            ["ss", "-tlnp"], capture_output=True, text=True, timeout=5
+                        ).stdout
+                        for _sline in _ss_out.splitlines():
+                            if f":{_api_port}" in _sline and "LISTEN" in _sline:
+                                _pid_match = re.search(r"pid=(\d+)", _sline)
+                                if _pid_match and int(_pid_match.group(1)) == _lp:
+                                    _cmd = " ".join(_parts[10:]) if len(_parts) > 10 else _line
+                                    _stale_found.append(
+                                        f"  pid={_lp} cmd={_cmd!r}"
+                                    )
+                    except FileNotFoundError:
+                        # ss unavailable — trust the ps match
+                        _stale_found.append(
+                            f"  pid={_lp} cmd={(_parts[10:] if len(_parts) > 10 else [])!r}"
+                        )
+            except FileNotFoundError:
+                pass  # ps/ss not available, skip pre-flight
 
         if _stale_found:
             print("[qr] FATAL: Stale quickrobot.py process(es) detected:")

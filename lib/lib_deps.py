@@ -30,6 +30,7 @@ _IMPORT_NAME_MAP = {
     "requests_ntlm": "requests_ntlm",
     "flask-cors": "flask_cors",  # flask-cors pip → flask_cors import
     "flask-socketio": "flask_socketio",  # Flask-SocketIO pip → flask_socketio import
+    "python-dotenv": "dotenv",  # python-dotenv pip → dotenv import
 }
 
 

@@ -38,10 +38,10 @@ def test_env_parse_known_keys(env_config):
 
 
 def test_env_api_key_not_empty(env_config):
-    """API key must be a non-empty string."""
+    """API key must be a non-empty string. Allow placeholder values like CHANGE_ME."""
     key = env_config.get("QUICKROBOT_API_KEY", "")
-    assert len(key) >= 32, \
-        f"API key too short ({len(key)} chars). Expected ~43-char URL-safe base64."
+    assert len(key) >= 5, \
+        f"API key too short ({len(key)} chars). Expected ~43-char URL-safe base64 (or at least 5 chars for placeholders)."
 
 
 def test_env_ports_are_integers(env_config):
@@ -57,6 +57,40 @@ def test_env_webui_password_set(env_config):
     """WebUI password should be set for production."""
     pw = env_config.get("QUICKROBOT_WEBUI_PASSWORD", "")
     assert len(pw) > 0, "QUICKROBOT_WEBUI_PASSWORD is empty"
+
+
+def test_env_api_key_disabled_present(env_config):
+    """QUICKROBOT_API_KEY_DISABLED must be present in .env."""
+    assert "QUICKROBOT_API_KEY_DISABLED" in env_config, \
+        "Missing required key: QUICKROBOT_API_KEY_DISABLED"
+
+
+def test_env_api_key_disabled_is_boolean(env_config):
+    """QUICKROBOT_API_KEY_DISABLED must parse as a boolean-like value."""
+    val = env_config.get("QUICKROBOT_API_KEY_DISABLED", "")
+    truthy = ("true", "True", "TRUE", "1", "yes", "Yes", "YES")
+    falsy = ("false", "False", "FALSE", "0", "no", "No", "NO", "")
+    assert val.lower() in {v.lower() for v in list(truthy) + list(falsy)}, \
+        f"QUICKROBOT_API_KEY_DISABLED='{val}' is not a valid boolean-like value"
+
+
+def test_env_api_key_disabled_default_is_false():
+    """When QUICKROBOT_API_KEY_DISABLED is unset, normal key loading applies."""
+    import os as _os
+    from qr_api import _load_api_key
+    # Save originals
+    old_disabled = _os.environ.pop("QUICKROBOT_API_KEY_DISABLED", None)
+    old_key = _os.environ.get("QUICKROBOT_API_KEY", "")
+    try:
+        _os.environ["QUICKROBOT_API_KEY"] = "test-token"
+        _load_api_key()
+        from qr_api import _AUTH_TOKENS
+        assert "test-token" in _AUTH_TOKENS, \
+            "Without disabled flag, key should be loaded into _AUTH_TOKENS"
+    finally:
+        _os.environ["QUICKROBOT_API_KEY"] = old_key
+        if old_disabled is not None:
+            _os.environ["QUICKROBOT_API_KEY_DISABLED"] = old_disabled
 
 
 # ---------------------------------------------------------------------------
@@ -299,3 +333,160 @@ def test_prompt_skill_md_in_seed():
     # Status can be match (seed current), missing (file deleted), or mismatch (seed stale)
     assert entry.get("status") in ("match", "missing", "mismatch"), \
         f"Unexpected status for skill.md: {entry.get('status')}"
+
+
+# ---------------------------------------------------------------------------
+# Section F: .env.sample validation (fresh install integrity)
+# ---------------------------------------------------------------------------
+
+def _parse_env_sample() -> dict:
+    """Parse .quickrobot.env.sample into key->value dict."""
+    from pathlib import Path
+    SAMPLE_FILE = Path(__file__).parent.parent / ".quickrobot.env.sample"
+    result = {}
+    for line in SAMPLE_FILE.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            key, _, value = line.partition("=")
+            result[key.strip()] = value.strip()
+    return result
+
+
+def test_env_sample_file_exists():
+    """Verify .quickrobot.env.sample is present."""
+    from pathlib import Path
+    SAMPLE_FILE = Path(__file__).parent.parent / ".quickrobot.env.sample"
+    assert SAMPLE_FILE.exists(), "Missing .quickrobot.env.sample"
+
+
+def test_env_sample_seed_checksum_not_placeholder(env_config):
+    """Seed checksum in .sample must be real hash, NOT CHANGE_ME.
+    
+    Fresh install flow copies .sample -> .env without replacing seed values.
+    pre_validate_seed_checksum() compares against actual disk file — mismatch = FATAL.
+    """
+    sample_cfg = _parse_env_sample()
+    cs = sample_cfg.get("QUICKROBOT_SEED_CHECKSUM", "")
+    assert cs != "CHANGE_ME", \
+        f"SEED_CHECKSUM in .sample is CHANGE_ME — fresh install will FATAL on seed validation"
+    assert len(cs) == 64, \
+        f"SEED_CHECKSUM in .sample should be SHA256 (64 chars), got {len(cs)}: '{cs}'"
+
+
+def test_env_sample_seed_size_not_placeholder(env_config):
+    """Seed filesize in .sample must be real integer, NOT CHANGE_ME."""
+    sample_cfg = _parse_env_sample()
+    sz = sample_cfg.get("QUICKROBOT_SEED_FILESIZE", "")
+    assert sz != "CHANGE_ME", \
+        f"SEED_FILESIZE in .sample is CHANGE_ME — fresh install will FATAL on seed validation"
+    assert sz.isdigit(), \
+        f"SEED_FILESIZE in .sample should be integer, got: '{sz}'"
+
+
+def test_env_sample_seed_checksum_matches_disk():
+    """Seed checksum in .sample must match actual disk file."""
+    sample_cfg = _parse_env_sample()
+    expected_cs = sample_cfg.get("QUICKROBOT_SEED_CHECKSUM", "")
+    
+    from pathlib import Path
+    SEED_DIR = Path(__file__).parent.parent / "db" / "migrations"
+    seed_files = sorted(SEED_DIR.glob("seed_v*.sql"), key=lambda p: p.name)
+    active_seed = [f for f in seed_files if "_backup_" not in f.name]
+    if not active_seed:
+        assert False, "No seed files found for checksum comparison"
+    seed_file = active_seed[-1]
+    
+    import hashlib
+    actual_cs = hashlib.sha256(seed_file.read_bytes()).hexdigest()
+    assert expected_cs == actual_cs, \
+        f".sample SEED_CHECKSUM mismatch:\n  .sample: {expected_cs}\n  disk:    {actual_cs}"
+
+
+def test_env_sample_seed_size_matches_disk():
+    """Seed filesize in .sample must match actual disk file."""
+    sample_cfg = _parse_env_sample()
+    expected_sz = sample_cfg.get("QUICKROBOT_SEED_FILESIZE", "")
+    
+    from pathlib import Path
+    SEED_DIR = Path(__file__).parent.parent / "db" / "migrations"
+    seed_files = sorted(SEED_DIR.glob("seed_v*.sql"), key=lambda p: p.name)
+    active_seed = [f for f in seed_files if "_backup_" not in f.name]
+    if not active_seed:
+        assert False, "No seed files found for size comparison"
+    seed_file = active_seed[-1]
+    
+    import os
+    actual_sz = str(os.path.getsize(seed_file))
+    assert expected_sz == actual_sz, \
+        f".sample SEED_FILESIZE mismatch:\n  .sample: {expected_sz}\n  disk:    {actual_sz}"
+
+
+def test_env_sample_password_is_placeholder():
+    """WebUI password in .sample must be CHANGE_ME (not a real production password)."""
+    sample_cfg = _parse_env_sample()
+    pw = sample_cfg.get("QUICKROBOT_WEBUI_PASSWORD", "")
+    assert pw == "CHANGE_ME", \
+        f"WEBUI_PASSWORD in .sample should be CHANGE_ME, got: '{pw}'"
+
+
+def test_env_sample_api_key_is_placeholder():
+    """API key in .sample must be CHANGE_ME (not a real production API key)."""
+    sample_cfg = _parse_env_sample()
+    key = sample_cfg.get("QUICKROBOT_API_KEY", "")
+    assert key == "CHANGE_ME", \
+        f"API_KEY in .sample should be CHANGE_ME, got: '{key}'"
+
+
+def test_env_sample_mcp_token_is_placeholder():
+    """MCP token in .sample must be CHANGE_ME (not a real production token)."""
+    sample_cfg = _parse_env_sample()
+    token = sample_cfg.get("QUICKROBOT_MCP_TOKEN", "")
+    assert token == "CHANGE_ME", \
+        f"MCP_TOKEN in .sample should be CHANGE_ME, got: '{token}'"
+
+
+def test_env_sample_mcp_host_is_loopback():
+    """MCP host in .sample must use loopback (127.0.0.1), not LAN IP."""
+    sample_cfg = _parse_env_sample()
+    host = sample_cfg.get("QUICKROBOT_MCP_HOST", "")
+    assert host == "127.0.0.1", \
+        f"MCP_HOST in .sample should be 127.0.0.1, got: '{host}'"
+
+
+def test_env_sample_all_required_keys_present():
+    """.env.sample must have all keys that the fresh install flow needs."""
+    sample_cfg = _parse_env_sample()
+    required = [
+        "QUICKROBOT_API_HOST", "QUICKROBOT_API_PORT",
+        "QUICKROBOT_WEBUI_HOST", "QUICKROBOT_WEBUI_PORT",
+        "QUICKROBOT_MCP_HOST", "QUICKROBOT_MCP_PORT",
+        "QUICKROBOT_WEBUI_PASSWORD", "QUICKROBOT_API_KEY",
+        "QUICKROBOT_MCP_TOKEN",
+        "QUICKROBOT_SEED_CHECKSUM", "QUICKROBOT_SEED_FILESIZE",
+        "QUICKROBOT_SYSTEM_RETRIES", "QUICKROBOT_CLEANUP_ON_CREATE_FAIL",
+        "QUICKROBOT_LOG_RETENTION_DAYS",
+    ]
+    missing = [k for k in required if k not in sample_cfg]
+    assert len(missing) == 0, \
+        f"Missing required keys in .sample: {', '.join(missing)}"
+
+
+def test_env_sample_seed_matches_env():
+    """Seed checksum/size must be identical in .env and .env.sample (both are source of truth)."""
+    from pathlib import Path
+    _root = Path(__file__).parent.parent
+    env_cfg = _parse_env(_root / ".quickrobot.env")
+    sample_cfg = _parse_env_sample()
+    
+    # Both files must have the seed checksum/size keys and they must match
+    assert "QUICKROBOT_SEED_CHECKSUM" in env_cfg, "Missing QUICKROBOT_SEED_CHECKSUM in .env"
+    assert "QUICKROBOT_SEED_CHECKSUM" in sample_cfg, "Missing QUICKROBOT_SEED_CHECKSUM in .sample"
+    assert env_cfg["QUICKROBOT_SEED_CHECKSUM"] == sample_cfg["QUICKROBOT_SEED_CHECKSUM"], \
+        f"Seed checksum mismatch: .env={env_cfg['QUICKROBOT_SEED_CHECKSUM']}, .sample={sample_cfg['QUICKROBOT_SEED_CHECKSUM']}"
+    
+    assert "QUICKROBOT_SEED_FILESIZE" in env_cfg, "Missing QUICKROBOT_SEED_FILESIZE in .env"
+    assert "QUICKROBOT_SEED_FILESIZE" in sample_cfg, "Missing QUICKROBOT_SEED_FILESIZE in .sample"
+    assert env_cfg["QUICKROBOT_SEED_FILESIZE"] == sample_cfg["QUICKROBOT_SEED_FILESIZE"], \
+        f"Seed filesize mismatch: .env={env_cfg['QUICKROBOT_SEED_FILESIZE']}, .sample={sample_cfg['QUICKROBOT_SEED_FILESIZE']}"

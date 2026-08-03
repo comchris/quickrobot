@@ -1,8 +1,6 @@
 <div style="padding:16px;">
-  <a href="/webui/prompts" style="color:#4fc3f7;text-decoration:none;">&larr; Back to prompts</a>
-
   {% if prompt %}
-  <h2 style="margin-top:16px;">{{ prompt.title or prompt.prompt_id }}</h2>
+  <h1 style="margin:0;font-size:1.3em;">Prompt: {{ prompt.title or prompt.prompt_id }}</h1>
   
   <!-- Prompt metadata table -->
   <table style="margin-bottom:16px;font-size:13px;border-collapse:collapse;">
@@ -66,7 +64,7 @@
   var deleteBtn = document.getElementById('delete-prompt-btn');
   if (deleteBtn) {
     deleteBtn.addEventListener('click', function() {
-      if (!confirm('Delete prompt "' + document.querySelector('h2').textContent + '"? This cannot be undone.')) return;
+      if (!confirm('Delete prompt "' + document.querySelector('h1').textContent + '"? This cannot be undone.')) return;
       qrApi('/prompts/{{ prompt.prompt_id }}', {
         method: 'DELETE'
       }).then(function(data) {
@@ -142,6 +140,5 @@
 
   {% else %}
   <p style="color:#f44336;">Prompt not found</p>
-  <a href="/webui/prompts" style="color:#4fc3f7;">&larr; Back to prompts</a>
   {% endif %}
 </div>

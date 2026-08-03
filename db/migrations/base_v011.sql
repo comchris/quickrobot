@@ -1,6 +1,9 @@
--- db/migrations/009_base.sql
--- Consolidated base schema for quickrobot v0.10
--- Created: 2026-07-16 by Design Agent
+-- db/migrations/base_v011.sql
+-- Consolidated base schema for quickrobot v0.11
+-- Created: 2026-07-16 by Design Agent (v0.10) + 2026-07-29 redesign (v0.11)
+-- v0.11 additions:
+--   - engine_binaries.metadata column (JSON, engine-specific template metadata)
+--   - Subprocess/universal binary template seed data
 -- Merged from: 008_base.sql + migrations 009-012
 -- Includes: engine_prompts table with file-based storage pattern, skills registration
 -- Changes from 008:
@@ -132,6 +135,32 @@ CREATE TABLE engine_models (
     sha256_verified_at_draft TEXT,
     is_active INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
     UNIQUE(engine_type_id, model_path)
+);
+
+-- =============================================================================
+-- ENGINE BINARY TEMPLATES — versioned binary downloads (BINARY-DL)
+-- =============================================================================
+
+CREATE TABLE engine_binaries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    engine_type_id INTEGER NOT NULL REFERENCES engine_types(id),
+    name TEXT NOT NULL,
+    version TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    template_type TEXT DEFAULT 'binary' CHECK(template_type IN ('binary', 'docker')),
+    binary_name TEXT,
+    download_url TEXT NOT NULL,
+    sha256 TEXT,
+    file_size INTEGER,
+    extract_type TEXT DEFAULT 'none' CHECK(extract_type IN ('none', 'tar.gz', 'zip', 'gz')),
+    docker_image_name TEXT,
+    docker_tag TEXT,
+    target_path TEXT DEFAULT '/opt/quickrobot/binary-templates/{engine_type}/{version}-{platform}/',
+    is_active INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
+    metadata TEXT DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now')),
+    UNIQUE(engine_type_id, version, platform)
 );
 
 CREATE TABLE engine_configs (
@@ -457,6 +486,9 @@ CREATE INDEX idx_nodes_status ON nodes(status);
 CREATE INDEX idx_playbook_file_type ON playbook_registry(file_type);
 CREATE INDEX idx_playbook_tags ON playbook_registry(tags);
 CREATE INDEX idx_presets_engine ON engine_presets(engine_type_id);
+CREATE INDEX idx_binaries_engine ON engine_binaries(engine_type_id);
+CREATE INDEX idx_binaries_active ON engine_binaries(is_active);
+CREATE UNIQUE INDEX idx_binaries_version_platform ON engine_binaries(version, platform);
 CREATE INDEX idx_request_log_time ON request_log(created_at DESC);
 CREATE UNIQUE INDEX idx_job_type_engine ON engine_job_types(engine_type_name, job_type);
 CREATE INDEX idx_ejt_engine ON engine_job_types(engine_type_name);
@@ -466,7 +498,7 @@ CREATE INDEX idx_config_levels_level ON config_levels(level);
 CREATE INDEX idx_nodes_hostname ON nodes(hostname);
 CREATE INDEX idx_playbook_runs_task ON playbook_runs(task_id);
 
--- Prompt indexes (from migrations 009-010)
+-- Prompt indexes (from migrations 009-011)
 CREATE INDEX IF NOT EXISTS idx_prompts_prompt_id ON engine_prompts(prompt_id);
 CREATE INDEX IF NOT EXISTS idx_prompts_tags ON engine_prompts(tags);
 CREATE INDEX IF NOT EXISTS idx_prompts_message_role ON engine_prompts(message_role);
@@ -552,7 +584,7 @@ INSERT OR REPLACE INTO engine_configs (engine_type_id, key, value, description, 
 INSERT OR REPLACE INTO engine_configs (engine_type_id, key, value, description, updated_at, default_value, polling_interval_local_sec, polling_interval_remote_sec, refresh_interval_default_sec) VALUES (21, 'model_root_path', '/mnt/llama/gguf/models', 'Root path for model scan (searches this directory for .gguf files)', strftime('%Y-%m-%dT%H:%M:%S','now'), NULL, '10', '600', '30');
 INSERT OR REPLACE INTO engine_configs (engine_type_id, key, value, description, updated_at, default_value, polling_interval_local_sec, polling_interval_remote_sec, refresh_interval_default_sec) VALUES (21, 'node_build_dir', '/opt/quickrobot/llama.cpp/build', 'Shared cmake build dir (per-node)', strftime('%Y-%m-%dT%H:%M:%S','now'), NULL, '10', '600', '30');
 INSERT OR REPLACE INTO engine_configs (engine_type_id, key, value, description, updated_at, default_value, polling_interval_local_sec, polling_interval_remote_sec, refresh_interval_default_sec) VALUES (21, 'node_build_install_depends', 'gcc libssl-dev cmake libvulkan-dev libvulkan1 glslc spirv-headers vulkan-tools libvulkan-dev libvulkan1 glslc spirv-headers', 'Additional apt packages for Vulkan/glsln support (fail if missing)', strftime('%Y-%m-%dT%H:%M:%S','now'), NULL, '10', '600', '30');
-INSERT OR REPLACE INTO engine_configs (engine_type_id, key, value, description, updated_at, default_value, polling_interval_local_sec, polling_interval_remote_sec, refresh_interval_default_sec) VALUES (21, 'node_build_run_cmd', 'cmake --build build --config Release -j', 'CMake build command', strftime('%Y-%m-%dT%H:%M:%S','now'), NULL, '10', '600', '30');
+INSERT OR REPLACE INTO engine_configs (engine_type_id, key, value, description, updated_at, default_value, polling_interval_local_sec, polling_interval_remote_sec, refresh_interval_default_sec) VALUES (21, 'node_build_run_cmd', 'cmake --build build --config Release -j 2', 'CMake build command', strftime('%Y-%m-%dT%H:%M:%S','now'), NULL, '10', '600', '30');
 INSERT OR REPLACE INTO engine_configs (engine_type_id, key, value, description, updated_at, default_value, polling_interval_local_sec, polling_interval_remote_sec, refresh_interval_default_sec) VALUES (21, 'node_build_set_cmd', 'cmake -B build -DGGML_RPC=ON -DGGML_NATIVE=ON -DGGML_CPU=ON -DLLAMA_OPENSSL=ON -DGGML_AVX2=ON -DGGML_VULKAN=ON', 'CMake configure command', strftime('%Y-%m-%dT%H:%M:%S','now'), NULL, '10', '600', '30');
 INSERT OR REPLACE INTO engine_configs (engine_type_id, key, value, description, updated_at, default_value, polling_interval_local_sec, polling_interval_remote_sec, refresh_interval_default_sec) VALUES (21, 'node_git_pull_cmd', 'git pull origin master', 'Git pull command for source update', strftime('%Y-%m-%dT%H:%M:%S','now'), NULL, '10', '600', '30');
 INSERT OR REPLACE INTO engine_configs (engine_type_id, key, value, description, updated_at, default_value, polling_interval_local_sec, polling_interval_remote_sec, refresh_interval_default_sec) VALUES (21, 'node_src_dir', '/opt/quickrobot/llama.cpp', 'Shared llama.cpp source dir (per-node)', strftime('%Y-%m-%dT%H:%M:%S','now'), NULL, '10', '600', '30');
@@ -567,7 +599,7 @@ INSERT OR REPLACE INTO engine_configs (engine_type_id, key, value, description, 
 INSERT OR REPLACE INTO engine_configs (engine_type_id, key, value, description, updated_at, default_value, polling_interval_local_sec, polling_interval_remote_sec, refresh_interval_default_sec) VALUES (22, 'git_clone_url', 'https://github.com/ggml-org/llama.cpp.git', 'Source git repository URL', strftime('%Y-%m-%dT%H:%M:%S','now'), NULL, '10', '600', '30');
 INSERT OR REPLACE INTO engine_configs (engine_type_id, key, value, description, updated_at, default_value, polling_interval_local_sec, polling_interval_remote_sec, refresh_interval_default_sec) VALUES (22, 'node_build_dir', '/opt/quickrobot/llama.cpp/build', 'Shared cmake build dir (per-node)', strftime('%Y-%m-%dT%H:%M:%S','now'), NULL, '10', '600', '30');
 INSERT OR REPLACE INTO engine_configs (engine_type_id, key, value, description, updated_at, default_value, polling_interval_local_sec, polling_interval_remote_sec, refresh_interval_default_sec) VALUES (22, 'node_build_install_depends', 'gcc libssl-dev cmake libvulkan-dev libvulkan1 glslc spirv-headers vulkan-tools libvulkan-dev libvulkan1 glslc spirv-headers', 'Additional apt packages for Vulkan/glsln support (fail if missing)', strftime('%Y-%m-%dT%H:%M:%S','now'), NULL, '10', '600', '30');
-INSERT OR REPLACE INTO engine_configs (engine_type_id, key, value, description, updated_at, default_value, polling_interval_local_sec, polling_interval_remote_sec, refresh_interval_default_sec) VALUES (22, 'node_build_run_cmd', 'cmake --build build --config Release -j', 'CMake build command', strftime('%Y-%m-%dT%H:%M:%S','now'), NULL, '10', '600', '30');
+INSERT OR REPLACE INTO engine_configs (engine_type_id, key, value, description, updated_at, default_value, polling_interval_local_sec, polling_interval_remote_sec, refresh_interval_default_sec) VALUES (22, 'node_build_run_cmd', 'cmake --build build --config Release -j 2', 'CMake build command', strftime('%Y-%m-%dT%H:%M:%S','now'), NULL, '10', '600', '30');
 INSERT OR REPLACE INTO engine_configs (engine_type_id, key, value, description, updated_at, default_value, polling_interval_local_sec, polling_interval_remote_sec, refresh_interval_default_sec) VALUES (22, 'node_build_set_cmd', 'cmake -B build -DGGML_RPC=ON -DGGML_NATIVE=ON -DGGML_CPU=ON -DLLAMA_OPENSSL=ON -DGGML_AVX2=ON -DGGML_VULKAN=ON', 'CMake configure command', strftime('%Y-%m-%dT%H:%M:%S','now'), NULL, '10', '600', '30');
 INSERT OR REPLACE INTO engine_configs (engine_type_id, key, value, description, updated_at, default_value, polling_interval_local_sec, polling_interval_remote_sec, refresh_interval_default_sec) VALUES (22, 'node_git_pull_cmd', 'git pull origin master', 'Git pull command for source update', strftime('%Y-%m-%dT%H:%M:%S','now'), NULL, '10', '600', '30');
 INSERT OR REPLACE INTO engine_configs (engine_type_id, key, value, description, updated_at, default_value, polling_interval_local_sec, polling_interval_remote_sec, refresh_interval_default_sec) VALUES (22, 'node_src_dir', '/opt/quickrobot/llama.cpp', 'Shared llama.cpp source dir (per-node)', strftime('%Y-%m-%dT%H:%M:%S','now'), NULL, '10', '600', '30');
@@ -587,6 +619,6 @@ INSERT OR REPLACE INTO engine_configs (engine_type_id, key, value, description, 
  INSERT OR REPLACE INTO engine_configs (engine_type_id, key, value, description, updated_at, default_value, polling_interval_local_sec, polling_interval_remote_sec, refresh_interval_default_sec) VALUES (23, 'ts_proxy_inject_user_timestamp', 'true', 'Default: inject timestamps into user messages', strftime('%Y-%m-%dT%H:%M:%S','now'), NULL, '10', '600', '30');
  INSERT OR REPLACE INTO engine_configs (engine_type_id, key, value, description, updated_at, default_value, polling_interval_local_sec, polling_interval_remote_sec, refresh_interval_default_sec) VALUES (23, 'ts_proxy_inject_response_time', 'true', 'Default: inject response timing into results', strftime('%Y-%m-%dT%H:%M:%S','now'), NULL, '10', '600', '30');
  INSERT OR REPLACE INTO engine_configs (engine_type_id, key, value, description, updated_at, default_value, polling_interval_local_sec, polling_interval_remote_sec, refresh_interval_default_sec) VALUES (23, 'ts_proxy_timestamp_position', 'front', 'Default position: front, back, or both', strftime('%Y-%m-%dT%H:%M:%S','now'), NULL, '10', '600', '30');
- INSERT OR REPLACE INTO engine_configs (engine_type_id, key, value, description, updated_at, default_value, polling_interval_local_sec, polling_interval_remote_sec, refresh_interval_default_sec) VALUES (23, 'ts_proxy_timestamp_format', '%Y-%m-%d %H:%M:%S', 'Default timestamp format string', strftime('%Y-%m-%dT%H:%M:%S','now'), NULL, '10', '600', '30');
+  INSERT OR REPLACE INTO engine_configs (engine_type_id, key, value, description, updated_at, default_value, polling_interval_local_sec, polling_interval_remote_sec, refresh_interval_default_sec) VALUES (23, 'ts_proxy_timestamp_format', '%Y-%m-%d %H:%M:%S', 'Default timestamp format string', strftime('%Y-%m-%dT%H:%M:%S','now'), NULL, '10', '600', '30');
 
 

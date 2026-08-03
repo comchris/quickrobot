@@ -25,34 +25,44 @@ Return complete API responses. Use only when you need fields excluded from summa
 
 | Tool | Signature | Returns |
 |------|-----------|---------|
-| `list_instances()` | None | All instances with config_override, merged_config, capabilities |
-| `get_instance_status(instance_id)` | `instance_id` (int) | Single instance deep dive including merged_config |
-| `list_nodes()` | None | All nodes with hardware inventory (capabilities) |
-| `list_presets(engine_type)` | `engine_type` (str) | Presets with full config_template JSON |
-| `get_preset(preset_id, engine_type)` | `preset_id` (int), `engine_type` (str) | Single preset detail |
-| `list_models(engine_type)` | `engine_type` (str) | Models with SHA256 hashes and model_params |
-| `get_model(model_id, engine_type)` | `model_id` (int), `engine_type` (str) | Single model detail |
+| `get_instance_status(instance_id)` | `instance_id` (int) | Single instance deep dive including merged_config, engine_data, actions |
+| `get_preset(preset_id, engine_type)` | `preset_id` (int), `engine_type` (str) | Single preset detail with full config_template JSON |
+| `get_model(model_id, engine_type)` | `model_id` (int), `engine_type` (str) | Single model detail with SHA256 hashes and model_params |
+
+### 2a. Binary Templates
+New in v0.11 — discover pre-built binary download templates (alternative to git clone + cmake build).
+
+| Tool | Signature | Purpose |
+|------|-----------|---------|
+| `list_binary_templates(engine_type)` | `engine_type` (str) | Returns template metadata: id, name, version, platform, binary_name, download_url, sha256 |
+
+**Note:** Binary templates are orthogonal to presets. A preset defines WHAT to run (model, CLI args). A binary template defines HOW to deliver it (pre-built tarball vs source build). Use `list_binary_templates('llama_rpc')` or `list_binary_templates('')` for all engines.
 
 ### 3. Write Tools (requires MCP_WRITE)
 | Tool | Signature | Behavior | Purpose |
 |------|-----------|----------|---------|
-| `create_instance(name, engine_type_id, node_id, preset_id, config_override, skip_build)` | async (3s) | Creates DB record + triggers auto-deploy | New instance |
-| `deploy_instance(instance_id, start_after_deploy, skip_build)` | async (3s) | Triggers RUNNER-1 staged chain | Rebuild/deploy |
+| `create_instance(name, engine_type_id, node_id, preset_id, binary_template_id, config_override, skip_build)` | async (3s) | Creates DB record + triggers auto-deploy chain | New instance |
+| `deploy_instance(instance_id, binary_template_id, start_after_deploy, skip_build)` | async (3s) | Triggers RUNNER-1 staged chain | Rebuild/deploy |
+| `undeploy_instance(instance_id)` | async (30s) | Stop service + remove systemd unit from remote node | Decommission instance |
 | `start_instance(instance_id)` | sync (30s) | Waits for systemd result | Start service |
 | `stop_instance(instance_id)` | sync (30s) | Waits for systemd result | Stop service |
 | `restart_instance(instance_id)` | sync (30s) | Waits for stop+start result | Graceful restart |
-| `change_preset(id, preset_id, skip_build=True)` | async (3s) | Returns instantly with `"config_update_triggered": true` | Fast config change (BC-1 chain) |
-| `delete_instance(instance_id, force=False)` | async (3s) | Removes from DB | Delete instance |
-| `create_node(name, hostname, ...)` | async (3s) | Creates record + SSH validation in background | Add host |
-| `delete_node(id, stop_running=False)` | async (3s) | Deletes node; with stop_running=True, undeploys instances first (fire-and-forget) | Remove host |
-| `discover_node(id)` | sync (30s) | SSH discovery, reports connection status | Refresh hardware info |
-| `toggle_node_active(id, is_active)` | sync (5s) | DB update only | Admin active/inactive flag |
+| `change_preset(instance_id, preset_id, skip_build=True)` | async (3s) | Returns instantly with `"config_update_triggered": true` | Fast config change (BC-1 chain) |
+| `delete_instance(instance_id, force=False)` | async (3s) | Removes from DB (force: skip remote undeploy) | Delete instance |
+| `create_node(name, hostname, ansible_user, ansible_port, ansible_key_path, ipv4_address, model_base_path)` | async (3s) | Creates record + SSH validation in background | Add host |
+| `delete_node(node_id, stop_running=False)` | async (3s) | Deletes node; with stop_running=True, undeploys instances first (fire-and-forget) | Remove host |
+| `discover_node(node_id)` | sync (30s) | SSH discovery, reports connection status | Refresh hardware info |
+| `toggle_node_active(node_id, is_active)` | sync (5s) | DB update only | Admin active/inactive flag |
 | `bind_rpc(instance_id, rpc_ids, split_mode="layer")` | sync (10s) | Pure DB update + RPC health check. Takes effect on next deploy/restart. | Bind RPCs to server |
 | `unbind_rpc(instance_id, rpc_id)` | sync (10s) | Pure DB update. Takes effect on next deploy/restart. | Remove RPC binding |
 | `scan_models(engine_type, node_id)` | async (3s) | Triggers playbook scan in background | Discover GGUF models |
-| `run_benchmark(instance_id, prompt_id)` | sync (15s) | Triggers benchmark job, reports if API reachable | Run benchmark |
+| `run_benchmark(instance_id, prompt_id, timeout_seconds=None)` | sync (15s) | Triggers benchmark job, reports if API reachable | Run benchmark |
 
 **NOTE on `change_preset`:** Runs async via RUNNER-1 (async_mode=True). Returns instantly with `"config_update_triggered": true`. The scheduler transitions the instance to "configuring" → "deploying" → "running". Do NOT poll for "running" immediately after calling. Also accepts `{preset_id: N, skip_build: True}` via `PUT /instances/<id>` for config-only updates even without changing presets (same preset ID is valid — this triggers a reconfigure cycle to regenerate the env file).
+
+**NOTE on `binary_template_id`:** New in v0.11. Both `create_instance()` and `deploy_instance()` accept an optional `binary_template_id` parameter. When provided, the deploy chain uses a pre-built binary download (preflight → binary_download → config_svc → config_env → start) instead of git clone + cmake build. Use `list_binary_templates(engine_type)` to discover available templates. If omitted, the chain uses git build from source (preflight → deps → source → compile → config_svc → config_env → start).
+
+**NOTE on `undeploy_instance`:** Stop a running instance's service and remove its systemd unit file from the remote node. Instance record remains in DB with state 'unconfigured'. Use to cleanly decommission an instance before deleting it, or to temporarily stop an instance while keeping its configuration for future redeployment.
 
 **Note on sync vs async:** Sync tools wait up to the stated timeout for actual results from the remote host. Async tools return within milliseconds after handing the job to the API/scheduler — poll via `list_instances_summary()` or `list_benchmark_results()` for final status.
 
@@ -95,10 +105,11 @@ create_instance(
     engine_type_id=21,  # llama_server
     node_id=<chosen_node_id>,
     preset_id=101,      # small test preset
+    binary_template_id=None,  # omit for git build; use list_binary_templates() to discover pre-built options
     config_override=None
 )
 
-# 4. Deploy
+# 4. Deploy (only if instance was created with deploy=False)
 deploy_instance(<instance_id>, start_after_deploy=True)
 ```
 
@@ -112,6 +123,7 @@ deploy_instance(<instance_id>, start_after_deploy=True)
 status = get_instance_status(106)
 # status.data.alive indicates liveness
 # status.data.merged_config contains resolved configuration
+# status.data.engine_data contains PID, RSS, uptime_seconds
 ```
 
 ### Bulk Operations
@@ -175,8 +187,8 @@ quickrobot_api("GET", f"/jobs/{job_id}", None)
 ## Key Rules for MCP Users
 
 1. **Use summary tools first** — they reduce token cost by 70-95%. Full detail tools only when needed.
-2. **Engine type IDs:** llama_server=21, llama_rpc=22, iperf3=31, subprocess=12, universal=11
-3. **Preset ID 1** = router mode (no model). Use for deploy/systemd tests without loading models.
+2. **Engine type IDs:** llama_server=21, llama_rpc=22, iperf3=31, subprocess=12, universal=11, timestamp_proxy=23
+3. **Preset ID 100** = router mode (no model). Use for deploy/systemd tests without loading models. QuickSetup presets are in the 20-30 range.
 4. **One benchmark at a time per instance** — the API returns BENCHMARK_RUNNING if another is active.
 5. **RPC servers use binary protocol** — not HTTP. Health check via `curl /health` works on llama_server only.
 6. **Preset changes are async** — `change_preset` returns <100ms with `"config_update_triggered": true`. The instance state transitions (running → configuring → deploying → running) happen in background. Check status via `GET /instances/<id>` after a few seconds.
@@ -185,7 +197,6 @@ quickrobot_api("GET", f"/jobs/{job_id}", None)
 9. **Bind requires manual reconfigure** — After `bind_rpc(instance_id, rpc_ids)` or `unbind_rpc(instance_id, rpc_id)`, the server needs `change_preset(instance_id, same_preset_id, skip_build=True)` or `deploy_instance(instance_id)` to regenerate the remote env file with updated `--rpc`, `-dev`, and `LLAMA_ARG_TENSOR_SPLIT`. The bind/unbind tools do NOT trigger a reconfigure. Without this step, the server still uses the old config.
 10. **MCP tools may have stale SSE session** — Early in a session, MCP tools can return `MCP error -32602: Invalid request parameters` if the opencode harness has a cached stale SSE session ID from a prior API restart. This typically resolves after 5-30 minutes of API activity as the session auto-recovers. If all tools fail simultaneously, retry after a short wait or use `quickrobot_api` proxy as fallback.
 11. **Benchmark metrics are always `{}`** — The `benchmark_results` table has no `metrics` column; the API returns it as an empty default. This is a schema gap, not a failure. `success=1` means: the llama-server responded, text was captured in the `output` column, and the run completed (not just started). The `response_json` column contains `tokens_predicted` and `tokens_evaluated` from the llama.cpp `/completion` response — these are useful proxy metrics for throughput comparison. Use `duration_ms` for total wall-clock time.
-
-12. **scan_models is async** — `scan_models(engine_type, node_id)` triggers a playbook execution in the background. Use 3s timeout so it returns immediately. Check discovered models via `list_models(engine_type)` after a few seconds. For engine-agnostic scan: `scan_models("", node_id=12)` (empty engine_type = all engines, requires node_id).
-
-13. **run_benchmark reports reachability** — `run_benchmark(instance_id, prompt_id)` uses 15s timeout to confirm the API can trigger the benchmark. If the API is unreachable within 15s, returns an error. If it succeeds, poll via `list_benchmark_results()` for final results (the actual benchmark may take minutes).
+12. **scan_models is async** — `scan_models(engine_type, node_id)` triggers a playbook execution in the background. Use 3s timeout so it returns immediately. Check discovered models via `list_models_summary(engine_type)` after a few seconds. For engine-agnostic scan: `scan_models("", node_id=12)` (empty engine_type = all engines, requires node_id).
+13. **run_benchmark reports reachability** — `run_benchmark(instance_id, prompt_id)` uses 15s timeout to confirm the API can trigger the benchmark. Optional `timeout_seconds` parameter overrides the default for long-running prompts. If it succeeds, poll via `list_benchmark_results()` for final results (the actual benchmark may take minutes).
+14. **Binary templates** — Use `list_binary_templates(engine_type)` to discover pre-built download options before creating or deploying instances. Pass `binary_template_id` to `create_instance()` or `deploy_instance()` to use a pre-built binary instead of git build. Templates are orthogonal to presets: a preset defines WHAT to run, a binary template defines HOW to deliver it.

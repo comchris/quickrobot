@@ -130,6 +130,35 @@ Host, port, and token configuration for ALL system-managed engines lives in `.qu
 - MCP: `QUICKROBOT_MCP_HOST`, `QUICKROBOT_MCP_PORT`, `QUICKROBOT_MCP_*`
 - System instances get their host/port from `.env`, not `engine_configs` table
 
+#### 2d.1. API Key Auth Toggle — QUICKROBOT_API_KEY_DISABLED
+`QUICKROBOT_API_KEY_DISABLED=true` disables API key authentication entirely:
+A) **Startup:** skips the prod-mode FATAL "API_KEY required" check (line 153-164 `lib_startup_pipeline.py`)
+B) **Auth:** `_load_api_key()` returns early, `_AUTH_TOKENS` stays empty → all routes accept any request
+
+Behavior matrix:
+| QUICKROBOT_API_KEY | QUICKROBOT_API_KEY_DISABLED | Result |
+|-------------------|----------------------------|--------|
+| (any value) | `true` | **No auth enforced** — startup OK, all requests pass |
+| empty | `false` or unset | **FATAL at startup** — key required in prod mode |
+| (any value) | `false` or unset | **Auth enforced** — only matching X-API-Key accepted |
+
+Valid values: `true`, `1`, `yes` (truthy); `false`, `0`, `no`, empty (falsy). Case-insensitive.
+
+#### 2d.2. Dual-Token Auth Model — MCP-DUAL-TOKEN (v0.11)
+Two separate tokens for clearer auth boundaries:
+- `QUICKROBOT_API_KEY` — gates all `/api/v1/*` API routes (WebUI proxy, MCP→API proxy, external agents)
+- `QUICKROBOT_MCP_TOKEN` — gates the MCP SSE endpoint (`/sse` on port 8040). Falls back to `QUICKROBOT_API_KEY` if not set.
+
+Agent token selection:
+| Context | Token Required | Env Var |
+|---------|---------------|---------|
+| LLM client → MCP SSE (port 8040) | `QR-MCP-...` | `QUICKROBOT_MCP_TOKEN` |
+| MCP server → API proxy (port 8039) | `QR-API-...` | `QUICKROBOT_API_KEY` (MCP server reads this from env) |
+| WebUI → API proxy | `QR-API-...` | `QUICKROBOT_API_KEY` |
+| External curl/API client | `QR-API-...` | `QUICKROBOT_API_KEY` |
+
+Token prefix convention: `QR-API-` for API key, `QR-MCP-` for MCP token. Helps identify which token is being used from logs (token is logged with first 8 chars).
+
 ### 2d. Code Reuse Rule
 When adding a feature that resembles existing code (another playbook, another engine handler, another UI page):
 1. Check if an existing implementation covers 80%+ of the need
@@ -165,6 +194,19 @@ Never use `rm`, `rm -f`, `rm -rf`, or `2>/dev/null`. Move unwanted files to `./O
 - Only **ONE dot** in filenames (e.g., `qr_api_server.py`)
 - Max **30 characters** per filename (before extension)
 - Use project prefixes: `QR_*`, `app_*`, `lib_*`
+
+### ENV.SAMPLE Sync (CRITICAL — 2026-07-29)
+When modifying `.quickrobot.env`, you MUST also update `.quickrobot.env.sample`:
+1. Add any NEW keys from `.env` to `.sample` with placeholder values
+2. Verify no production secrets leaked into `.sample`:
+   - `QUICKROBOT_WEBUI_PASSWORD` = `CHANGE_ME` (never real password)
+   - `QUICKROBOT_MCP_TOKEN` = `CHANGE_ME` (never real token)
+   - `QUICKROBOT_API_KEY` = `CHANGE_ME` (never real key)
+   - LAN IPs should use `127.0.0.1` in `.sample`, real IPs only in `.env`
+ 3. Seed file checksum/size in `.sample` are REAL values (source of truth for fresh installs). The fresh install flow copies `.sample` → `.env` without replacing these keys. `pre_validate_seed_checksum()` compares them against the actual seed file — mismatch = FATAL. On seed file changes: update both `.sample` AND `.env`.
+ 4. Before deploying or regression testing: `diff .quickrobot.env .quickrobot.env.sample` and verify all diffs are intentional (production secrets, LAN IPs)
+
+**Why:** `.env.sample` is the public-facing template. A leaked password/token in `.sample` = exposed credential on every push. A stale config = broken fresh deploy for new devs.
 
 ---
 

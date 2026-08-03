@@ -22,7 +22,11 @@ discovery by the engine loader. Supports two modes via presets:
 
 import logging
 
-from lib.qr_engine_ids import QR_DEFAULT_LOCALHOST, QR_ENGINE_PORT_DEFAULTS, QR_ENGINE_IPERF3_NAME
+from lib.qr_engine_ids import (
+    QR_DEFAULT_LOCALHOST, QR_ENGINE_PORT_DEFAULTS, QR_ENGINE_IPERF3_NAME,
+    QR_JOB_DEPLOY, QR_JOB_RESTART, QR_JOB_UNDEPLOY,
+    QR_STAGE_STOP, QR_STAGE_UNDEPLOY, QR_STAGE_VERIFY,
+)
 from engine.base import BaseEngine
 
 logger = logging.getLogger(__name__)
@@ -30,7 +34,7 @@ from lib.lib_constants import DEFAULT_ANSIBLE_USER
 
 
 CAPABILITIES = {
-    "name": "iperf3",
+    "name": QR_ENGINE_IPERF3_NAME,
     "display_name": "Iperf 3",
     "supports_models": False,
     "supports_presets": True,
@@ -40,11 +44,11 @@ CAPABILITIES = {
         {"path": "/engines/iperf3/config", "label": "Config", "order": 1},
         {"path": "/engines/iperf3/presets", "label": "Presets", "order": 2},
     ],
-    "supported_jobs": ["deploy", "restart", "undeploy"],
+    "supported_jobs": [QR_JOB_DEPLOY, QR_JOB_RESTART, QR_JOB_UNDEPLOY],
     "undeploy_chain": [
-        {"stage": "stop", "playbook": "service_stop"},
-        {"stage": "undeploy", "playbook": "undeploy_iperf3"},
-        {"stage": "verify", "playbook": "check_undeploy"},
+        {"stage": QR_STAGE_STOP, "playbook": "service_stop"},
+        {"stage": QR_STAGE_UNDEPLOY, "playbook": "undeploy_iperf3"},
+        {"stage": QR_STAGE_VERIFY, "playbook": "check_undeploy"},
     ],
 }
 
@@ -61,7 +65,7 @@ class Iperf3Engine(BaseEngine):
     }
 
     def __init__(self):
-        self._name = "iperf3"
+        self._name = QR_ENGINE_IPERF3_NAME
         self._base_port = CAPABILITIES["base_port"]
         self._max_instances = CAPABILITIES["max_instances"]
 

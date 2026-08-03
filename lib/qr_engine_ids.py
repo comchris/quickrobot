@@ -344,7 +344,7 @@ _QR_JOB_TYPES = (
     "deploy", "rebuild", "reconfigure", "deploy_fast", "undeploy",
     "bind", "unbind", "start", "restart", "stop", "reboot",
     "apt_update", "apt_upgrade", "apt_update_upgrade",
-    "health_check",
+    "health_check", "deploy_binary",
 )
 
 # Job type constants for comparison (same strings, named constants)
@@ -352,6 +352,7 @@ QR_JOB_DEPLOY      = "deploy"
 QR_JOB_REBUILD     = "rebuild"
 QR_JOB_RECONFIGURE = "reconfigure"
 QR_JOB_DEPLOY_FAST = "deploy_fast"
+QR_JOB_DEPLOY_BINARY = "deploy_binary"
 QR_JOB_UNDEPLOY    = "undeploy"
 QR_JOB_BIND        = "bind"
 QR_JOB_UNBIND      = "unbind"
@@ -378,6 +379,10 @@ QR_STAGE_HEALTH_PROBE = "health_probe"
 QR_STAGE_UNDEPLOY    = "undeploy"
 QR_STAGE_VERIFY      = "verify"
 QR_STAGE_HEALTH_CHECK = "health_check"  # Periodic scheduler health check (read-only, no state change in Phase 1)
+QR_STAGE_BINARY_DOWNLOAD = "binary_download"    # Binary download stage (replaces source+compile)
+QR_STAGE_REBOOT          = "reboot"              # Node reboot job
+QR_STAGE_APT_UPDATE      = "apt_update"          # Node-level apt update
+QR_STAGE_APT_UPGRADE     = "apt_upgrade"         # Node-level apt upgrade
 
 # Stage → instance state mapping (what instances.state becomes while a task runs).
 # During deploy/rebuild chains, instance.state stays "deploying" through all stages
@@ -393,7 +398,7 @@ _QR_STAGE_STATES = {
     QR_STAGE_STOP:       "stopped",
     QR_STAGE_START:      "running",
     QR_STAGE_HEALTH_PROBE: "running",  # health_probe stage for RPC
-    "health_check":      "running",   # periodic scheduler health check keeps instance in running
+    QR_STAGE_HEALTH_CHECK: "running",  # periodic scheduler health check keeps instance in running
 }
 
 # Stages that can be skipped when binary already exists (source, compile)
@@ -410,6 +415,7 @@ _QR_JOB_FINAL_STATES = {
     "restart":       "loading",          # triggers SSE model-load progress bar
     "reconfigure":   "running",          # config-only, no model reload needed
     "deploy_fast":   "running",          # config_svc + config_env + start, no source/compile
+    "deploy_binary": "running",          # chain includes binary_download+start, no source/compile
     "apt_update":    "running",          # node-level apt update
     "apt_upgrade":   "running",          # node-level apt upgrade
     "apt_update_upgrade": "running",     # combined apt update + upgrade chain
@@ -441,6 +447,16 @@ _QR_UNDEPLOY_CHAINS = {
         {"stage": "undeploy",      "playbook": "undeploy_timestamp_proxy"},
         {"stage": "verify",        "playbook": "check_undeploy"},
     ],
+    QR_ENGINE_SUBPROCESS_NAME: [
+        {"stage": "stop",          "playbook": "service_stop"},
+        {"stage": "undeploy",      "playbook": "undeploy_subprocess"},
+        {"stage": "verify",        "playbook": "check_undeploy"},
+    ],
+    QR_ENGINE_UNIVERSAL_NAME: [
+        {"stage": "stop",          "playbook": "service_stop"},
+        {"stage": "undeploy",      "playbook": "undeploy_universal"},
+        {"stage": "verify",        "playbook": "check_undeploy"},
+    ],
 }
 
 
@@ -453,7 +469,14 @@ QR_TIMEOUT_DEFAULT       = 300   # 5 min default for other stages
 QR_TIMEOUT_HEALTH_CHECK  = 60    # 1 min for health check playbooks (SSH/systemctl probe)
 QR_TIMEOUT_JOB           = 7200  # 2h global job timeout (stale task detection)
 QR_TIMEOUT_START         = 60    # 1 min for start/restart/simple jobs (should complete quickly)
-QR_SSH_PORT_DEFAULT   = 22    # Default SSH port for node connections
+QR_SSH_PORT_DEFAULT    = 22    # Default SSH port for node connections
+
+# ── Node path defaults (SSOT — used as fallback in extra_vars / templates) ──
+# These mirror the default engine_configs values. Can be overridden per-engine via DB.
+QR_NODE_SRC_DIR         = "/opt/quickrobot/llama.cpp"       # Shared source clone dir
+QR_NODE_BUILD_DIR       = "/opt/quickrobot/llama.cpp/build" # Shared cmake build dir
+QR_BINARY_TEMPLATE_ROOT = "/opt/quickrobot/binary-templates/"  # Binary template cache root
+QR_CMAKE_CACHE_FILE     = "CMakeCache.txt"                 # Relative path within build dir
 
 # ── MCP subprocess startup retry limits (configurable via .env) ──────
 # Overridden by QUICKROBOT_MCP_CONNECT_RETRIES / QUICKROBOT_MCP_CONNECT_DELAY in .env
@@ -489,3 +512,20 @@ PROMPT_MAX_CONTENT_BYTES = 100_000
 STAGE_STATE_MAP = _QR_STAGE_STATES
 SKIPABLE_STAGES = _QR_SKIPABLE_STAGES
 JOB_FINAL_STATES = _QR_JOB_FINAL_STATES
+
+# ── Instance state name constants ────────────────────────────────────
+# Used throughout codebase as DB instance.state values.
+QR_STATE_UNCONFIGURED = "unconfigured"
+QR_STATE_CONFIGURING = "configuring"
+QR_STATE_DEPLOYING = "deploying"
+QR_STATE_DEPLOYED = "deployed"
+QR_STATE_STARTING = "starting"
+QR_STATE_RUNNING = "running"
+QR_STATE_LOADING = "loading"
+QR_STATE_STOPPING = "stopping"
+QR_STATE_STOPPED = "stopped"
+QR_STATE_ERROR = "error"
+QR_STATE_UPDATING = "updating"
+QR_STATE_COMPILING = "compiling"
+QR_STATE_BUILD_ERROR = "build_error"
+

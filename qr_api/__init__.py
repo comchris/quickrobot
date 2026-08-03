@@ -10,6 +10,8 @@ import json
 import atexit
 from flask import Flask, request, jsonify
 from werkzeug.exceptions import NotFound, MethodNotAllowed
+import lib.lib_pid as _lib_pid
+from lib.qr_engine_ids import QR_ENGINE_PORT_DEFAULTS
 
 app = Flask(__name__)
 
@@ -50,7 +52,7 @@ _CONFIG = {
     "clean_build_on_last_instance": False,
     "backup_dir": os.path.join(_project_root, "data", "_backups"),
     "max_backups": 5,
-    "api_port": 8040,  # default; overridden by .quickrobot.env at startup
+    "api_port": QR_ENGINE_PORT_DEFAULTS["quickrobot-api"],  # SSOT default (8039); overridden by .quickrobot.env at startup
     "qr_env_config": {},
 }
 
@@ -65,7 +67,7 @@ _CONFIG = {
 def _pid_file_path():
     """Get the path to the PID file."""
     db_dir = os.path.dirname(_CONFIG.get("db_path", "")) or "."
-    return os.path.join(db_dir, "quickrobot.pid")
+    return _lib_pid.get_pid_path(db_dir)
 
 
 def _check_pid_file():
@@ -187,10 +189,15 @@ def _load_api_key():
     
     All services (MCP, WebUI, external agents) use the same token.
     The API validates whichever X-API-Key header the caller provides.
+    
+    When QUICKROBOT_API_KEY_DISABLED=true, _AUTH_TOKENS stays empty → no auth enforced.
     """
     global _AUTH_TOKENS
     import os as _os
     _AUTH_TOKENS = set()
+    disabled = _os.environ.get("QUICKROBOT_API_KEY_DISABLED", "false").lower() in ("true", "1", "yes")
+    if disabled:
+        return  # No tokens → no auth enforcement
     raw = _os.environ.get("QUICKROBOT_API_KEY", "").strip()
     if raw:
         _AUTH_TOKENS.add(raw)
@@ -349,6 +356,7 @@ from .routes_nodes.node_lifecycle import (
 from .routes_nodes.node_status import (
     api_node_status, api_set_node_host_status,
     api_node_shutdown, api_node_reboot, api_node_ping, api_node_discover,
+    api_reset_node_build_state,
 )
 from .routes_nodes.node_config import (
     api_node_configs, api_set_node_config, api_delete_node_config,
@@ -405,6 +413,7 @@ from .routes_nodes.playbook_mgmt import (
     api_delete_playbook, api_list_playbooks, api_playbook_content,
     api_rescan_playbooks,
     api_reset_playbook_counters, api_update_playbook,
+    api_validate_playbook,
 )
 from .routes_nodes.node_apt import (
     api_node_apt,
@@ -433,6 +442,14 @@ from .routes_prompts import (
     api_rescan_engine_prompts,
     api_reset_engine_prompt_counters,
     api_prompt_refresh,
+)
+from .routes_engine_binaries import (
+    api_list_binaries,
+    api_list_binaries_by_engine,
+    api_get_binary,
+    api_create_binary,
+    api_update_binary,
+    api_delete_binary,
 )
 
 def register_routes(app):
@@ -596,11 +613,13 @@ def register_routes(app):
     app.add_url_rule("/api/v1/nodes/<int:node_id>/reboot", "api_node_reboot", api_node_reboot, methods=["POST"])
     app.add_url_rule("/api/v1/nodes/<int:node_id>/shutdown", "api_node_shutdown", api_node_shutdown, methods=["POST"])
     app.add_url_rule("/api/v1/nodes/<int:node_id>/status", "api_node_status", api_node_status, methods=["GET"])
+    app.add_url_rule("/api/v1/nodes/<int:node_id>/reset-build-state", "api_reset_node_build_state", api_reset_node_build_state, methods=["POST"])
     app.add_url_rule("/api/v1/orphans", "api_orphans", api_orphans, methods=["GET"])
     app.add_url_rule("/api/v1/playbooks", "api_list_playbooks", api_list_playbooks, methods=["GET"])
     app.add_url_rule("/api/v1/playbooks/<int:playbook_id>", "api_delete_playbook", api_delete_playbook, methods=["DELETE"])
     app.add_url_rule("/api/v1/playbooks/<int:playbook_id>", "api_update_playbook", api_update_playbook, methods=["PUT"])
     app.add_url_rule("/api/v1/playbooks/<int:playbook_id>/content", "api_playbook_content", api_playbook_content, methods=["GET"])
+    app.add_url_rule("/api/v1/playbooks/<int:playbook_id>/validate", "api_validate_playbook", api_validate_playbook, methods=["GET"])
     app.add_url_rule("/api/v1/playbooks/rescan", "api_rescan_playbooks", api_rescan_playbooks, methods=["POST"])
     app.add_url_rule("/api/v1/playbooks/reset-counters", "api_reset_playbook_counters", api_reset_playbook_counters, methods=["POST"])
     # MCP Prompts System routes (MCP-PROMPTS)
@@ -620,6 +639,13 @@ def register_routes(app):
     app.add_url_rule("/api/v1/rpccluster/llama/<int:llama_id>/bind-rpc", "api_rpccluster_bind", api_rpccluster_bind, methods=["PUT"])
     app.add_url_rule("/api/v1/rpccluster/llama/<int:llama_id>/bind-rpc/<int:rpc_id>", "api_rpccluster_unbind", api_rpccluster_unbind, methods=["DELETE"])
     app.add_url_rule("/api/v1/rpccluster/summary", "api_rpccluster_summary", api_rpccluster_summary, methods=["GET"])
+    # ── BINARY-DL: Engine Binary Templates ────────────────────────────
+    app.add_url_rule("/api/v1/engine_binaries", "api_list_binaries", api_list_binaries, methods=["GET"])
+    app.add_url_rule("/api/v1/engine_binaries", "api_create_binary", api_create_binary, methods=["POST"])
+    app.add_url_rule("/api/v1/engine_binaries/<int:binary_id>", "api_get_binary", api_get_binary, methods=["GET"])
+    app.add_url_rule("/api/v1/engine_binaries/<int:binary_id>", "api_update_binary", api_update_binary, methods=["PUT"])
+    app.add_url_rule("/api/v1/engine_binaries/<int:binary_id>", "api_delete_binary", api_delete_binary, methods=["DELETE"])
+    app.add_url_rule("/api/v1/engine_binaries/by_engine/<engine_type_name>", "api_list_binaries_by_engine", api_list_binaries_by_engine, methods=["GET"])
     app.add_url_rule("/api/v1/system-engines", "api_list_system_engines", api_list_system_engines, methods=["GET"])
     app.add_url_rule("/api/v1/webui/settings", "api_get_webui_settings", api_get_webui_settings, methods=["GET"])
     app.add_url_rule("/api/v1/webui/settings", "api_set_webui_settings", api_set_webui_settings, methods=["POST"])

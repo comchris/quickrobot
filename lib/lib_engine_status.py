@@ -43,6 +43,15 @@ See also: engine/llama_server/__init__.py (527 lines), engine/llama_rpc/__init__
 (484 lines) — all now delegate to this module.
 """
 
+from lib.qr_engine_ids import (
+    QR_STATE_COMPILING,
+    QR_STATE_CONFIGURING,
+    QR_STATE_DEPLOYING,
+    QR_STATE_STARTING,
+    QR_STATE_STOPPING,
+    QR_STATE_UPDATING,
+)
+
 
 def build_instance_status(engine_cls, db_path, instance_id):
     """Build STATUS-1 response dict for an engine instance.
@@ -69,7 +78,7 @@ def build_instance_status(engine_cls, db_path, instance_id):
     with pool(db_path) as conn:
         inst = conn.execute(
             """SELECT i.id, i.name, i.state, i.port_assigned,
-                      i.node_id,
+                      i.node_id, i.build_number,
                       e.name as engine_type_name,
                       n.hostname as node_hostname
                FROM instances i
@@ -85,6 +94,7 @@ def build_instance_status(engine_cls, db_path, instance_id):
     engine_data = {
         "port_assigned": inst["port_assigned"],
         "node_hostname": inst["node_hostname"],
+        "build_number": inst["build_number"] if inst["build_number"] else None,
     }
 
     # Build available actions from engine-specific state machine
@@ -98,7 +108,8 @@ def build_instance_status(engine_cls, db_path, instance_id):
 
     # Default transitioning states — subclasses override via _TRANSITIONING_STATES
     transitioning_states = getattr(engine_cls, "_TRANSITIONING_STATES", (
-        "configuring", "deploying", "updating", "compiling", "starting", "stopping"
+        QR_STATE_CONFIGURING, QR_STATE_DEPLOYING, QR_STATE_UPDATING,
+        QR_STATE_COMPILING, QR_STATE_STARTING, QR_STATE_STOPPING,
     ))
     is_transitioning = inst["state"] in transitioning_states
 
@@ -121,8 +132,9 @@ class EngineStatusHelper:
 
     Usage in engine classes:
         class LlamaServerEngine(BaseEngine, EngineStatusHelper):
-            _TRANSITIONING_STATES = ("configuring", "deploying", "updating",
-                                     "compiling", "starting", "stopping")
+            _TRANSITIONING_STATES = (QR_STATE_CONFIGURING, QR_STATE_DEPLOYING,
+                                     QR_STATE_UPDATING, QR_STATE_COMPILING,
+                                     QR_STATE_STARTING, QR_STATE_STOPPING)
 
             @classmethod
             def get_instance_status(cls, db_path, instance_id):

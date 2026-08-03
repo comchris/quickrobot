@@ -92,6 +92,7 @@ def api_set_node_host_status(node_id):
     return error_response("VALIDATION_ERROR", "Request must include is_active or ping_state")
 
 
+
 def api_reset_node_build_state(node_id):
     """Reset a node's build state to idle (used when stale 'compiling' blocks new builds)."""
     from db.adapters.nodes import get_node as _gn

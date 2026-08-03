@@ -166,19 +166,19 @@ def run_health_cycle(db_path, runner, hc_logging=True):
         node_id = row["node_id"]
         is_local = (node_id == 1) or (engine_type_id in _LOCAL_ENGINE_TYPES)
 
-        # Check if instance already has a running task — skip if yes
+        # Check if instance already has an active task (running or queued) — skip if yes
         try:
             with pool(db_path) as conn2:
-                has_running = conn2.execute(
-                    "SELECT 1 FROM log_entries WHERE instance_id=? AND status='running' LIMIT 1",
+                has_active = conn2.execute(
+                    "SELECT 1 FROM log_entries WHERE instance_id=? AND status IN ('running','queued') AND job_type='health_check' LIMIT 1",
                     (instance_id,),
                 ).fetchone() is not None
         except Exception as exc:
-            logger.warning("[qr-scheduler] Health cycle: failed to check running tasks for inst=%d: %s", instance_id, exc)
+            logger.warning("[qr-scheduler] Health cycle: failed to check active tasks for inst=%d: %s", instance_id, exc)
             result["errors"] += 1
             continue
 
-        if has_running:
+        if has_active:
             result["skipped_no_running_task"] += 1
             continue
 
